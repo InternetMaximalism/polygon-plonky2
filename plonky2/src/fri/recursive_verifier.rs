@@ -52,7 +52,27 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             arity_bits,
             self.config.max_quotient_degree_factor,
         );
-        self.interpolate_coset(interpolation_gate, coset_start, &evals, beta)
+        if self.config.use_interpolation_gate {
+            self.interpolate_coset(interpolation_gate, coset_start, &evals, beta)
+        } else {
+            // Only 2-arity interpolation is supported.
+            assert_eq!(arity, 2);
+            let mut points = vec![];
+            points.push((self.convert_to_ext(coset_start), evals[0]));
+            let coset_end = self.mul_const(g, coset_start);
+            points.push((self.convert_to_ext(coset_end), evals[1]));
+
+            let (a0, a1) = points[0];
+            let (b0, b1) = points[1];
+
+            // The polynomial f with the smallest degree satisfying f(a0) = a1 and f(b0) = b1 is
+            // f(x) = a1 + (x - a0) * (b1 - a1) / (b0 - a0)
+            let x_minus_a0 = self.sub_extension(beta, a0);
+            let b1_minus_a1 = self.sub_extension(b1, a1);
+            let numerator = self.mul_extension(x_minus_a0, b1_minus_a1);
+            let denominator = self.sub_extension(b0, a0);
+            self.div_add_extension(numerator, denominator, a1)
+        }
     }
 
     /// Make sure we have enough wires and routed wires to do the FRI checks efficiently. This check
