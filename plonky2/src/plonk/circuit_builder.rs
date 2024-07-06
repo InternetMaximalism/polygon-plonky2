@@ -1077,7 +1077,10 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
         // Execute all hooks
         let hooks = take(&mut self.hooks);
-        for (_, hook) in hooks {
+        let mut hook_keys = hooks.keys().cloned().collect::<Vec<_>>();
+        hook_keys.sort(); // Sort the keys to ensure deterministic order.
+        for key in hook_keys {
+            let hook = hooks.get(&key).unwrap();
             hook.0.constrain(&mut self);
         }
 
