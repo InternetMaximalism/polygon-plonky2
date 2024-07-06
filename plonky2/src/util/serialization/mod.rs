@@ -660,7 +660,6 @@ pub trait Read {
         let num_challenges = self.read_usize()?;
         let max_quotient_degree_factor = self.read_usize()?;
         let use_base_arithmetic_gate = self.read_bool()?;
-        let use_interpolation_gate = self.read_bool()?;
         let zero_knowledge = self.read_bool()?;
         let fri_config = self.read_fri_config()?;
 
@@ -672,7 +671,6 @@ pub trait Read {
             num_challenges,
             max_quotient_degree_factor,
             use_base_arithmetic_gate,
-            use_interpolation_gate,
             zero_knowledge,
             fri_config,
         })
@@ -1697,7 +1695,6 @@ pub trait Write {
             num_challenges,
             max_quotient_degree_factor,
             use_base_arithmetic_gate,
-            use_interpolation_gate,
             zero_knowledge,
             fri_config,
         } = config;
@@ -1709,7 +1706,6 @@ pub trait Write {
         self.write_usize(*num_challenges)?;
         self.write_usize(*max_quotient_degree_factor)?;
         self.write_bool(*use_base_arithmetic_gate)?;
-        self.write_bool(*use_interpolation_gate)?;
         self.write_bool(*zero_knowledge)?;
         self.write_fri_config(fri_config)?;
 
