@@ -20,9 +20,27 @@ const EPSILON: u64 = (1 << 32) - 1;
 ///   = 2**64 - 2**32 + 1
 ///   = 2**32 * (2**32 - 1) + 1
 /// ```
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct GoldilocksField(pub u64);
+
+impl Serialize for GoldilocksField {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_canonical_u64().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GoldilocksField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let x = u64::deserialize(deserializer)?;
+        let x_mod = GoldilocksField::from_canonical_u64(x).to_canonical_u64();
+        assert_eq!(x, x_mod);
+        Ok(Self(x))
+    }
+}
 
 impl Default for GoldilocksField {
     fn default() -> Self {
