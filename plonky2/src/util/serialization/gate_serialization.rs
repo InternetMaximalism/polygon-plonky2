@@ -79,7 +79,7 @@ macro_rules! impl_gate_serializer {
 
         fn write_gate(
             &self,
-            buf: &mut $crate::util::serialization::gate_serialization::Vec<u8>,
+            buf: &mut Vec<u8>,
             gate: &$crate::gates::gate::GateRef<F, D>,
             common: &$crate::plonk::circuit_data::CommonCircuitData<F, D>,
         ) -> $crate::util::serialization::IoResult<()> {
