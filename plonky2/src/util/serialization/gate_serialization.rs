@@ -93,6 +93,9 @@ macro_rules! impl_gate_serializer {
 }
 
 pub mod default {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+
     use plonky2_field::extension::Extendable;
 
     use crate::gates::arithmetic_base::ArithmeticGate;
