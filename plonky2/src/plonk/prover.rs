@@ -46,7 +46,7 @@ pub fn set_lookup_wires<
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
     pw: &mut PartitionWitness<F>,
-) {
+) -> Result<()> {
     for (
         lut_index,
         &LookupWire {
@@ -88,13 +88,12 @@ pub fn set_lookup_wires<
                 Target::wire(last_lut_gate - 1, LookupGate::wire_ith_looking_inp(slot));
             let out_target =
                 Target::wire(last_lut_gate - 1, LookupGate::wire_ith_looking_out(slot));
-            pw.set_target(inp_target, F::from_canonical_u16(first_inp_value));
-            pw.set_target(out_target, F::from_canonical_u16(first_out_value));
+            pw.set_target(inp_target, F::from_canonical_u16(first_inp_value))?;
+            pw.set_target(out_target, F::from_canonical_u16(first_out_value))?;
 
             multiplicities[0] += 1;
         }
 
-        // We don't need to pad the last `LookupTableGate`; extra wires are set to 0 by default, which satisfies the constraints.
         for lut_entry in 0..lut_len {
             let row = first_lut_gate - lut_entry / num_lut_entries;
             let col = lut_entry % num_lut_entries;
@@ -104,9 +103,11 @@ pub fn set_lookup_wires<
             pw.set_target(
                 mul_target,
                 F::from_canonical_usize(multiplicities[lut_entry]),
-            );
+            )?;
         }
     }
+
+    Ok(())
 }
 
 pub fn prove<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
@@ -122,7 +123,7 @@ where
     let partition_witness = timed!(
         timing,
         &format!("run {} generators", prover_data.generators.len()),
-        generate_partial_witness(inputs, prover_data, common_data)
+        generate_partial_witness(inputs, prover_data, common_data)?
     );
 
     prove_with_partition_witness(prover_data, common_data, partition_witness, timing)
@@ -148,7 +149,7 @@ where
     let quotient_degree = common_data.quotient_degree();
     let degree = common_data.degree();
 
-    set_lookup_wires(prover_data, common_data, &mut partition_witness);
+    set_lookup_wires(prover_data, common_data, &mut partition_witness)?;
 
     let public_inputs = partition_witness.get_targets(&prover_data.public_inputs);
     let public_inputs_hash = C::InnerHasher::hash_no_pad(&public_inputs);
@@ -183,6 +184,9 @@ where
     );
 
     let mut challenger = Challenger::<F, C::Hasher>::new();
+
+    // Observe the FRI config
+    common_data.fri_params.observe(&mut challenger);
 
     // Observe the instance.
     challenger.observe_hash::<C::Hasher>(prover_data.circuit_digest);
@@ -338,6 +342,8 @@ where
             ],
             &mut challenger,
             &common_data.fri_params,
+            None,
+            None,
             timing,
         )
     );

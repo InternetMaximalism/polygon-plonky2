@@ -2,6 +2,8 @@
 use alloc::{format, string::String, vec, vec::Vec};
 use core::ops::Range;
 
+use anyhow::Result;
+
 use crate::field::extension::Extendable;
 use crate::field::packed::PackedField;
 use crate::field::types::{Field, Field64};
@@ -185,12 +187,16 @@ impl<F: RichField + Extendable<D>, const B: usize, const D: usize> SimpleGenerat
         vec![Target::wire(self.row, BaseSumGate::<B>::WIRE_SUM)]
     }
 
-    fn run_once(&self, witness: &PartitionWitness<F>, out_buffer: &mut GeneratedValues<F>) {
+    fn run_once(
+        &self,
+        witness: &PartitionWitness<F>,
+        out_buffer: &mut GeneratedValues<F>,
+    ) -> Result<()> {
         let sum_value = witness
             .get_target(Target::wire(self.row, BaseSumGate::<B>::WIRE_SUM))
-            .to_canonical_u64() as usize;
+            .to_canonical_u64();
         debug_assert_eq!(
-            (0..self.num_limbs).fold(sum_value, |acc, _| acc / B),
+            (0..self.num_limbs).fold(sum_value, |acc, _| acc / (B as u64)),
             0,
             "Integer too large to fit in given number of limbs"
         );
@@ -199,15 +205,17 @@ impl<F: RichField + Extendable<D>, const B: usize, const D: usize> SimpleGenerat
             .map(|i| Target::wire(self.row, i));
         let limbs_value = (0..self.num_limbs)
             .scan(sum_value, |acc, _| {
-                let tmp = *acc % B;
-                *acc /= B;
-                Some(F::from_canonical_usize(tmp))
+                let tmp = *acc % (B as u64);
+                *acc /= B as u64;
+                Some(F::from_canonical_u64(tmp))
             })
             .collect::<Vec<_>>();
 
         for (b, b_value) in limbs.zip(limbs_value) {
-            out_buffer.set_target(b, b_value);
+            out_buffer.set_target(b, b_value)?;
         }
+
+        Ok(())
     }
 
     fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {

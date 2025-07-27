@@ -6,6 +6,8 @@ use alloc::{
 };
 use core::borrow::Borrow;
 
+use anyhow::Result;
+
 use crate::field::extension::{Extendable, FieldExtension, OEF};
 use crate::field::types::{Field, Field64};
 use crate::gates::arithmetic_extension::ArithmeticExtensionGate;
@@ -13,7 +15,7 @@ use crate::gates::multiplication_extension::MulExtensionGate;
 use crate::hash::hash_types::RichField;
 use crate::iop::ext_target::{ExtensionAlgebraTarget, ExtensionTarget};
 use crate::iop::generator::{GeneratedValues, SimpleGenerator};
-use crate::iop::target::Target;
+use crate::iop::target::{BoolTarget, Target};
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::circuit_data::CommonCircuitData;
@@ -419,6 +421,21 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         self.scalar_mul_add_ext_algebra(a, b, zero)
     }
 
+    /// Exponentiates `base` to the power of exponent expressed as `exponent_bits`.
+    pub fn exp_extension_from_bits(
+        &mut self,
+        mut base: ExtensionTarget<D>,
+        exponent_bits: &[BoolTarget],
+    ) -> ExtensionTarget<D> {
+        let mut res = self.one_extension();
+        for i in 0..exponent_bits.len() {
+            let new_res = self.mul_extension(res, base);
+            res = self.select_ext(exponent_bits[i], new_res, res);
+            base = self.mul_extension(base, base);
+        }
+        res
+    }
+
     /// Exponentiate `base` to the power of `2^power_log`.
     // TODO: Test
     pub fn exp_power_of_2_extension(
@@ -453,7 +470,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             if j != 0 {
                 current = self.square_extension(current);
             }
-            if (exponent >> j & 1) != 0 {
+            if ((exponent >> j) & 1) != 0 {
                 product = self.mul_extension(product, current);
             }
         }
@@ -519,7 +536,11 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
         deps
     }
 
-    fn run_once(&self, witness: &PartitionWitness<F>, out_buffer: &mut GeneratedValues<F>) {
+    fn run_once(
+        &self,
+        witness: &PartitionWitness<F>,
+        out_buffer: &mut GeneratedValues<F>,
+    ) -> Result<()> {
         let num = witness.get_extension_target(self.numerator);
         let dem = witness.get_extension_target(self.denominator);
         let quotient = num / dem;
@@ -621,7 +642,7 @@ mod tests {
         let vs = FF::rand_vec(3);
         let ts = builder.add_virtual_extension_targets(3);
         for (&v, &t) in vs.iter().zip(&ts) {
-            pw.set_extension_target(t, v);
+            pw.set_extension_target(t, v)?;
         }
         let mul0 = builder.mul_many_extension(&ts);
         let mul1 = {
@@ -696,9 +717,9 @@ mod tests {
         let y = ExtensionAlgebra::<FF, D>(FF::rand_array());
         let z = x * y;
         for i in 0..D {
-            pw.set_extension_target(xt.0[i], x.0[i]);
-            pw.set_extension_target(yt.0[i], y.0[i]);
-            pw.set_extension_target(zt.0[i], z.0[i]);
+            pw.set_extension_target(xt.0[i], x.0[i])?;
+            pw.set_extension_target(yt.0[i], y.0[i])?;
+            pw.set_extension_target(zt.0[i], z.0[i])?;
         }
 
         let data = builder.build::<C>();

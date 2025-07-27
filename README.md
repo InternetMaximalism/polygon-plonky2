@@ -3,6 +3,11 @@
 
 This repository was originally for Plonky2, a SNARK implementation based on techniques from PLONK and FRI. It has since expanded to include tools such as Starky, a highly performant STARK implementation.
 
+## ⚠️ Plonky2 Deprecation Notice
+
+Plonky2 is being deprecated and will no longer receive updates or support.
+
+Please consider using **[Plonky3](https://github.com/Plonky3/Plonky3)** instead, Polygon's next-generation ZK proving system.
 
 ## Documentation
 
@@ -60,6 +65,14 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 Jemalloc is known to cause crashes when a binary compiled for x86 is run on an Apple silicon-based Mac under [Rosetta 2](https://support.apple.com/en-us/HT211861). If you are experiencing crashes on your Apple silicon Mac, run `rustc --print target-libdir`. The output should contain `aarch64-apple-darwin`. If the output contains `x86_64-apple-darwin`, then you are running the Rust toolchain for x86; we recommend switching to the native ARM version.
 
+## Documentation
+
+Generate documentation locally:
+
+```sh
+cargo doc --no-deps --open
+```
+
 ## Contributing guidelines
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
@@ -76,7 +89,10 @@ at your option.
 
 ## Security
 
-This code has not yet been audited, and should not be used in any production systems.
+This code has been audited prior to the `v1.0.0` release. The audits reports and findings are available in the [audits](./audits/) folder of this repository.
+An audited codebase isn't necessarily free of bugs and security exploits, hence we recommend care when using `plonky2` in production settings.
+
+If you find a security issue in the codebase, please refer to our [Security guidelines](./SECURITY.md) for private disclosure.
 
 While Plonky2 is configurable, its defaults generally target 100 bits of security. The default FRI configuration targets 100 bits of *conjectured* security based on the conjecture in [ethSTARK](https://eprint.iacr.org/2021/582).
 
@@ -85,12 +101,7 @@ Plonky2's default hash function is Poseidon, configured with 8 full rounds, 22 p
 
 ## Links
 
-#### Actively maintained
-
 - [Polygon Zero's zkEVM](https://github.com/0xPolygonZero/zk_evm), an efficient Type 1 zkEVM built on top of Starky and plonky2
-
-#### No longer maintained
-
 - [System Zero](https://github.com/0xPolygonZero/system-zero), a zkVM built on top of Starky
 - [Waksman](https://github.com/0xPolygonZero/plonky2-waksman), Plonky2 gadgets for permutation checking using Waksman networks
 - [Insertion](https://github.com/0xPolygonZero/plonky2-insertion), Plonky2 gadgets for insertion into a list

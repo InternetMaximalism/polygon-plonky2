@@ -130,7 +130,7 @@ impl<'a, P: PackedField> PackedStridedView<'a, P> {
     }
 }
 
-impl<'a, P: PackedField> Index<usize> for PackedStridedView<'a, P> {
+impl<P: PackedField> Index<usize> for PackedStridedView<'_, P> {
     type Output = P;
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
@@ -182,7 +182,7 @@ pub struct PackedStridedViewIter<'a, P: PackedField> {
     _phantom: PhantomData<&'a [P::Scalar]>,
 }
 
-impl<'a, P: PackedField> PackedStridedViewIter<'a, P> {
+impl<P: PackedField> PackedStridedViewIter<'_, P> {
     pub(self) const fn new(start: *const P::Scalar, end: *const P::Scalar, stride: usize) -> Self {
         Self {
             start,
@@ -203,7 +203,7 @@ impl<'a, P: PackedField> Iterator for PackedStridedViewIter<'a, P> {
             "start and end pointers should be separated by a multiple of stride"
         );
 
-        if self.start != self.end {
+        if !core::ptr::eq(self.start, self.end) {
             let res = unsafe { &*self.start.cast() };
             // See comment in `PackedStridedView`. Below will point more than one byte past the end
             // of the buffer if the offset is not 0 and we've reached the end.
@@ -215,7 +215,7 @@ impl<'a, P: PackedField> Iterator for PackedStridedViewIter<'a, P> {
     }
 }
 
-impl<'a, P: PackedField> DoubleEndedIterator for PackedStridedViewIter<'a, P> {
+impl<P: PackedField> DoubleEndedIterator for PackedStridedViewIter<'_, P> {
     fn next_back(&mut self) -> Option<Self::Item> {
         debug_assert_eq!(
             (self.end as usize).wrapping_sub(self.start as usize)
@@ -224,7 +224,7 @@ impl<'a, P: PackedField> DoubleEndedIterator for PackedStridedViewIter<'a, P> {
             "start and end pointers should be separated by a multiple of stride"
         );
 
-        if self.start != self.end {
+        if !core::ptr::eq(self.start, self.end) {
             // See comment in `PackedStridedView`. `self.end` starts off pointing more than one byte
             // past the end of the buffer unless `offset` is 0.
             self.end = self.end.wrapping_sub(self.stride);
@@ -241,7 +241,7 @@ pub trait Viewable<F> {
     fn view(&self, index: F) -> Self::View;
 }
 
-impl<'a, P: PackedField> Viewable<Range<usize>> for PackedStridedView<'a, P> {
+impl<P: PackedField> Viewable<Range<usize>> for PackedStridedView<'_, P> {
     type View = Self;
     fn view(&self, range: Range<usize>) -> Self::View {
         assert!(range.start <= self.len(), "Invalid access");
@@ -257,7 +257,7 @@ impl<'a, P: PackedField> Viewable<Range<usize>> for PackedStridedView<'a, P> {
     }
 }
 
-impl<'a, P: PackedField> Viewable<RangeFrom<usize>> for PackedStridedView<'a, P> {
+impl<P: PackedField> Viewable<RangeFrom<usize>> for PackedStridedView<'_, P> {
     type View = Self;
     fn view(&self, range: RangeFrom<usize>) -> Self::View {
         assert!(range.start <= self.len(), "Invalid access");
@@ -272,14 +272,14 @@ impl<'a, P: PackedField> Viewable<RangeFrom<usize>> for PackedStridedView<'a, P>
     }
 }
 
-impl<'a, P: PackedField> Viewable<RangeFull> for PackedStridedView<'a, P> {
+impl<P: PackedField> Viewable<RangeFull> for PackedStridedView<'_, P> {
     type View = Self;
     fn view(&self, _range: RangeFull) -> Self::View {
         *self
     }
 }
 
-impl<'a, P: PackedField> Viewable<RangeInclusive<usize>> for PackedStridedView<'a, P> {
+impl<P: PackedField> Viewable<RangeInclusive<usize>> for PackedStridedView<'_, P> {
     type View = Self;
     fn view(&self, range: RangeInclusive<usize>) -> Self::View {
         assert!(*range.start() <= self.len(), "Invalid access");
@@ -295,7 +295,7 @@ impl<'a, P: PackedField> Viewable<RangeInclusive<usize>> for PackedStridedView<'
     }
 }
 
-impl<'a, P: PackedField> Viewable<RangeTo<usize>> for PackedStridedView<'a, P> {
+impl<P: PackedField> Viewable<RangeTo<usize>> for PackedStridedView<'_, P> {
     type View = Self;
     fn view(&self, range: RangeTo<usize>) -> Self::View {
         assert!(range.end <= self.len(), "Invalid access");
@@ -308,7 +308,7 @@ impl<'a, P: PackedField> Viewable<RangeTo<usize>> for PackedStridedView<'a, P> {
     }
 }
 
-impl<'a, P: PackedField> Viewable<RangeToInclusive<usize>> for PackedStridedView<'a, P> {
+impl<P: PackedField> Viewable<RangeToInclusive<usize>> for PackedStridedView<'_, P> {
     type View = Self;
     fn view(&self, range: RangeToInclusive<usize>) -> Self::View {
         assert!(range.end < self.len(), "Invalid access");
