@@ -20,6 +20,7 @@ use plonky2::hash::hash_types::RichField;
 use plonky2::iop::challenger::Challenger;
 use plonky2::plonk::config::GenericConfig;
 use plonky2::timed;
+use plonky2::util::profiling::with_timer;
 use plonky2::util::timing::TimingTree;
 use plonky2::util::{log2_ceil, log2_strict, transpose};
 use plonky2_maybe_rayon::*;
@@ -37,6 +38,7 @@ use crate::stark::Stark;
 use crate::vanishing_poly::{compute_eval_vanishing_poly, eval_vanishing_poly};
 
 /// From a STARK trace, computes a STARK proof to attest its correctness.
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove<F, C, S, const D: usize>(
     stark: S,
     config: &StarkConfig,
@@ -113,6 +115,86 @@ where
     )
 }
 
+/// Synchronous proving is unsupported on `wasm32` with `gpu_merkle`; call [`prove_async`] instead.
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+pub fn prove<F, C, S, const D: usize>(
+    _stark: S,
+    _config: &StarkConfig,
+    _trace_poly_values: Vec<PolynomialValues<F>>,
+    _public_inputs: &[F],
+    _timing: &mut TimingTree,
+) -> Result<StarkProofWithPublicInputs<F, C, D>>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    S: Stark<F, D>,
+{
+    panic!("Stark prover must be awaited on wasm with gpu_merkle enabled; use prove_async instead");
+}
+
+/// WASM-friendly async variant of [`prove`] that uses GPU Merkle builders when available.
+pub async fn prove_async<F, C, S, const D: usize>(
+    stark: S,
+    config: &StarkConfig,
+    trace_poly_values: Vec<PolynomialValues<F>>,
+    public_inputs: &[F],
+    timing: &mut TimingTree,
+) -> Result<StarkProofWithPublicInputs<F, C, D>>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    S: Stark<F, D>,
+{
+    #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+    {
+        return prove::<F, C, S, D>(stark, config, trace_poly_values, public_inputs, timing);
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    {
+        let degree = trace_poly_values[0].len();
+        let degree_bits = log2_strict(degree);
+        let fri_params = config.fri_params(degree_bits);
+        let rate_bits = config.fri_config.rate_bits;
+        let cap_height = config.fri_config.cap_height;
+        assert!(
+            fri_params.total_arities() <= degree_bits + rate_bits - cap_height,
+            "FRI total reduction arity is too large.",
+        );
+
+        let trace_commitment = timed!(
+            timing,
+            "compute trace commitment",
+            PolynomialBatch::<F, C, D>::from_values_async(
+                trace_poly_values.clone(),
+                rate_bits,
+                false,
+                cap_height,
+                timing,
+                None,
+            )
+            .await
+        );
+
+        let trace_cap = trace_commitment.merkle_tree.cap.clone();
+        let mut challenger = Challenger::new();
+        challenger.observe_cap(&trace_cap);
+
+        prove_with_commitment_async(
+            &stark,
+            config,
+            &trace_poly_values,
+            &trace_commitment,
+            None,
+            None,
+            &mut challenger,
+            public_inputs,
+            timing,
+        )
+        .await
+    }
+}
+
 /// Generates a proof for a single STARK table, including:
 ///
 /// - the initial state of the challenger,
@@ -122,6 +204,7 @@ where
 ///   of a multi-STARK system.
 ///
 /// /!\ Note that this method does not observe the `config`, and it assumes the `config` has already been observed.
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove_with_commitment<F, C, S, const D: usize>(
     stark: &S,
     config: &StarkConfig,
@@ -483,6 +566,293 @@ where
     })
 }
 
+/// Synchronous proving with precomputed commitments is unsupported on `wasm32` with `gpu_merkle`; call [`prove_with_commitment_async`] instead.
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+#[track_caller]
+pub fn prove_with_commitment<F, C, S, const D: usize>(
+    _stark: &S,
+    _config: &StarkConfig,
+    _trace_poly_values: &[PolynomialValues<F>],
+    _trace_commitment: &PolynomialBatch<F, C, D>,
+    _ctl_data: Option<&CtlData<F>>,
+    _ctl_challenges: Option<&GrandProductChallengeSet<F>>,
+    _challenger: &mut Challenger<F, C::Hasher>,
+    _public_inputs: &[F],
+    _timing: &mut TimingTree,
+) -> Result<StarkProofWithPublicInputs<F, C, D>>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    S: Stark<F, D>,
+{
+    #[cfg(feature = "std")]
+    {
+        use std::backtrace::Backtrace;
+        let bt = Backtrace::force_capture();
+        let caller = core::panic::Location::caller();
+        log::error!(
+            "Unexpected call to starky::prover::prove_with_commitment on wasm32+gpu_merkle from {}:{}.\nBacktrace:\n{bt}",
+            caller.file(),
+            caller.line()
+        );
+    }
+    panic!("Stark prover must be awaited on wasm with gpu_merkle enabled; use prove_with_commitment_async instead");
+}
+
+/// WASM-friendly async variant of [`prove_with_commitment`] that awaits GPU commits.
+pub async fn prove_with_commitment_async<'a, F, C, S, const D: usize>(
+    stark: &'a S,
+    config: &'a StarkConfig,
+    trace_poly_values: &'a [PolynomialValues<F>],
+    trace_commitment: &'a PolynomialBatch<F, C, D>,
+    ctl_data: Option<&'a CtlData<'a, F>>,
+    ctl_challenges: Option<&'a GrandProductChallengeSet<F>>,
+    challenger: &'a mut Challenger<F, C::Hasher>,
+    public_inputs: &'a [F],
+    timing: &'a mut TimingTree,
+) -> Result<StarkProofWithPublicInputs<F, C, D>>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    S: Stark<F, D>,
+{
+    #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+    {
+        return prove_with_commitment(
+            stark,
+            config,
+            trace_poly_values,
+            trace_commitment,
+            ctl_data,
+            ctl_challenges,
+            challenger,
+            public_inputs,
+            timing,
+        );
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    {
+        let degree = trace_poly_values[0].len();
+        let degree_bits = log2_strict(degree);
+        let fri_params = config.fri_params(degree_bits);
+        let rate_bits = config.fri_config.rate_bits;
+        let cap_height = config.fri_config.cap_height;
+        assert!(
+            fri_params.total_arities() <= degree_bits + rate_bits - cap_height,
+            "FRI total reduction arity is too large.",
+        );
+
+        let constraint_degree = stark.constraint_degree();
+        assert!(
+            constraint_degree <= (1 << rate_bits) + 1,
+            "The degree of the Stark constraints must be <= blowup_factor + 1"
+        );
+
+        let lookup_challenges = stark.uses_lookups().then(|| {
+            if let Some(c) = ctl_challenges {
+                c.challenges.iter().map(|ch| ch.beta).collect::<Vec<_>>()
+            } else {
+                get_grand_product_challenge_set(challenger, config.num_challenges)
+                    .challenges
+                    .iter()
+                    .map(|ch| ch.beta)
+                    .collect::<Vec<_>>()
+            }
+        });
+
+        let lookups = stark.lookups();
+        let lookup_helper_columns = timed!(
+            timing,
+            "compute lookup helper columns",
+            lookup_challenges.as_ref().map(|challenges| {
+                let mut columns = Vec::new();
+                for lookup in &lookups {
+                    for &challenge in challenges {
+                        columns.extend(lookup_helper_columns(
+                            lookup,
+                            trace_poly_values,
+                            challenge,
+                            constraint_degree,
+                        ));
+                    }
+                }
+                columns
+            })
+        );
+        let num_lookup_columns = lookup_helper_columns.as_ref().map_or(0, |v| v.len());
+
+        let auxiliary_polys = match lookup_helper_columns {
+            None => get_ctl_auxiliary_polys(ctl_data),
+            Some(mut lookup_columns) => {
+                if let Some(p) = get_ctl_auxiliary_polys(ctl_data) {
+                    lookup_columns.extend(p)
+                };
+
+                Some(lookup_columns)
+            }
+        };
+
+        debug_assert!(
+            (stark.uses_lookups() || stark.requires_ctls()) || auxiliary_polys.is_none(),
+            "There should be auxiliary polynomials if and only if we have either lookups or require cross-table lookups."
+        );
+
+        let auxiliary_polys_commitment = if let Some(aux_polys) = auxiliary_polys {
+            Some(timed!(
+                timing,
+                "compute auxiliary polynomials commitment",
+                PolynomialBatch::from_values_async(
+                    aux_polys,
+                    rate_bits,
+                    false,
+                    config.fri_config.cap_height,
+                    timing,
+                    None,
+                )
+                .await
+            ))
+        } else {
+            None
+        };
+
+        let auxiliary_polys_cap = auxiliary_polys_commitment
+            .as_ref()
+            .map(|commit| commit.merkle_tree.cap.clone());
+        if let Some(cap) = &auxiliary_polys_cap {
+            challenger.observe_cap(cap);
+        }
+
+        let alphas = challenger.get_n_challenges(config.num_challenges);
+
+        let num_ctl_polys = ctl_data
+            .map(|data| data.num_ctl_helper_polys())
+            .unwrap_or_default();
+
+        #[cfg(debug_assertions)]
+        {
+            check_constraints(
+                stark,
+                trace_commitment,
+                public_inputs,
+                &auxiliary_polys_commitment,
+                lookup_challenges.as_ref(),
+                &lookups,
+                ctl_data,
+                alphas.clone(),
+                degree_bits,
+                num_lookup_columns,
+                &num_ctl_polys,
+            );
+        }
+
+        let quotient_polys = timed!(
+            timing,
+            "compute quotient polys",
+            compute_quotient_polys::<F, <F as Packable>::Packing, C, S, D>(
+                stark,
+                trace_commitment,
+                &auxiliary_polys_commitment,
+                lookup_challenges.as_ref(),
+                &lookups,
+                ctl_data,
+                public_inputs,
+                alphas.clone(),
+                degree_bits,
+                num_lookup_columns,
+                &num_ctl_polys,
+                config,
+            )
+        );
+        let (quotient_commitment, quotient_polys_cap) = if let Some(quotient_polys) = quotient_polys
+        {
+            let all_quotient_chunks = timed!(
+                    timing,
+                    "split quotient polys",
+                    quotient_polys
+                        .into_par_iter()
+                        .flat_map(|mut quotient_poly| {
+                            quotient_poly
+                                .trim_to_len(degree * stark.quotient_degree_factor())
+                                .expect(
+                                    "Quotient has failed, the vanishing polynomial is not divisible by Z_H",
+                                );
+                            quotient_poly.chunks(degree)
+                        })
+                        .collect()
+                );
+            let quotient_commitment = timed!(
+                timing,
+                "compute quotient commitment",
+                PolynomialBatch::from_coeffs_async(
+                    all_quotient_chunks,
+                    rate_bits,
+                    false,
+                    config.fri_config.cap_height,
+                    timing,
+                    None,
+                )
+                .await
+            );
+            let quotient_polys_cap = quotient_commitment.merkle_tree.cap.clone();
+            challenger.observe_cap(&quotient_polys_cap);
+            (Some(quotient_commitment), Some(quotient_polys_cap))
+        } else {
+            (None, None)
+        };
+
+        let zeta = challenger.get_extension_challenge::<D>();
+        let g = F::primitive_root_of_unity(degree_bits);
+        ensure!(
+            zeta.exp_power_of_2(degree_bits) != F::Extension::ONE,
+            "Opening point is in the subgroup."
+        );
+
+        let openings = StarkOpeningSet::new(
+            zeta,
+            g,
+            trace_commitment,
+            auxiliary_polys_commitment.as_ref(),
+            quotient_commitment.as_ref(),
+            stark.num_lookup_helper_columns(config),
+            stark.requires_ctls(),
+            &num_ctl_polys,
+        );
+        challenger.observe_openings(&openings.to_fri_openings());
+
+        let initial_merkle_trees = once(trace_commitment)
+            .chain(&auxiliary_polys_commitment)
+            .chain(&quotient_commitment)
+            .collect_vec();
+
+        let opening_proof = timed!(
+            timing,
+            "compute openings proof",
+            PolynomialBatch::prove_openings_async(
+                &stark.fri_instance(zeta, g, num_ctl_polys.iter().sum(), num_ctl_polys, config),
+                &initial_merkle_trees,
+                challenger,
+                &fri_params,
+                timing,
+            )
+            .await
+        );
+
+        let proof = StarkProof {
+            trace_cap: trace_commitment.merkle_tree.cap.clone(),
+            auxiliary_polys_cap,
+            quotient_polys_cap,
+            openings,
+            opening_proof,
+        };
+
+        Ok(StarkProofWithPublicInputs {
+            proof,
+            public_inputs: public_inputs.to_vec(),
+        })
+    }
+}
+
 /// Computes the quotient polynomials `(sum alpha^i C_i(x)) / Z_H(x)` for `alpha` in `alphas`,
 /// where the `C_i`s are the STARK constraints.
 fn compute_quotient_polys<'a, F, P, C, S, const D: usize>(
@@ -661,13 +1031,15 @@ where
         })
         .collect::<Vec<_>>();
 
-    Some(
+    let quotient_polys = with_timer("starky quotient coset IFFT", || {
         transpose(&quotient_values)
             .into_par_iter()
             .map(PolynomialValues::new)
             .map(|values| values.coset_ifft(F::coset_shift()))
-            .collect(),
-    )
+            .collect()
+    });
+
+    Some(quotient_polys)
 }
 
 /// Check that all constraints evaluate to zero on `H`.

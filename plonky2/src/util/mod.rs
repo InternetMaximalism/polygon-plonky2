@@ -13,6 +13,7 @@ use crate::field::types::Field;
 pub mod builder_hook;
 pub(crate) mod context_tree;
 pub(crate) mod partial_products;
+pub mod profiling;
 pub mod reducing;
 pub mod serialization;
 pub mod strided_view;

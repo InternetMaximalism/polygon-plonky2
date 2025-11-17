@@ -46,7 +46,7 @@ use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::config::{GenericConfig, Hasher};
 use crate::plonk::plonk_common::PlonkOracle;
 use crate::plonk::proof::{CompressedProofWithPublicInputs, ProofWithPublicInputs};
-use crate::plonk::prover::prove;
+use crate::plonk::prover::{prove, prove_async};
 use crate::plonk::verifier::verify;
 use crate::util::serialization::{
     Buffer, GateSerializer, IoResult, Read, WitnessGeneratorSerializer, Write,
@@ -193,6 +193,19 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
             inputs,
             &mut TimingTree::default(),
         )
+    }
+
+    pub async fn prove_async(
+        &self,
+        inputs: PartialWitness<F>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>> {
+        prove_async::<F, C, D>(
+            &self.prover_only,
+            &self.common,
+            inputs,
+            &mut TimingTree::default(),
+        )
+        .await
     }
 
     pub fn verify(&self, proof_with_pis: ProofWithPublicInputs<F, C, D>) -> Result<()> {

@@ -16,6 +16,7 @@ default = ["parallel", "std", "timing"]
 parallel = ["plonky2/parallel", "plonky2_maybe_rayon/parallel"]
 std = ["anyhow/std", "plonky2/std"]
 timing = ["plonky2/timing"]
+gpu_merkle = []
 
 [dependencies]
 ahash = { workspace = true }

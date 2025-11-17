@@ -1,11 +1,17 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use core::mem;
 use core::mem::MaybeUninit;
 use core::slice;
 
 use plonky2_maybe_rayon::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use super::merkle_tree_gpu;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use crate::hash::hash_types::HashOut;
 use crate::hash::hash_types::RichField;
 use crate::hash::merkle_proofs::MerkleProof;
 use crate::plonk::config::{GenericHashOut, Hasher};
@@ -70,6 +76,44 @@ impl<F: RichField, H: Hasher<F>> Default for MerkleTree<F, H> {
         }
     }
 }
+
+#[cfg(feature = "merkle_debug_print")]
+fn log_merkle_tree_size(num_leaves: usize) {
+    log::info!(
+        "Constructing new Merkle tree on CPU with {} elements",
+        num_leaves
+    );
+}
+
+#[cfg(not(feature = "merkle_debug_print"))]
+fn log_merkle_tree_size(_: usize) {}
+
+#[cfg(feature = "merkle_debug_print")]
+fn log_merkle_tree_size_gpu(num_leaves: usize) {
+    log::info!(
+        "Constructing new Merkle tree on GPU with {} elements",
+        num_leaves
+    );
+}
+
+#[cfg(not(feature = "merkle_debug_print"))]
+fn log_merkle_tree_size_gpu(_: usize) {}
+
+#[cfg(feature = "merkle_debug_print")]
+fn log_merkle_tree_done() {
+    log::info!("--> construction on CPU done!");
+}
+
+#[cfg(not(feature = "merkle_debug_print"))]
+fn log_merkle_tree_done() {}
+
+#[cfg(feature = "merkle_debug_print")]
+fn log_merkle_tree_done_gpu() {
+    log::info!("--> construction on GPU done!");
+}
+
+#[cfg(not(feature = "merkle_debug_print"))]
+fn log_merkle_tree_done_gpu() {}
 
 pub(crate) fn capacity_up_to_mut<T>(v: &mut Vec<T>, len: usize) -> &mut [MaybeUninit<T>] {
     assert!(v.capacity() >= len);
@@ -190,7 +234,9 @@ pub(crate) fn merkle_tree_prove<F: RichField, H: Hasher<F>>(
 }
 
 impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
-    pub fn new(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+    fn build_cpu(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        log_merkle_tree_size(leaves.len());
+
         let log2_leaves_len = log2_strict(leaves.len());
         assert!(
             cap_height <= log2_leaves_len,
@@ -216,11 +262,105 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
             cap.set_len(len_cap);
         }
 
+        log_merkle_tree_done();
+
         Self {
             leaves,
             digests,
             cap: MerkleCap(cap),
         }
+    }
+
+    pub fn new(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        Self::build_cpu(leaves, cap_height)
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    async fn build_gpu(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        log_merkle_tree_size_gpu(leaves.len());
+        let leaf_count = leaves.len();
+        //if leaf_count < 500000 {
+
+        let elems_per_leaf = leaves[0].len();
+        log::info!(
+            "{}",
+            format!(
+                "Leaf count: {}, elems per leaf: {}, cap_height: {}",
+                leaf_count, elems_per_leaf, cap_height
+            )
+        );
+
+        //if leaf_count < 8000 {
+        //if elems_per_leaf > 200 {
+        // NOTE: in `prove_singles` we do *NOT* get a deadlock if we exclude the 4096 leaf Merkle trees.
+        // We *DO* get a deadlock if we ONLY do the Merkle tree with 4096 leaves with 2431 elements per leaf.
+        // We ALSO get a deadlock in a 4096 leaf tree, if we *ONLY* exclude the tree with 2431 elements per leaf.
+        if leaf_count == 4096 {
+            return Self::build_cpu(leaves, cap_height);
+        }
+        let log2_leaves = log2_strict(leaf_count);
+        if cap_height >= log2_leaves {
+            return Self::build_cpu(leaves, cap_height);
+        }
+
+        if leaf_count < 4096 {
+            return Self::build_cpu(leaves, cap_height);
+        }
+        if let Some(result) = merkle_tree_gpu::try_build_merkle_tree::<F>(&leaves, cap_height) {
+            match result {
+                Ok(job) => match job.await_async().await {
+                    Ok(output) => {
+                        log_merkle_tree_done_gpu();
+                        return Self::from_gpu_output(leaves, output);
+                    }
+                    Err(err) => {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "Merkle GPU job failed; falling back to CPU construction: {err}"
+                            )
+                            .into(),
+                        );
+                    }
+                },
+                Err(err) => {
+                    web_sys::console::warn_1(
+                        &format!("Merkle GPU path unavailable; falling back to CPU: {err}").into(),
+                    );
+                }
+            }
+        } else {
+            web_sys::console::warn_1(
+                &format!("WebGPU context not initialized. Falling back to CPU construction!")
+                    .into(),
+            );
+        }
+
+        Self::build_cpu(leaves, cap_height)
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    fn from_gpu_output(leaves: Vec<Vec<F>>, output: merkle_tree_gpu::GpuMerkleOutput<F>) -> Self {
+        let merkle_tree_gpu::GpuMerkleOutput { digests, cap } = output;
+        // SAFETY: HashOut<F> and H::Hash share the same layout when H::Hash = HashOut<F>.
+        let digests: Vec<H::Hash> =
+            unsafe { mem::transmute::<Vec<HashOut<F>>, Vec<H::Hash>>(digests) };
+        let cap_vec: Vec<H::Hash> = unsafe { mem::transmute::<Vec<HashOut<F>>, Vec<H::Hash>>(cap) };
+
+        Self {
+            leaves,
+            digests,
+            cap: MerkleCap(cap_vec),
+        }
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    pub async fn new_async(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        Self::build_gpu(leaves, cap_height).await
+    }
+
+    #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+    pub async fn new_async(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        Self::build_cpu(leaves, cap_height)
     }
 
     pub fn get(&self, i: usize) -> &[F] {
