@@ -16,7 +16,7 @@ default = []
 # default = ["gate_testing", "parallel", "rand_chacha", "std", "timing"]
 gate_testing = []
 parallel = ["hashbrown/rayon", "plonky2_maybe_rayon/parallel"]
-std = ["anyhow/std", "rand/std", "itertools/use_std", "dep:futures"]
+std = ["anyhow/std", "rand/std", "itertools/use_std", "dep:futures", "dep:pollster"]
 timing = ["std", "dep:web-time"]
 merkle_debug_print = ["dep:console_log"]
 gpu_merkle = [
@@ -51,6 +51,7 @@ unroll = { workspace = true }
 web-time = { version = "1.0.0", optional = true }
 futures = { version = "0.3", optional = true, default-features = false, features = ["executor", "std", "async-await"] }
 futures-channel = "0.3"
+pollster = { version = "0.3", optional = true }
 
 # Local dependencies
 plonky2_field = { version = "1.0.0", path = "../field", default-features = false }
