@@ -80,6 +80,22 @@ mod arrays {
 #[serde(bound = "")]
 pub struct ExtensionTarget<const D: usize>(#[serde(with = "arrays")] pub [Target; D]);
 
+impl<const D: usize> Serialize for ExtensionTarget<D> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de, const D: usize> Deserialize<'de> for ExtensionTarget<D> {
+    fn deserialize<De: serde::Deserializer<'de>>(deserializer: De) -> Result<Self, De::Error> {
+        let v = Vec::<Target>::deserialize(deserializer)?;
+        let arr: [Target; D] = v
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("wrong array length"))?;
+        Ok(Self(arr))
+    }
+}
+
 impl<const D: usize> Default for ExtensionTarget<D> {
     fn default() -> Self {
         Self([Target::default(); D])

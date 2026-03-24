@@ -565,4 +565,77 @@ mod tests {
         verify(proof, &data.verifier_only, &data.common)?;
         data.verify_compressed(compressed_proof)
     }
+
+    #[test]
+    fn test_circuit_target_serde_round_trip() {
+        use crate::hash::hash_types::{HashOutTarget, MerkleCapTarget};
+        use crate::hash::merkle_proofs::MerkleProofTarget;
+        use crate::iop::ext_target::ExtensionTarget;
+        use crate::iop::target::Target;
+        use crate::plonk::circuit_data::VerifierCircuitTarget;
+
+        const D: usize = 2;
+
+        let t = |i| Target::VirtualTarget { index: i };
+        let ext = |i| ExtensionTarget::<D>([t(i), t(i + 1)]);
+        let hash_out = |i| HashOutTarget {
+            elements: [t(i), t(i + 1), t(i + 2), t(i + 3)],
+        };
+
+        // Test VerifierCircuitTarget round-trip.
+        let vct = VerifierCircuitTarget {
+            constants_sigmas_cap: MerkleCapTarget(vec![hash_out(0), hash_out(10)]),
+            circuit_digest: hash_out(20),
+        };
+        let json = serde_json::to_string(&vct).unwrap();
+        let vct2: VerifierCircuitTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(vct, vct2);
+
+        // Test ProofWithPublicInputsTarget round-trip.
+        let pwpit = ProofWithPublicInputsTarget::<D> {
+            proof: ProofTarget {
+                wires_cap: MerkleCapTarget(vec![hash_out(0)]),
+                plonk_zs_partial_products_cap: MerkleCapTarget(vec![hash_out(10)]),
+                quotient_polys_cap: MerkleCapTarget(vec![hash_out(20)]),
+                openings: OpeningSetTarget {
+                    constants: vec![ext(0)],
+                    plonk_sigmas: vec![ext(2)],
+                    wires: vec![ext(4)],
+                    plonk_zs: vec![ext(6)],
+                    plonk_zs_next: vec![ext(8)],
+                    lookup_zs: vec![],
+                    next_lookup_zs: vec![],
+                    partial_products: vec![ext(10)],
+                    quotient_polys: vec![ext(12)],
+                },
+                opening_proof: crate::fri::proof::FriProofTarget {
+                    commit_phase_merkle_caps: vec![MerkleCapTarget(vec![hash_out(30)])],
+                    query_round_proofs: vec![crate::fri::proof::FriQueryRoundTarget {
+                        initial_trees_proof: crate::fri::proof::FriInitialTreeProofTarget {
+                            evals_proofs: vec![(
+                                vec![t(40), t(41)],
+                                MerkleProofTarget {
+                                    siblings: vec![hash_out(50)],
+                                },
+                            )],
+                        },
+                        steps: vec![crate::fri::proof::FriQueryStepTarget {
+                            evals: vec![ext(60)],
+                            merkle_proof: MerkleProofTarget {
+                                siblings: vec![hash_out(70)],
+                            },
+                        }],
+                    }],
+                    final_poly: crate::gadgets::polynomial::PolynomialCoeffsExtTarget(vec![
+                        ext(80),
+                    ]),
+                    pow_witness: t(90),
+                },
+            },
+            public_inputs: vec![t(100), t(101)],
+        };
+        let json = serde_json::to_string(&pwpit).unwrap();
+        let pwpit2: ProofWithPublicInputsTarget<D> = serde_json::from_str(&json).unwrap();
+        assert_eq!(pwpit, pwpit2);
+    }
 }
