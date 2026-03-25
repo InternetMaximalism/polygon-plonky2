@@ -38,7 +38,7 @@ const ROUND_CONSTANT_COUNT: usize = POSEIDON_WIDTH * poseidon::N_ROUNDS;
 
 // for `now` for timing
 use js_sys::Promise;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::JsFuture;
 
 thread_local! {
@@ -169,6 +169,17 @@ fn field_to_words<F: RichField>(value: &F) -> [u32; BIGINT_LIMBS] {
 
 fn words_to_field<F: RichField>(words: &[u32; BIGINT_LIMBS]) -> F {
     let canon = (words[1] as u64) << 32 | (words[0] as u64);
+    // Goldilocks modulus: 2^64 - 2^32 + 1 = 18446744069414584321
+    if canon >= 18446744069414584321u64 {
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::error_1(
+            &format!(
+                "ERROR: non-canonical value from GPU: {} (words: [{:#010x}, {:#010x}])",
+                canon, words[0], words[1]
+            )
+            .into(),
+        );
+    }
     F::from_canonical_u64(canon)
 }
 
@@ -935,6 +946,15 @@ where
                 wait_for_queue(queue_completion).await?;
                 log_timing("⚡ GPU execution (wait_for_queue)", now_ms() - wait_start);
 
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(
+                    &format!(
+                        "GPU done. Tree info: num_leaves={}, total_nodes={}, cap_len={}, cap_height={}",
+                        num_leaves, total_nodes, cap_len, cap_height
+                    )
+                    .into(),
+                );
+
                 let mut sections = Vec::with_capacity(3);
                 sections.push(HashSection {
                     label: "Leaf",
@@ -1120,7 +1140,16 @@ async fn read_hash_sections<F: RichField>(
         .iter()
         .map(|section| (section.word_len * std::mem::size_of::<u32>()) as u64)
         .sum();
+
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(
+        &format!("read_hash_sections: total_bytes={}, getting staging buffer", total_bytes).into(),
+    );
+
     let staging = context.get_or_make_staging(total_bytes);
+
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&"read_hash_sections: staging buffer acquired, encoding copies".into());
 
     context
         .device
@@ -1142,6 +1171,9 @@ async fn read_hash_sections<F: RichField>(
     let submission_index = context.queue.submit(Some(encoder.finish()));
     log_queue_submission("combined_readback_copy", submission_index);
 
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&"read_hash_sections: copies submitted, starting map_async".into());
+
     let slice = staging.slice(0..total_bytes);
     let (map_tx, map_rx) = oneshot::channel();
     let readback_id = READBACK_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -1159,11 +1191,19 @@ async fn read_hash_sections<F: RichField>(
         .map_err(|err| anyhow!("{label} map_async error: {err:?}"))?;
     let copy_elapsed = now_ms() - copy_start;
 
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(
+        &format!("read_hash_sections: map_async completed in {:.2}ms", copy_elapsed).into(),
+    );
+
     if let Some(err) =
         pop_error_scope(context.device.clone(), format!("{label} validation scope")).await
     {
         return Err(anyhow!("validation error during readback: {err:?}"));
     }
+
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&"read_hash_sections: no validation errors, reading mapped range".into());
 
     let data = slice.get_mapped_range();
     let words_slice: &[u32] = bytemuck::cast_slice::<u8, u32>(&data);
@@ -1172,16 +1212,79 @@ async fn read_hash_sections<F: RichField>(
     for (idx, section) in sections.iter().enumerate() {
         let start = offsets_words[idx];
         let end = start + section.word_len;
-        debug_assert!(
-            end <= words_slice.len(),
-            "{label} mapped words shorter than expected for {} section",
-            section.label
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!(
+                "Decoding {} section: {} words ({} hashes), slice range [{}..{}], total buffer words: {}",
+                section.label,
+                section.word_len,
+                section.word_len / WORDS_PER_DIGEST,
+                start,
+                end,
+                words_slice.len()
+            )
+            .into(),
         );
+        if end > words_slice.len() {
+            return Err(anyhow!(
+                "{} section out of bounds: need [{}..{}] but buffer only has {} words",
+                section.label,
+                start,
+                end,
+                words_slice.len()
+            ));
+        }
         let convert_start = now_ms();
-        let hashes = words_slice[start..end]
-            .chunks(WORDS_PER_DIGEST)
-            .map(words_to_hash::<F>)
-            .collect::<Result<Vec<_>>>()?;
+        let num_hashes = section.word_len / WORDS_PER_DIGEST;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mem = wasm_bindgen::memory().dyn_into::<js_sys::WebAssembly::Memory>().unwrap();
+            let buf = mem.buffer();
+            let buf_size = if let Ok(ab) = buf.dyn_into::<js_sys::ArrayBuffer>() {
+                ab.byte_length()
+            } else {
+                let sab = mem.buffer().dyn_into::<js_sys::SharedArrayBuffer>().unwrap();
+                sab.byte_length()
+            };
+            let alloc_bytes = num_hashes * std::mem::size_of::<HashOut<F>>();
+            web_sys::console::log_1(
+                &format!(
+                    "  {} section: WASM memory={:.1}MB, allocating Vec for {} hashes ({:.1}MB)",
+                    section.label,
+                    buf_size as f64 / (1024.0 * 1024.0),
+                    num_hashes,
+                    alloc_bytes as f64 / (1024.0 * 1024.0)
+                ).into(),
+            );
+        }
+        let mut hashes = Vec::with_capacity(num_hashes);
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!("  {} section: Vec allocated, starting decode loop", section.label).into(),
+        );
+        for (hash_idx, chunk) in words_slice[start..end].chunks(WORDS_PER_DIGEST).enumerate() {
+            match words_to_hash::<F>(chunk) {
+                Ok(h) => hashes.push(h),
+                Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::error_1(
+                        &format!(
+                            "ERROR decoding {} section hash #{}/{}: {:?}, raw words: {:?}",
+                            section.label, hash_idx, num_hashes, e,
+                            &chunk[..chunk.len().min(8)]
+                        )
+                        .into(),
+                    );
+                    return Err(e);
+                }
+            }
+            if hash_idx % 10000 == 0 {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(
+                    &format!("  {} section: decoded {}/{} hashes", section.label, hash_idx, num_hashes).into(),
+                );
+            }
+        }
         let convert_ms = now_ms() - convert_start;
         let readback_ms = copy_elapsed * (section.word_len as f64) / total_words_f;
         results.push(HashSectionResult {
