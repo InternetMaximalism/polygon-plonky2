@@ -290,20 +290,14 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
             )
         );
 
-        //if leaf_count < 8000 {
-        //if elems_per_leaf > 200 {
-        // NOTE: in `prove_singles` we do *NOT* get a deadlock if we exclude the 4096 leaf Merkle trees.
-        // We *DO* get a deadlock if we ONLY do the Merkle tree with 4096 leaves with 2431 elements per leaf.
-        // We ALSO get a deadlock in a 4096 leaf tree, if we *ONLY* exclude the tree with 2431 elements per leaf.
-        if leaf_count == 4096 {
-            return Self::build_cpu(leaves, cap_height);
-        }
         let log2_leaves = log2_strict(leaf_count);
         if cap_height >= log2_leaves {
             return Self::build_cpu(leaves, cap_height);
         }
 
-        if leaf_count < 4096 {
+        // Fall back to CPU for smaller trees — GPU overhead isn't worth it,
+        // and certain tree sizes (e.g. 4096 leaves) can cause GPU deadlocks.
+        if leaf_count < 65536 {
             return Self::build_cpu(leaves, cap_height);
         }
         if let Some(result) = merkle_tree_gpu::try_build_merkle_tree::<F>(&leaves, cap_height) {
