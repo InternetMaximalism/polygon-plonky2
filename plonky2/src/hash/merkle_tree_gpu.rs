@@ -955,55 +955,80 @@ where
                     .into(),
                 );
 
-                let mut sections = Vec::with_capacity(3);
-                sections.push(HashSection {
-                    label: "Leaf",
-                    buffer: &buffers.input,
-                    word_len: num_leaves * WORDS_PER_DIGEST,
-                });
-                if total_nodes > 0 {
-                    sections.push(HashSection {
-                        label: "Node",
-                        buffer: &buffers.nodes,
-                        word_len: total_nodes * WORDS_PER_DIGEST,
+                // Read back raw words from GPU without decoding into HashOut Vecs
+                // to avoid ~32MB of intermediate allocations at high memory pressure.
+                let leaf_words = num_leaves * WORDS_PER_DIGEST;
+                let node_words = total_nodes * WORDS_PER_DIGEST;
+                let cap_words = cap_len * WORDS_PER_DIGEST;
+                let total_words = leaf_words + node_words + cap_words;
+                let total_bytes = (total_words * std::mem::size_of::<u32>()) as u64;
+
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(
+                    &format!("read_raw: total_bytes={}, getting staging buffer", total_bytes).into(),
+                );
+
+                let staging = context.get_or_make_staging(total_bytes);
+
+                context
+                    .device
+                    .push_error_scope(wgpu::ErrorFilter::Validation);
+
+                let mut encoder = context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("merkle-combined-readback"),
                     });
+                let mut offset_bytes = 0u64;
+                // Leaf
+                let leaf_bytes = (leaf_words * std::mem::size_of::<u32>()) as u64;
+                encoder.copy_buffer_to_buffer(&buffers.input, 0, &staging, offset_bytes, leaf_bytes);
+                offset_bytes += leaf_bytes;
+                // Node
+                if total_nodes > 0 {
+                    let node_bytes = (node_words * std::mem::size_of::<u32>()) as u64;
+                    encoder.copy_buffer_to_buffer(&buffers.nodes, 0, &staging, offset_bytes, node_bytes);
+                    offset_bytes += node_bytes;
                 }
-                sections.push(HashSection {
-                    label: "Cap",
-                    buffer: &buffers.cap,
-                    word_len: cap_len * WORDS_PER_DIGEST,
+                // Cap
+                let cap_bytes = (cap_words * std::mem::size_of::<u32>()) as u64;
+                encoder.copy_buffer_to_buffer(&buffers.cap, 0, &staging, offset_bytes, cap_bytes);
+
+                let submission_index = context.queue.submit(Some(encoder.finish()));
+                log_queue_submission("combined_readback_copy", submission_index);
+
+                let slice = staging.slice(0..total_bytes);
+                let (map_tx, map_rx) = oneshot::channel();
+                slice.map_async(wgpu::MapMode::Read, move |res| {
+                    let _ = map_tx.send(res);
                 });
-                let section_results = read_hash_sections::<F>(&context, &sections).await?;
-                debug_assert_eq!(section_results.len(), sections.len());
-                let mut section_iter = section_results.into_iter();
 
-                let leaf_result = section_iter
-                    .next()
-                    .expect("leaf section missing from combined readback");
-                log_timing_verbose("Leaf hash readback", leaf_result.readback_ms);
-                log_timing_verbose("Leaf canonical decode", leaf_result.convert_ms);
-                let leaf_hashes = leaf_result.hashes;
+                map_rx
+                    .await
+                    .map_err(|_| anyhow!("map_async callback dropped"))?
+                    .map_err(|err| anyhow!("map_async error: {err:?}"))?;
 
-                let (node_hashes, cap_result) = if total_nodes > 0 {
-                    let node_result = section_iter
-                        .next()
-                        .expect("node section missing from combined readback");
-                    log_timing_verbose("Node hash readback", node_result.readback_ms);
-                    log_timing_verbose("Node canonical decode", node_result.convert_ms);
-                    let cap_result = section_iter
-                        .next()
-                        .expect("cap section missing from combined readback");
-                    (node_result.hashes, cap_result)
-                } else {
-                    let cap_result = section_iter
-                        .next()
-                        .expect("cap section missing from combined readback");
-                    (Vec::new(), cap_result)
-                };
-                debug_assert!(section_iter.next().is_none());
-                log_timing_verbose("Cap readback", cap_result.readback_ms);
-                log_timing_verbose("Cap canonical decode", cap_result.convert_ms);
-                let cap_hashes = cap_result.hashes;
+                if let Some(err) =
+                    pop_error_scope(context.device.clone(), "readback validation".to_string()).await
+                {
+                    return Err(anyhow!("validation error during readback: {err:?}"));
+                }
+
+                let data = slice.get_mapped_range();
+                let words_slice: &[u32] = bytemuck::cast_slice::<u8, u32>(&data);
+
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(
+                    &format!("read_raw: mapped {} words, decoding cap only", words_slice.len()).into(),
+                );
+
+                // Only decode cap hashes into a Vec (tiny: 16 elements).
+                // Leaf and node hashes are accessed on-the-fly from words_slice.
+                let cap_start = leaf_words + node_words;
+                let cap_hashes: Vec<HashOut<F>> = words_slice[cap_start..cap_start + cap_words]
+                    .chunks(WORDS_PER_DIGEST)
+                    .map(words_to_hash::<F>)
+                    .collect::<Result<Vec<_>>>()?;
 
                 // CPU post-processing: reconstruct digest tree
                 log("=== PHASE 5: CPU Post-processing ===");
@@ -1012,9 +1037,10 @@ where
                 let num_digests = 2 * (num_leaves - (1 << cap_height));
                 let digests = if num_digests > 0 {
                     let mut digests = vec![HashOut::<F>::ZERO; num_digests];
-                    let accessor = LayerAccessor::new(
-                        &leaf_hashes,
-                        &node_hashes,
+                    let accessor = RawLayerAccessor::new(
+                        words_slice,
+                        leaf_words,
+                        node_words,
                         &cap_hashes,
                         num_leaves,
                         num_layers_to_cap,
@@ -1033,10 +1059,6 @@ where
                             leaf_offset,
                             subtree_leaves_len,
                         );
-                        debug_assert_eq!(
-                            accessor.node(accessor.cap_layer(), subtree_idx),
-                            &cap_hashes[subtree_idx]
-                        );
                     }
 
                     digests
@@ -1045,6 +1067,10 @@ where
                 };
 
                 log_timing_verbose("Digest tree reconstruction", now_ms() - postprocess_start);
+
+                drop(data);
+                staging.unmap();
+                yield_to_event_loop().await;
 
                 log_timing_verbose(
                     "📥 TOTAL READBACK + POST-PROCESSING",
@@ -1974,9 +2000,14 @@ struct SubtreeFrame {
     layer_index: usize,
 }
 
-fn write_subtree_chunk_from_gpu<F: RichField>(
+trait MerkleLayerAccess<F: RichField> {
+    fn node(&self, layer: usize, node_idx: usize) -> HashOut<F>;
+    fn cap_layer(&self) -> usize;
+}
+
+fn write_subtree_chunk_from_gpu<F: RichField, A: MerkleLayerAccess<F>>(
     chunk: &mut [HashOut<F>],
-    accessor: &LayerAccessor<'_, F>,
+    accessor: &A,
     leaf_offset: usize,
     subtree_leaves_len: usize,
 ) {
@@ -2010,8 +2041,8 @@ fn write_subtree_chunk_from_gpu<F: RichField>(
         let right_leaf_offset = frame.leaf_offset + half_leaves;
         let right_node_idx = right_leaf_offset >> child_layer;
 
-        chunk[left_slot] = accessor.node(child_layer, left_node_idx).clone();
-        chunk[right_slot] = accessor.node(child_layer, right_node_idx).clone();
+        chunk[left_slot] = accessor.node(child_layer, left_node_idx);
+        chunk[right_slot] = accessor.node(child_layer, right_node_idx);
 
         let subtree_len = chunk_half - 1;
         if subtree_len > 0 {
@@ -2065,14 +2096,83 @@ impl<'a, F: RichField> LayerAccessor<'a, F> {
         }
     }
 
-    fn node(&self, layer: usize, node_idx: usize) -> &HashOut<F> {
+}
+
+impl<'a, F: RichField> MerkleLayerAccess<F> for LayerAccessor<'a, F> {
+    fn node(&self, layer: usize, node_idx: usize) -> HashOut<F> {
         match layer {
-            0 => &self.leaf_hashes[node_idx],
+            0 => self.leaf_hashes[node_idx],
             l if l < self.num_layers_to_cap => {
                 let start = self.layer_starts[l];
-                &self.node_hashes[start + node_idx]
+                self.node_hashes[start + node_idx]
             }
-            l if l == self.num_layers_to_cap => &self.cap_hashes[node_idx],
+            l if l == self.num_layers_to_cap => self.cap_hashes[node_idx],
+            _ => panic!("layer {layer} out of bounds"),
+        }
+    }
+
+    fn cap_layer(&self) -> usize {
+        self.num_layers_to_cap
+    }
+}
+
+/// Like LayerAccessor but reads hashes on-the-fly from raw u32 words,
+/// avoiding large Vec<HashOut<F>> allocations.
+struct RawLayerAccessor<'a, F: RichField> {
+    words: &'a [u32],
+    leaf_words_len: usize,
+    cap_hashes: &'a [HashOut<F>],
+    layer_starts: Vec<usize>,
+    num_layers_to_cap: usize,
+}
+
+impl<'a, F: RichField> RawLayerAccessor<'a, F> {
+    fn new(
+        words: &'a [u32],
+        leaf_words_len: usize,
+        _node_words_len: usize,
+        cap_hashes: &'a [HashOut<F>],
+        num_leaves: usize,
+        num_layers_to_cap: usize,
+    ) -> Self {
+        let mut layer_starts = vec![0usize; num_layers_to_cap];
+        let mut acc = 0;
+        for layer in 1..num_layers_to_cap {
+            layer_starts[layer] = acc;
+            acc += host_layer_size(num_leaves, layer);
+        }
+        Self {
+            words,
+            leaf_words_len,
+            cap_hashes,
+            layer_starts,
+            num_layers_to_cap,
+        }
+    }
+
+    fn read_hash_at_word_offset(&self, word_offset: usize) -> HashOut<F> {
+        let w = &self.words[word_offset..word_offset + WORDS_PER_DIGEST];
+        // Safety: from_canonical_u64 is a no-op in release (debug_assert only)
+        let mut elements = [F::ZERO; NUM_HASH_OUT_ELTS];
+        for (i, chunk) in w.chunks(BIGINT_LIMBS).enumerate() {
+            let canon = (chunk[1] as u64) << 32 | (chunk[0] as u64);
+            elements[i] = F::from_canonical_u64(canon);
+        }
+        HashOut { elements }
+    }
+}
+
+impl<'a, F: RichField> MerkleLayerAccess<F> for RawLayerAccessor<'a, F> {
+    fn node(&self, layer: usize, node_idx: usize) -> HashOut<F> {
+        match layer {
+            0 => self.read_hash_at_word_offset(node_idx * WORDS_PER_DIGEST),
+            l if l < self.num_layers_to_cap => {
+                let start = self.layer_starts[l];
+                self.read_hash_at_word_offset(
+                    self.leaf_words_len + (start + node_idx) * WORDS_PER_DIGEST,
+                )
+            }
+            l if l == self.num_layers_to_cap => self.cap_hashes[node_idx],
             _ => panic!("layer {layer} out of bounds"),
         }
     }
