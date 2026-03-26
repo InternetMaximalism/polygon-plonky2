@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
 use super::merkle_tree_gpu;
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use wasm_bindgen::JsCast;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
 use crate::hash::hash_types::HashOut;
 use crate::hash::hash_types::RichField;
 use crate::hash::merkle_proofs::MerkleProof;
@@ -299,6 +301,34 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
         // and certain tree sizes (e.g. 4096 leaves) can cause GPU deadlocks.
         if leaf_count < 65536 {
             return Self::build_cpu(leaves, cap_height);
+        }
+
+        // Fall back to CPU when WASM memory is above 3.5GB to avoid OOM.
+        // The GPU path requires a staging buffer (~2x digest size) that the CPU path doesn't need.
+        {
+            let mem = wasm_bindgen::memory()
+                .dyn_into::<js_sys::WebAssembly::Memory>()
+                .unwrap();
+            let buf = mem.buffer();
+            let buf_size = if let Ok(ab) = buf.dyn_into::<js_sys::ArrayBuffer>() {
+                ab.byte_length()
+            } else {
+                let sab = mem.buffer()
+                    .dyn_into::<js_sys::SharedArrayBuffer>()
+                    .unwrap();
+                sab.byte_length()
+            };
+            let mem_mb = buf_size as f64 / (1024.0 * 1024.0);
+            if mem_mb > 3500.0 {
+                web_sys::console::warn_1(
+                    &format!(
+                        "WASM memory at {:.0}MB (>3.5GB), falling back to CPU Merkle to avoid OOM",
+                        mem_mb
+                    )
+                    .into(),
+                );
+                return Self::build_cpu(leaves, cap_height);
+            }
         }
         if let Some(result) = merkle_tree_gpu::try_build_merkle_tree::<F>(&leaves, cap_height) {
             match result {
