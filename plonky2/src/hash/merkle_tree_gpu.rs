@@ -1027,6 +1027,10 @@ where
                             leaf_offset,
                             subtree_leaves_len,
                         );
+                        debug_assert_eq!(
+                            accessor.node(accessor.cap_layer(), subtree_idx),
+                            cap_hashes[subtree_idx]
+                        );
                     }
 
                     digests
