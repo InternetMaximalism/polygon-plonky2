@@ -312,11 +312,10 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
             let buf = mem.buffer();
             let buf_size = if let Ok(ab) = buf.dyn_into::<js_sys::ArrayBuffer>() {
                 ab.byte_length()
-            } else {
-                let sab = mem.buffer()
-                    .dyn_into::<js_sys::SharedArrayBuffer>()
-                    .unwrap();
+            } else if let Ok(sab) = mem.buffer().dyn_into::<js_sys::SharedArrayBuffer>() {
                 sab.byte_length()
+            } else {
+                0
             };
             let mem_mb = buf_size as f64 / (1024.0 * 1024.0);
             if mem_mb > 3500.0 {
