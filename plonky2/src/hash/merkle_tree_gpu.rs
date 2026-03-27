@@ -1010,7 +1010,6 @@ where
                     let accessor = RawLayerAccessor::new(
                         words_slice,
                         leaf_words,
-                        node_words,
                         &cap_hashes,
                         num_leaves,
                         num_layers_to_cap,
@@ -1914,7 +1913,6 @@ impl<'a, F: RichField> RawLayerAccessor<'a, F> {
     fn new(
         words: &'a [u32],
         leaf_words_len: usize,
-        _node_words_len: usize,
         cap_hashes: &'a [HashOut<F>],
         num_leaves: usize,
         num_layers_to_cap: usize,
