@@ -1936,13 +1936,7 @@ impl<'a, F: RichField> RawLayerAccessor<'a, F> {
 
     fn read_hash_at_word_offset(&self, word_offset: usize) -> HashOut<F> {
         let w = &self.words[word_offset..word_offset + WORDS_PER_DIGEST];
-        // Safety: from_canonical_u64 is a no-op in release (debug_assert only)
-        let mut elements = [F::ZERO; NUM_HASH_OUT_ELTS];
-        for (i, chunk) in w.chunks(BIGINT_LIMBS).enumerate() {
-            let canon = (chunk[1] as u64) << 32 | (chunk[0] as u64);
-            elements[i] = F::from_canonical_u64(canon);
-        }
-        HashOut { elements }
+        words_to_hash::<F>(w).expect("invalid digest words in staging buffer")
     }
 }
 
