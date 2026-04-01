@@ -299,7 +299,7 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
 
         // Fall back to CPU for smaller trees — GPU overhead isn't worth it,
         // and certain tree sizes (e.g. 4096 leaves) can cause GPU deadlocks.
-        if leaf_count < 65536 {
+        if leaf_count < 8192 {
             return Self::build_cpu(leaves, cap_height);
         }
 
