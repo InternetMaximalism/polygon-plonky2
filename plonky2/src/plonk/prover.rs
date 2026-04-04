@@ -24,7 +24,7 @@ use crate::iop::generator::generate_partial_witness;
 use crate::iop::target::Target;
 use crate::iop::witness::{MatrixWitness, PartialWitness, PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::NUM_COINS_LOOKUP;
-use crate::plonk::circuit_data::{CommonCircuitData, ProverOnlyCircuitData};
+use crate::plonk::circuit_data::{CommonCircuitData, EvaluationTables, ProverOnlyCircuitData};
 use crate::plonk::config::{GenericConfig, Hasher};
 use crate::plonk::plonk_common::PlonkOracle;
 use crate::plonk::proof::{OpeningSet, Proof, ProofWithPublicInputs};
@@ -126,6 +126,62 @@ where
     );
 
     prove_with_partition_witness(prover_data, common_data, partition_witness, timing)
+}
+
+/// Extract raw evaluation tables from a circuit without performing polynomial
+/// interpolation or FRI commitment. These tables can be used by alternative
+/// proving backends (e.g., multilinear extension + sumcheck + WHIR).
+///
+/// The returned [`EvaluationTables`] contains the wire, constant, and sigma
+/// values in their pre-interpolation form, suitable for placement on `{0,1}^n`
+/// as multilinear extensions.
+pub fn extract_evaluation_tables<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    prover_data: &ProverOnlyCircuitData<F, C, D>,
+    common_data: &CommonCircuitData<F, D>,
+    inputs: PartialWitness<F>,
+    timing: &mut TimingTree,
+) -> Result<EvaluationTables<F>>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    let mut partition_witness = timed!(
+        timing,
+        &format!("run {} generators", prover_data.generators.len()),
+        generate_partial_witness(inputs, prover_data, common_data)?
+    );
+
+    set_lookup_wires(prover_data, common_data, &mut partition_witness)?;
+
+    let public_inputs = partition_witness.get_targets(&prover_data.public_inputs);
+    let public_inputs_hash = C::InnerHasher::hash_no_pad(&public_inputs);
+
+    let witness = timed!(
+        timing,
+        "compute full witness",
+        partition_witness.full_witness()
+    );
+
+    let degree = common_data.degree();
+    let degree_bits = common_data.degree_bits();
+
+    Ok(EvaluationTables {
+        wire_values: witness.wire_values,
+        constant_values: prover_data.constant_evals.clone(),
+        sigma_values: prover_data.sigmas.clone(),
+        public_inputs,
+        public_inputs_hash,
+        num_wires: common_data.config.num_wires,
+        num_routed_wires: common_data.config.num_routed_wires,
+        k_is: common_data.k_is.clone(),
+        subgroup: prover_data.subgroup.clone(),
+        degree,
+        degree_bits,
+    })
 }
 
 pub fn prove_with_partition_witness<

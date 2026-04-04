@@ -852,6 +852,13 @@ pub trait Read {
             sigmas.push(self.read_field_vec(sigma_len)?);
         }
 
+        let constant_evals_len = self.read_usize()?;
+        let mut constant_evals = Vec::with_capacity(constant_evals_len);
+        for _ in 0..constant_evals_len {
+            let row_len = self.read_usize()?;
+            constant_evals.push(self.read_field_vec(row_len)?);
+        }
+
         let subgroup_len = self.read_usize()?;
         let subgroup = self.read_field_vec(subgroup_len)?;
 
@@ -896,6 +903,7 @@ pub trait Read {
             generator_indices_by_watches,
             constants_sigmas_commitment,
             sigmas,
+            constant_evals,
             subgroup,
             public_inputs,
             representative_map,
@@ -1846,6 +1854,7 @@ pub trait Write {
             generator_indices_by_watches,
             constants_sigmas_commitment,
             sigmas,
+            constant_evals,
             subgroup,
             public_inputs,
             representative_map,
@@ -1871,6 +1880,11 @@ pub trait Write {
         for i in 0..sigmas.len() {
             self.write_usize(sigmas[i].len())?;
             self.write_field_vec(&sigmas[i])?;
+        }
+        self.write_usize(constant_evals.len())?;
+        for row in constant_evals.iter() {
+            self.write_usize(row.len())?;
+            self.write_field_vec(row)?;
         }
         self.write_usize(subgroup.len())?;
         self.write_field_vec(subgroup)?;
