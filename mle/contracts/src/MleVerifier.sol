@@ -123,6 +123,10 @@ contract MleVerifier {
         permChallenges;
         permFinalEval;
 
+        // ── Step 4d: Extension field combination challenge ──
+        TranscriptLib.domainSeparate(transcript, "extension-combine");
+        TranscriptLib.squeezeChallenge(transcript); // ext_challenge (used in prover for D>1)
+
         // ── Step 5: Verify constraint zero-check sumcheck ──
         TranscriptLib.domainSeparate(transcript, "zero-check");
 

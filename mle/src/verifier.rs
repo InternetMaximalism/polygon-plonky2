@@ -104,6 +104,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         }
     }
 
+    // Step 4c: Extension field combination challenge (must match prover)
+    transcript.domain_separate("extension-combine");
+    let _ext_challenge: F = transcript.squeeze_challenge();
+
     // Step 5: Verify zero-check sumcheck (claimed sum = 0 for valid circuit)
     transcript.domain_separate("zero-check");
 

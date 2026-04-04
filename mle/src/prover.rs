@@ -18,7 +18,7 @@ use plonky2_field::extension::Extendable;
 
 use crate::commitment::merkle_pcs::MerklePCS;
 use crate::commitment::traits::MultilinearPCS;
-use crate::constraint_eval::compute_combined_constraints;
+use crate::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtension};
 use crate::eq_poly;
 use crate::permutation::logup::PermutationProof;
@@ -152,8 +152,12 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         Vec::new()
     };
 
-    // Step 7: Compute combined gate constraints
-    let combined_constraints = compute_combined_constraints::<F, D>(
+    // Step 7: Compute combined gate constraints (extension field)
+    // SECURITY: Gate constraints live in F::Extension (D=2 components).
+    // ALL components must be zero for the constraint to be satisfied.
+    // We flatten the D components into a single base-field value per row
+    // using a fresh Fiat-Shamir challenge for the extension combination.
+    let combined_ext = compute_combined_constraints::<F, D>(
         common_data,
         &tables.wire_values,
         &tables.constant_values,
@@ -161,6 +165,11 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         &tables.public_inputs_hash,
         degree,
     );
+
+    transcript.domain_separate("extension-combine");
+    let ext_challenge: F = transcript.squeeze_challenge();
+
+    let combined_constraints = flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
 
     // Pad to power of 2
     let mut padded_constraints = combined_constraints;

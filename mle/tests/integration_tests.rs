@@ -16,7 +16,7 @@ use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::Field;
 use plonky2::hash::poseidon::PoseidonHash;
 use plonky2_mle::config::WhirConfig;
-use plonky2_mle::constraint_eval::compute_combined_constraints;
+use plonky2_mle::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use plonky2_mle::permutation::logup::{compute_identity_values, compute_permutation_numerator};
 use plonky2_mle::prover::mle_prove;
 use plonky2_mle::verifier::mle_verify;
@@ -168,8 +168,10 @@ fn test_constraints_zero_for_addition_circuit() {
         tables.degree,
     );
 
-    for (row, &val) in combined.iter().enumerate() {
-        assert_eq!(val, F::ZERO, "Constraint non-zero at row {row}");
+    for (row, components) in combined.iter().enumerate() {
+        for (k, &val) in components.iter().enumerate() {
+            assert_eq!(val, F::ZERO, "Constraint [{k}] non-zero at row {row}");
+        }
     }
 }
 
@@ -218,12 +220,14 @@ fn test_poseidon_gate_constraints_zero() {
         tables.degree,
     );
 
-    for (row, &val) in combined.iter().enumerate() {
-        assert_eq!(
-            val,
-            F::ZERO,
-            "Poseidon constraint non-zero at row {row}: {val}"
-        );
+    for (row, components) in combined.iter().enumerate() {
+        for (k, &val) in components.iter().enumerate() {
+            assert_eq!(
+                val,
+                F::ZERO,
+                "Poseidon constraint [{k}] non-zero at row {row}"
+            );
+        }
     }
 }
 
@@ -629,4 +633,138 @@ fn test_lookup_logup_standalone() {
     let mut v_transcript = Transcript::new();
     let result = verify_sumcheck(&proof, claimed_sum, challenges.len(), &mut v_transcript);
     assert!(result.is_ok(), "Lookup sumcheck failed: {:?}", result.err());
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Recursive proof circuit (CosetInterpolationGate) test
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_recursive_circuit_constraints_zero() {
+    // Build an inner circuit, prove it with Plonky2, then build an outer circuit
+    // that verifies the inner proof. The outer circuit contains CosetInterpolationGate
+    // and RandomAccessGate (FRI recursive verification).
+    //
+    // SECURITY: This is the critical test for validity proofs. Without this,
+    // the library is only safe for non-recursive circuits.
+    use plonky2::plonk::proof::ProofWithPublicInputs;
+    use plonky2::plonk::circuit_data::VerifierCircuitTarget;
+
+    // ── Inner circuit: x * y = z ──
+    let inner_config = CircuitConfig::standard_recursion_config();
+    let mut inner_builder = CircuitBuilder::<F, D>::new(inner_config);
+    let x = inner_builder.add_virtual_target();
+    let y = inner_builder.add_virtual_target();
+    let z = inner_builder.mul(x, y);
+    inner_builder.register_public_input(z);
+    let inner_data = inner_builder.build::<C>();
+
+    let mut inner_pw = PartialWitness::new();
+    inner_pw.set_target(x, F::from_canonical_u64(3)).unwrap();
+    inner_pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+    let inner_proof = inner_data.prove(inner_pw).unwrap();
+    // Sanity: verify the inner proof with Plonky2
+    inner_data.verify(inner_proof.clone()).unwrap();
+
+    // ── Outer circuit: verify the inner proof ──
+    let outer_config = CircuitConfig::standard_recursion_config();
+    let mut outer_builder = CircuitBuilder::<F, D>::new(outer_config);
+
+    let proof_t = outer_builder.add_virtual_proof_with_pis(&inner_data.common);
+    let verifier_data_t = outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
+    outer_builder.verify_proof::<C>(&proof_t, &verifier_data_t, &inner_data.common);
+
+    // Register the inner proof's public inputs as outer public inputs
+    for &pi in &proof_t.public_inputs {
+        outer_builder.register_public_input(pi);
+    }
+
+    let outer_data = outer_builder.build::<C>();
+
+    // Set the outer witness
+    let mut outer_pw = PartialWitness::new();
+    outer_pw.set_proof_with_pis_target(&proof_t, &inner_proof);
+    outer_pw.set_verifier_data_target(&verifier_data_t, &inner_data.verifier_only);
+
+    // Extract evaluation tables from the outer (recursive) circuit
+    let mut timing = TimingTree::default();
+    let outer_tables = extract_evaluation_tables::<F, C, D>(
+        &outer_data.prover_only,
+        &outer_data.common,
+        outer_pw.clone(),
+        &mut timing,
+    )
+    .unwrap();
+
+    println!(
+        "Recursive circuit: degree={}, degree_bits={}, num_gates_types={}",
+        outer_tables.degree,
+        outer_tables.degree_bits,
+        outer_data.common.gates.len()
+    );
+
+    // Print gate types to confirm CosetInterpolationGate is present
+    for gate in &outer_data.common.gates {
+        println!("  Gate: {}", gate.0.id());
+    }
+
+    // ── Verify constraints are zero with extension field handling ──
+    let alpha = F::from_canonical_u64(42);
+    let combined_ext = compute_combined_constraints::<F, D>(
+        &outer_data.common,
+        &outer_tables.wire_values,
+        &outer_tables.constant_values,
+        &[alpha],
+        &outer_tables.public_inputs_hash,
+        outer_tables.degree,
+    );
+
+    // ALL extension field components must be zero
+    let mut nonzero_count = 0;
+    for (row, components) in combined_ext.iter().enumerate() {
+        for (k, &val) in components.iter().enumerate() {
+            if val != F::ZERO {
+                nonzero_count += 1;
+                if nonzero_count <= 5 {
+                    println!("  NON-ZERO: row={row}, component={k}, val={val}");
+                }
+            }
+        }
+    }
+    assert_eq!(
+        nonzero_count, 0,
+        "Recursive circuit has {nonzero_count} non-zero extension constraint components"
+    );
+
+    // ── Also verify the flattened version ──
+    let ext_challenge = F::from_canonical_u64(12345);
+    let flat = flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
+    for (row, &val) in flat.iter().enumerate() {
+        assert_eq!(val, F::ZERO, "Flattened constraint non-zero at row {row}");
+    }
+
+    // ── Full E2E: MLE prove + verify on the recursive circuit ──
+    let outer_pw2 = {
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&proof_t, &inner_proof);
+        pw.set_verifier_data_target(&verifier_data_t, &inner_data.verifier_only);
+        pw
+    };
+
+    let mle_proof = mle_prove::<F, C, D>(
+        &outer_data.prover_only,
+        &outer_data.common,
+        outer_pw2,
+        &mut timing,
+    )
+    .unwrap();
+
+    assert_eq!(mle_proof.public_inputs[0], F::from_canonical_u64(21));
+
+    let verify_result = mle_verify::<F, D>(&outer_data.common, &mle_proof);
+    assert!(
+        verify_result.is_ok(),
+        "Recursive circuit MLE verify failed: {:?}",
+        verify_result.err()
+    );
 }
