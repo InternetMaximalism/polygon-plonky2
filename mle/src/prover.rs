@@ -259,8 +259,8 @@ mod tests {
 
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
-        pw.set_target(x, F::from_canonical_u64(3)).unwrap();
-        pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+        pw.set_target(x, F::from_canonical_u64(3));
+        pw.set_target(y, F::from_canonical_u64(7));
 
         let mut timing = TimingTree::default();
         let proof = mle_prove::<F, C, D>(

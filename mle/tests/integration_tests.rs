@@ -43,8 +43,8 @@ fn test_permutation_numerator_sum_is_zero() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(3)).unwrap();
-    pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(3));
+    pw.set_target(y, F::from_canonical_u64(7));
 
     let mut timing = TimingTree::default();
     let tables = extract_evaluation_tables::<F, C, D>(
@@ -95,7 +95,7 @@ fn test_permutation_with_copy_constraints() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(42)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(42));
 
     let mut timing = TimingTree::default();
     let tables = extract_evaluation_tables::<F, C, D>(
@@ -146,8 +146,8 @@ fn test_constraints_zero_for_addition_circuit() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(a, F::from_canonical_u64(100)).unwrap();
-    pw.set_target(b, F::from_canonical_u64(200)).unwrap();
+    pw.set_target(a, F::from_canonical_u64(100));
+    pw.set_target(b, F::from_canonical_u64(200));
 
     let mut timing = TimingTree::default();
     let tables = extract_evaluation_tables::<F, C, D>(
@@ -197,8 +197,7 @@ fn test_poseidon_gate_constraints_zero() {
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
     for (i, &input) in inputs.iter().enumerate() {
-        pw.set_target(input, F::from_canonical_u64(i as u64 + 1))
-            .unwrap();
+        pw.set_target(input, F::from_canonical_u64(i as u64 + 1));
     }
 
     let mut timing = TimingTree::default();
@@ -248,8 +247,7 @@ fn test_poseidon_circuit_prove_verify() {
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
     for (i, &input) in inputs.iter().enumerate() {
-        pw.set_target(input, F::from_canonical_u64(i as u64 + 10))
-            .unwrap();
+        pw.set_target(input, F::from_canonical_u64(i as u64 + 10));
     }
 
     let mut timing = TimingTree::default();
@@ -292,7 +290,7 @@ fn test_large_circuit_chain() {
     println!("Large circuit: degree={degree}, degree_bits={degree_bits}");
 
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(2)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(2));
 
     let mut timing = TimingTree::default();
     let proof = mle_prove::<F, C, D>(
@@ -344,8 +342,8 @@ fn test_randomized_arithmetic_circuits() {
         let b_val = F::from_canonical_u64(rng.gen_range(1..1000));
 
         let mut pw = PartialWitness::new();
-        pw.set_target(a, a_val).unwrap();
-        pw.set_target(b, b_val).unwrap();
+        pw.set_target(a, a_val);
+        pw.set_target(b, b_val);
 
         let mut timing = TimingTree::default();
         let proof = mle_prove::<F, C, D>(
@@ -381,8 +379,8 @@ fn test_tampered_public_inputs_rejected() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(3)).unwrap();
-    pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(3));
+    pw.set_target(y, F::from_canonical_u64(7));
 
     let mut timing = TimingTree::default();
     let mut proof = mle_prove::<F, C, D>(
@@ -415,8 +413,8 @@ fn test_tampered_eval_value_rejected() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(5)).unwrap();
-    pw.set_target(y, F::from_canonical_u64(9)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(5));
+    pw.set_target(y, F::from_canonical_u64(9));
 
     let mut timing = TimingTree::default();
     let mut proof = mle_prove::<F, C, D>(
@@ -473,8 +471,8 @@ fn test_tampered_constraint_round_poly_rejected() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(4)).unwrap();
-    pw.set_target(y, F::from_canonical_u64(6)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(4));
+    pw.set_target(y, F::from_canonical_u64(6));
 
     let mut timing = TimingTree::default();
     let mut proof = mle_prove::<F, C, D>(
@@ -502,8 +500,8 @@ fn test_tampered_permutation_round_poly_rejected() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(2)).unwrap();
-    pw.set_target(y, F::from_canonical_u64(8)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(2));
+    pw.set_target(y, F::from_canonical_u64(8));
 
     let mut timing = TimingTree::default();
     let mut proof = mle_prove::<F, C, D>(
@@ -533,8 +531,8 @@ fn test_swapped_commitment_rejected() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(3)).unwrap();
-    pw.set_target(y, F::from_canonical_u64(5)).unwrap();
+    pw.set_target(x, F::from_canonical_u64(3));
+    pw.set_target(y, F::from_canonical_u64(5));
 
     let mut timing = TimingTree::default();
     let mut proof = mle_prove::<F, C, D>(
@@ -567,8 +565,8 @@ fn test_fibonacci_circuit_prove_verify() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(targets[0], F::ONE).unwrap();
-    pw.set_target(targets[1], F::ONE).unwrap();
+    pw.set_target(targets[0], F::ONE);
+    pw.set_target(targets[1], F::ONE);
 
     let mut timing = TimingTree::default();
     let proof = mle_prove::<F, C, D>(
@@ -660,8 +658,8 @@ fn test_recursive_circuit_constraints_zero() {
     let inner_data = inner_builder.build::<C>();
 
     let mut inner_pw = PartialWitness::new();
-    inner_pw.set_target(x, F::from_canonical_u64(3)).unwrap();
-    inner_pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+    inner_pw.set_target(x, F::from_canonical_u64(3));
+    inner_pw.set_target(y, F::from_canonical_u64(7));
     let inner_proof = inner_data.prove(inner_pw).unwrap();
     // Sanity: verify the inner proof with Plonky2
     inner_data.verify(inner_proof.clone()).unwrap();
