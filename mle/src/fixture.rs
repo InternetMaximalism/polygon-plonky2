@@ -210,33 +210,28 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
 
     // Initial committer additional params
     let initial_interleaving_depth = config.initial_committer.interleaving_depth;
-    let initial_num_variables = num_variables; // before first folding
-    let initial_mml = {
-        // masked_message_length = vector_size + mask_length
-        config.initial_committer.vector_size + config.initial_committer.mask_length
-    };
+    let initial_num_variables = config.initial_num_variables();
+    let initial_mml = config.initial_committer.masked_message_length();
     let initial_coset_size = if initial_codeword_length == 0 || initial_mml == 0 {
         initial_codeword_length.max(1)
     } else {
         let mut cs = initial_mml.next_power_of_two();
-        while cs <= initial_codeword_length && initial_codeword_length % cs != 0 { cs *= 2; }
-        cs.min(initial_codeword_length).max(1)
+        while initial_codeword_length % cs != 0 { cs *= 2; }
+        cs
     };
     let initial_num_cosets = initial_codeword_length / initial_coset_size;
 
-    // Build per-round params
+    // Build per-round params using WHIR's own methods
     let rounds: Vec<WhirRoundParamsFixture> = config.round_configs.iter().map(|rc| {
         let cl = rc.irs_committer.codeword_length;
         let mml = rc.irs_committer.vector_size + rc.irs_committer.mask_length;
-        let mut cs = if mml == 0 { cl.max(1) } else {
+        let cs = if cl == 0 || mml == 0 { cl.max(1) } else {
             let mut c = mml.next_power_of_two();
-            while c <= cl && cl % c != 0 { c *= 2; }
-            c.min(cl).max(1)
+            while cl % c != 0 { c *= 2; }
+            c
         };
-        // num_variables for this round = log2(vector_size * interleaving_depth)
-        let rv = (rc.irs_committer.vector_size * rc.irs_committer.interleaving_depth)
-            .next_power_of_two()
-            .trailing_zeros() as usize;
+        // Use WHIR's own initial_num_variables() = log2(vector_size)
+        let rv = rc.initial_num_variables();
         WhirRoundParamsFixture {
             codeword_length: cl,
             merkle_depth: log2_of(cl),

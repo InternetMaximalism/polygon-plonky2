@@ -22,6 +22,24 @@ contract WhirVerifyTest is Test {
         _verifyWhirFromFixture(json);
     }
 
+    /// @notice Test WHIR verification of a large circuit (degree_bits=4).
+    function test_whir_large_mul() public view {
+        string memory json = vm.readFile("test/fixtures/large_mul.json");
+        _verifyWhirFromFixture(json);
+    }
+
+    /// @notice Test WHIR verification of a Poseidon hash circuit (degree_bits=2).
+    function test_whir_poseidon_hash() public view {
+        string memory json = vm.readFile("test/fixtures/poseidon_hash.json");
+        _verifyWhirFromFixture(json);
+    }
+
+    /// @notice Test WHIR verification of a recursive circuit (degree_bits=11).
+    function test_whir_recursive_verify() public view {
+        string memory json = vm.readFile("test/fixtures/recursive_verify.json");
+        _verifyWhirFromFixture(json);
+    }
+
     /// @notice Test that a tampered WHIR transcript fails verification.
     function test_whir_tampered_transcript_fails() public {
         string memory json = vm.readFile("test/fixtures/small_mul.json");
