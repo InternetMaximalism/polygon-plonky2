@@ -117,17 +117,7 @@ impl WhirPCS {
     /// For num_vars >= 12, folding_factor is increased to keep numRounds <= 1,
     /// which reduces on-chain WHIR verification gas cost.
     pub fn for_num_vars(num_vars: usize) -> Self {
-        // Adaptive folding_factor: increase for large circuits to keep numRounds=1.
-        // After initial folding, remaining_vars = num_vars - folding_factor.
-        // WHIR produces intermediate rounds while remaining_vars >= folding_factor.
-        // To get numRounds <= 1: need num_vars - initial_folding - rate <= folding_factor,
-        // i.e. folding_factor >= (num_vars - rate) / 2.
-        let folding_factor = if num_vars >= 12 {
-            // folding by 8 covers up to num_vars=20 with numRounds=1
-            num_vars.min(8).max(1)
-        } else {
-            num_vars.min(4).max(1)
-        };
+        let folding_factor = num_vars.min(4).max(1);
         // Rate 1/256 (starting_log_inv_rate=8) for strong soundness.
         // Must leave room for folding: num_vars > starting_log_inv_rate + folding
         let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 8.min(num_vars - folding_factor) };
