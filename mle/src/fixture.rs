@@ -9,9 +9,15 @@
 ///   Original:  18089690094123470162
 ///   JSON num:  18089690094123470848  (off by 686!)
 ///   As string: "18089690094123470162" (exact)
+use ark_ff::{FftField, Field as ArkField, PrimeField as ArkPrimeField};
 use plonky2_field::types::PrimeField64;
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Keccak256};
+use whir::algebra::embedding::Basefield;
+use whir::algebra::fields::{Field64_3, Field64 as ArkGoldilocks};
+use whir::protocols::whir::Config as WhirConfig;
 
+use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_NAME};
 use crate::proof::MleProof;
 use crate::sumcheck::types::SumcheckProof;
 
@@ -58,6 +64,57 @@ pub struct ProofFixture {
     pub num_constants: usize,
     /// Circuit degree (log2).
     pub degree_bits: usize,
+    /// WHIR transcript bytes (hex with 0x prefix).
+    pub whir_transcript: String,
+    /// WHIR hints bytes (hex with 0x prefix).
+    pub whir_hints: String,
+    /// WHIR protocol ID (hex with 0x prefix, 64 bytes).
+    pub whir_protocol_id: String,
+    /// WHIR session ID (hex with 0x prefix, 32 bytes).
+    pub whir_session_id: String,
+    /// WHIR evaluation value in Ext3 {c0, c1, c2}.
+    pub whir_eval: Ext3Fixture,
+    /// WHIR protocol parameters for on-chain verification.
+    pub whir_params: WhirParamsFixture,
+}
+
+/// Ext3 field element fixture {c0, c1, c2} as decimal strings.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Ext3Fixture {
+    pub c0: String,
+    pub c1: String,
+    pub c2: String,
+}
+
+/// WHIR protocol parameters for Solidity verifier.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WhirParamsFixture {
+    pub num_variables: usize,
+    pub folding_factor: usize,
+    pub num_vectors: usize,
+    pub out_domain_samples: usize,
+    pub in_domain_samples: usize,
+    pub initial_sumcheck_rounds: usize,
+    pub num_rounds: usize,
+    pub final_sumcheck_rounds: usize,
+    pub final_size: usize,
+    pub initial_codeword_length: usize,
+    pub initial_merkle_depth: usize,
+    pub initial_domain_generator: String,
+    pub rounds: Vec<WhirRoundParamsFixture>,
+}
+
+/// Per-round WHIR parameters.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WhirRoundParamsFixture {
+    pub codeword_length: usize,
+    pub merkle_depth: usize,
+    pub domain_generator: String,
+    pub in_domain_samples: usize,
+    pub out_domain_samples: usize,
+    pub sumcheck_rounds: usize,
 }
 
 /// Serializable sumcheck proof.
@@ -90,6 +147,121 @@ fn sumcheck_to_fixture<F: PrimeField64>(proof: &SumcheckProof<F>) -> SumcheckFix
     }
 }
 
+fn ext3_to_fixture(v: &Field64_3) -> Ext3Fixture {
+    let elems: Vec<_> = ArkField::to_base_prime_field_elements(v).collect();
+    Ext3Fixture {
+        c0: elems[0].into_bigint().0[0].to_string(),
+        c1: elems[1].into_bigint().0[0].to_string(),
+        c2: elems[2].into_bigint().0[0].to_string(),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    format!("0x{}", bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+}
+
+fn log2_of(n: usize) -> usize {
+    assert!(n.is_power_of_two());
+    n.trailing_zeros() as usize
+}
+
+/// Compute the primitive root of unity for a domain of given size (Goldilocks field).
+fn gl_root_of_unity(size: usize) -> u64 {
+    use ark_ff::FftField;
+    let gen = ArkGoldilocks::get_root_of_unity(size as u64).expect("No root of unity");
+    gen.into_bigint().0[0]
+}
+
+/// Extract WHIR protocol parameters from config for Solidity verifier.
+fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u8>) {
+    let pcs = WhirPCS::for_num_vars(degree_bits);
+    let size = 1 << degree_bits;
+    let config = WhirConfig::<Basefield<Field64_3>>::new(size, &pcs.params);
+
+    let num_variables = degree_bits;
+    let folding_factor = pcs.params.folding_factor;
+    let num_vectors = pcs.params.batch_size;
+    let out_domain_samples = config.initial_committer.out_domain_samples;
+    let in_domain_samples = config.initial_committer.in_domain_samples;
+    let initial_sumcheck_rounds = config.initial_sumcheck.num_rounds;
+    let num_rounds = config.round_configs.len();
+    let final_sumcheck_rounds = config.final_sumcheck.num_rounds;
+
+    // Final size: after all folding, what remains
+    let mut remaining_vars = num_variables - pcs.params.initial_folding_factor;
+    for _ in &config.round_configs {
+        remaining_vars = remaining_vars.saturating_sub(folding_factor);
+    }
+    let final_size = 1 << remaining_vars;
+
+    let initial_codeword_length = config.initial_committer.codeword_length;
+    let initial_merkle_depth = log2_of(initial_codeword_length);
+    let initial_domain_generator = gl_root_of_unity(initial_codeword_length);
+
+    // Build per-round params
+    let rounds: Vec<WhirRoundParamsFixture> = config.round_configs.iter().map(|rc| {
+        let cl = rc.irs_committer.codeword_length;
+        WhirRoundParamsFixture {
+            codeword_length: cl,
+            merkle_depth: log2_of(cl),
+            domain_generator: gl_root_of_unity(cl).to_string(),
+            in_domain_samples: rc.irs_committer.in_domain_samples,
+            out_domain_samples: rc.irs_committer.out_domain_samples,
+            sumcheck_rounds: rc.sumcheck.num_rounds,
+        }
+    }).collect();
+
+    let params_fixture = WhirParamsFixture {
+        num_variables,
+        folding_factor,
+        num_vectors,
+        out_domain_samples,
+        in_domain_samples,
+        initial_sumcheck_rounds,
+        num_rounds,
+        final_sumcheck_rounds,
+        final_size,
+        initial_codeword_length,
+        initial_merkle_depth,
+        initial_domain_generator: initial_domain_generator.to_string(),
+        rounds,
+    };
+
+    // Compute protocol_id: keccak256(0x00 || cbor(config)) || keccak256(0x01 || cbor(config))
+    let protocol_id = {
+        let mut config_bytes = Vec::new();
+        ciborium::into_writer(&config, &mut config_bytes).expect("CBOR serialization failed");
+        let first: [u8; 32] = {
+            let mut h = Keccak256::new();
+            h.update([0x00]);
+            h.update(&config_bytes);
+            h.finalize().into()
+        };
+        let second: [u8; 32] = {
+            let mut h = Keccak256::new();
+            h.update([0x01]);
+            h.update(&config_bytes);
+            h.finalize().into()
+        };
+        let mut result = vec![0u8; 64];
+        result[..32].copy_from_slice(&first);
+        result[32..].copy_from_slice(&second);
+        result
+    };
+
+    // Compute session_id: keccak256(cbor(session_name))
+    let session_id = {
+        let mut session_bytes = Vec::new();
+        ciborium::into_writer(&WHIR_SESSION_NAME, &mut session_bytes)
+            .expect("CBOR serialization failed");
+        let mut h = Keccak256::new();
+        h.update(&session_bytes);
+        h.finalize().to_vec()
+    };
+
+    (params_fixture, protocol_id, session_id)
+}
+
 /// Convert an MleProof to a ProofFixture for JSON serialization.
 pub fn proof_to_fixture<F: PrimeField64>(
     proof: &MleProof<F>,
@@ -103,12 +275,14 @@ pub fn proof_to_fixture<F: PrimeField64>(
         .map(|b| format!("{:02x}", b))
         .collect();
 
+    let (whir_params, protocol_id, session_id) = extract_whir_params(degree_bits);
+
     ProofFixture {
         commitment_root: format!("0x{root_hex}"),
         perm_proof: sumcheck_to_fixture(&proof.permutation_proof.sumcheck_proof),
         perm_claimed_sum: field_to_string(proof.permutation_proof.claimed_sum),
         constraint_proof: sumcheck_to_fixture(&proof.constraint_proof),
-        pcs_evaluations: vec![], // WHIR proof is opaque bytes, not field evaluations
+        pcs_evaluations: vec![],
         eval_value: field_to_string(proof.eval_value),
         public_inputs: field_vec_to_strings(&proof.public_inputs),
         batch_r: field_to_string(proof.batch_r),
@@ -125,6 +299,12 @@ pub fn proof_to_fixture<F: PrimeField64>(
         num_routed_wires: proof.num_routed_wires,
         num_constants: proof.num_constants,
         degree_bits,
+        whir_transcript: hex_encode(&proof.eval_proof.narg_string),
+        whir_hints: hex_encode(&proof.eval_proof.hints),
+        whir_protocol_id: hex_encode(&protocol_id),
+        whir_session_id: hex_encode(&session_id),
+        whir_eval: ext3_to_fixture(&proof.whir_eval_ext3),
+        whir_params,
     }
 }
 

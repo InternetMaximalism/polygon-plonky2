@@ -26,6 +26,8 @@ ark-std = "0.5"
 ark-serialize = "0.5"
 blake3 = { version = "=1.8.3", features = ["digest", "traits-preview"] }
 digest = "0.10"
+sha3 = "0.10"
+ciborium = "0.2"
 
 [dev-dependencies]
 rand = { workspace = true, features = ["std", "std_rng"] }
