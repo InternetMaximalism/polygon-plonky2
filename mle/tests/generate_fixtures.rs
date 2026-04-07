@@ -105,6 +105,7 @@ fn generate_and_verify_all_fixtures() {
         ("large_mul", Box::new(|| build_mul_chain_circuit(200))),
         ("poseidon_hash", Box::new(|| build_hash_circuit())),
         ("recursive_verify", Box::new(|| build_recursive_circuit())),
+        ("huge_mul", Box::new(|| build_mul_chain_circuit(100000))),
     ];
 
     println!("\n============================================================");

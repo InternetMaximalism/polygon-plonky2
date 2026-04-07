@@ -40,6 +40,13 @@ contract WhirVerifyTest is Test {
         _verifyWhirFromFixture(json);
     }
 
+    /// @notice Test WHIR verification with degree_bits=13 / numRounds=2.
+    /// This exercises the intermediate round code path in SpongefishWhirVerify.
+    function test_whir_huge_mul() public view {
+        string memory json = vm.readFile("test/fixtures/huge_mul.json");
+        _verifyWhirFromFixture(json);
+    }
+
     /// @notice Test that a tampered WHIR transcript fails verification.
     function test_whir_tampered_transcript_fails() public {
         string memory json = vm.readFile("test/fixtures/small_mul.json");

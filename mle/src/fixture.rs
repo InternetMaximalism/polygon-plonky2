@@ -211,10 +211,10 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
     // Initial committer additional params
     let initial_interleaving_depth = config.initial_committer.interleaving_depth;
     let initial_num_variables = config.initial_num_variables();
+    // masked_message_length = message_length + mask_length
+    //                       = vector_size / interleaving_depth + mask_length
     let initial_mml = config.initial_committer.masked_message_length();
-    let initial_coset_size = if initial_codeword_length == 0 || initial_mml == 0 {
-        initial_codeword_length.max(1)
-    } else {
+    let initial_coset_size = {
         let mut cs = initial_mml.next_power_of_two();
         while initial_codeword_length % cs != 0 { cs *= 2; }
         cs
@@ -224,8 +224,8 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
     // Build per-round params using WHIR's own methods
     let rounds: Vec<WhirRoundParamsFixture> = config.round_configs.iter().map(|rc| {
         let cl = rc.irs_committer.codeword_length;
-        let mml = rc.irs_committer.vector_size + rc.irs_committer.mask_length;
-        let cs = if cl == 0 || mml == 0 { cl.max(1) } else {
+        let mml = rc.irs_committer.masked_message_length();
+        let cs = {
             let mut c = mml.next_power_of_two();
             while cl % c != 0 { c *= 2; }
             c
