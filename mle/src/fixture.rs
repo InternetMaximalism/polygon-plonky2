@@ -87,6 +87,7 @@ pub struct Ext3Fixture {
 }
 
 /// WHIR protocol parameters for Solidity verifier.
+/// Matches SpongefishWhirVerify.WhirParams struct exactly.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WhirParamsFixture {
@@ -102,10 +103,15 @@ pub struct WhirParamsFixture {
     pub initial_codeword_length: usize,
     pub initial_merkle_depth: usize,
     pub initial_domain_generator: String,
+    pub initial_interleaving_depth: usize,
+    pub initial_num_variables: usize,
+    pub initial_coset_size: usize,
+    pub initial_num_cosets: usize,
     pub rounds: Vec<WhirRoundParamsFixture>,
 }
 
 /// Per-round WHIR parameters.
+/// Matches SpongefishWhirVerify.RoundParams struct exactly.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WhirRoundParamsFixture {
@@ -115,6 +121,10 @@ pub struct WhirRoundParamsFixture {
     pub in_domain_samples: usize,
     pub out_domain_samples: usize,
     pub sumcheck_rounds: usize,
+    pub interleaving_depth: usize,
+    pub coset_size: usize,
+    pub num_cosets: usize,
+    pub num_variables: usize,
 }
 
 /// Serializable sumcheck proof.
@@ -198,9 +208,35 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
     let initial_merkle_depth = log2_of(initial_codeword_length);
     let initial_domain_generator = gl_root_of_unity(initial_codeword_length);
 
+    // Initial committer additional params
+    let initial_interleaving_depth = config.initial_committer.interleaving_depth;
+    let initial_num_variables = num_variables; // before first folding
+    let initial_mml = {
+        // masked_message_length = vector_size + mask_length
+        config.initial_committer.vector_size + config.initial_committer.mask_length
+    };
+    let initial_coset_size = if initial_codeword_length == 0 || initial_mml == 0 {
+        initial_codeword_length.max(1)
+    } else {
+        let mut cs = initial_mml.next_power_of_two();
+        while cs <= initial_codeword_length && initial_codeword_length % cs != 0 { cs *= 2; }
+        cs.min(initial_codeword_length).max(1)
+    };
+    let initial_num_cosets = initial_codeword_length / initial_coset_size;
+
     // Build per-round params
     let rounds: Vec<WhirRoundParamsFixture> = config.round_configs.iter().map(|rc| {
         let cl = rc.irs_committer.codeword_length;
+        let mml = rc.irs_committer.vector_size + rc.irs_committer.mask_length;
+        let mut cs = if mml == 0 { cl.max(1) } else {
+            let mut c = mml.next_power_of_two();
+            while c <= cl && cl % c != 0 { c *= 2; }
+            c.min(cl).max(1)
+        };
+        // num_variables for this round = log2(vector_size * interleaving_depth)
+        let rv = (rc.irs_committer.vector_size * rc.irs_committer.interleaving_depth)
+            .next_power_of_two()
+            .trailing_zeros() as usize;
         WhirRoundParamsFixture {
             codeword_length: cl,
             merkle_depth: log2_of(cl),
@@ -208,6 +244,10 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
             in_domain_samples: rc.irs_committer.in_domain_samples,
             out_domain_samples: rc.irs_committer.out_domain_samples,
             sumcheck_rounds: rc.sumcheck.num_rounds,
+            interleaving_depth: rc.irs_committer.interleaving_depth,
+            coset_size: cs,
+            num_cosets: cl / cs,
+            num_variables: rv,
         }
     }).collect();
 
@@ -224,6 +264,10 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
         initial_codeword_length,
         initial_merkle_depth,
         initial_domain_generator: initial_domain_generator.to_string(),
+        initial_interleaving_depth,
+        initial_num_variables,
+        initial_coset_size,
+        initial_num_cosets,
         rounds,
     };
 
