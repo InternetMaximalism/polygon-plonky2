@@ -12,8 +12,7 @@ use plonky2::plonk::circuit_data::CommonCircuitData;
 use plonky2_field::extension::Extendable;
 use plonky2_field::types::Field;
 
-use crate::commitment::merkle_pcs::MerklePCS;
-use crate::commitment::traits::MultilinearPCS;
+use crate::commitment::whir_pcs::WhirPCS;
 use crate::eq_poly;
 use crate::proof::MleProof;
 use crate::sumcheck::verifier::verify_sumcheck;
@@ -42,7 +41,8 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Absorb commitment
-    transcript.absorb_bytes(&proof.commitment.root);
+    let commitment_bytes = &proof.commitment.proof_bytes[..32.min(proof.commitment.proof_bytes.len())];
+    transcript.absorb_bytes(commitment_bytes);
 
     // Step 3: Re-derive challenges
     transcript.domain_separate("challenges");
@@ -163,16 +163,13 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Batched evaluation mismatch"
     );
 
-    let pcs = MerklePCS::new(16);
+    // Verify WHIR proof: the commitment + evaluation proof
+    let whir_pcs = WhirPCS::for_num_vars(degree_bits);
+    let whir_result = whir_pcs.verify(degree_bits, &proof.eval_proof);
     ensure!(
-        pcs.verify(
-            &proof.commitment,
-            &sumcheck_challenges,
-            proof.eval_value,
-            &proof.eval_proof,
-            &mut transcript,
-        ),
-        "PCS evaluation proof verification failed"
+        whir_result.is_ok(),
+        "WHIR PCS verification failed: {}",
+        whir_result.err().unwrap_or_default()
     );
 
     Ok(())

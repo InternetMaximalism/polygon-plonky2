@@ -97,8 +97,9 @@ pub fn proof_to_fixture<F: PrimeField64>(
 ) -> ProofFixture {
     let root_hex: String = proof
         .commitment
-        .root
+        .proof_bytes
         .iter()
+        .take(32)
         .map(|b| format!("{:02x}", b))
         .collect();
 
@@ -107,7 +108,7 @@ pub fn proof_to_fixture<F: PrimeField64>(
         perm_proof: sumcheck_to_fixture(&proof.permutation_proof.sumcheck_proof),
         perm_claimed_sum: field_to_string(proof.permutation_proof.claimed_sum),
         constraint_proof: sumcheck_to_fixture(&proof.constraint_proof),
-        pcs_evaluations: field_vec_to_strings(&proof.eval_proof.evaluations),
+        pcs_evaluations: vec![], // WHIR proof is opaque bytes, not field evaluations
         eval_value: field_to_string(proof.eval_value),
         public_inputs: field_vec_to_strings(&proof.public_inputs),
         batch_r: field_to_string(proof.batch_r),

@@ -15,9 +15,9 @@ use plonky2::plonk::config::{GenericConfig, Hasher};
 use plonky2::plonk::prover::extract_evaluation_tables;
 use plonky2::util::timing::TimingTree;
 use plonky2_field::extension::Extendable;
+use plonky2_field::types::{Field as PlonkyField, PrimeField64};
 
-use crate::commitment::merkle_pcs::MerklePCS;
-use crate::commitment::traits::MultilinearPCS;
+use crate::commitment::whir_pcs::WhirPCS;
 use crate::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtension};
 use crate::eq_poly;
@@ -104,11 +104,30 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     }
     let batched_mle = DenseMultilinearExtension::new(batched_evals);
 
-    let pcs = MerklePCS::new(16);
-    let (commitment, commit_state) = pcs.commit(&batched_mle);
+    // Step 4b: WHIR commit + eval proof
+    // WHIR handles its own transcript internally (spongefish).
+    // We absorb the WHIR commitment root into our Keccak transcript
+    // to bind the two transcript systems.
+    //
+    // WHIR operates over arkworks Field64 (same Goldilocks prime).
+    // Convert evaluations via canonical u64 representation.
+    let goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> = batched_mle
+        .evaluations
+        .iter()
+        .map(|&f| {
+            plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                f.to_canonical_u64()
+            )
+        })
+        .collect();
+    let goldilocks_mle = DenseMultilinearExtension::new(goldilocks_evals);
 
-    // Absorb commitment into transcript
-    transcript.absorb_bytes(&commitment.root);
+    let whir_pcs = WhirPCS::for_num_vars(degree_bits);
+    let (whir_commitment, whir_proof) = whir_pcs.prove(&goldilocks_mle);
+
+    // Absorb WHIR commitment (proof hash) into our transcript
+    let commitment_bytes = &whir_commitment.proof_bytes[..32.min(whir_commitment.proof_bytes.len())];
+    transcript.absorb_bytes(commitment_bytes);
 
     // Step 5: Derive challenges
     transcript.domain_separate("challenges");
@@ -240,18 +259,12 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         r_pow = r_pow * batch_r;
     }
 
-    // Step 10: PCS evaluation proof
+    // Step 10: WHIR evaluation proof is already generated in step 4b.
+    // The WHIR proof covers both commitment and evaluation.
     transcript.domain_separate("pcs-eval");
-    let eval_proof = pcs.open(
-        &commit_state,
-        &batched_mle,
-        &sumcheck_challenges,
-        batched_eval,
-        &mut transcript,
-    );
 
     Ok(MleProof {
-        commitment,
+        commitment: whir_commitment,
         constraint_proof,
         permutation_proof: PermutationProof {
             sumcheck_proof: perm_sumcheck,
@@ -259,7 +272,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
             claimed_sum: perm_claimed_sum,
         },
         lookup_proofs,
-        eval_proof,
+        eval_proof: whir_proof,
         eval_value: batched_eval,
         public_inputs: tables.public_inputs.clone(),
         batch_r,
