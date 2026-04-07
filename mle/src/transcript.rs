@@ -101,6 +101,27 @@ impl Transcript {
     pub fn squeeze_challenges<F: PrimeField64>(&mut self, n: usize) -> Vec<F> {
         (0..n).map(|_| self.squeeze_challenge()).collect()
     }
+
+    /// Returns the current accumulated state bytes (for debugging/interop testing).
+    pub fn state_bytes(&self) -> &[u8] {
+        &self.state
+    }
+
+    /// Returns the current squeeze counter (for debugging/interop testing).
+    pub fn current_squeeze_counter(&self) -> u64 {
+        self.squeeze_counter
+    }
+
+    /// Returns the keccak256 hash that WOULD be used for the next squeeze,
+    /// without advancing the counter. For debugging/interop testing only.
+    pub fn peek_next_hash(&self) -> [u8; 32] {
+        let mut to_hash = self.state.clone();
+        to_hash.extend_from_slice(&self.squeeze_counter.to_le_bytes());
+        let hash = keccak(&to_hash);
+        let mut result = [0u8; 32];
+        result.copy_from_slice(hash.as_ref());
+        result
+    }
 }
 
 impl Default for Transcript {
