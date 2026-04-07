@@ -117,7 +117,7 @@ impl WhirPCS {
         // WHIR requires num_vars >= folding_factor
         let folding_factor = num_vars.min(4).max(1);
         // Rate must leave room for folding: num_vars > starting_log_inv_rate + folding
-        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 3.min(num_vars - folding_factor) };
+        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 4.min(num_vars - folding_factor) };
         // PoW disabled; security level capped at 90 bits.
         let security_level = 90.min(num_vars * 5 + 10);
         let pow_bits = 0;
