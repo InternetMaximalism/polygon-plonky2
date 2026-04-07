@@ -192,6 +192,46 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         individual_evals.push(mle.evaluate(&sumcheck_challenges));
     }
 
+    // Step 9b: Compute PCS-bound oracle values for the Solidity verifier.
+    //
+    // pcs_constraint_eval: the flattened constraint polynomial C(r) at the
+    // sumcheck output point r. The Solidity verifier checks:
+    //   constraintFinalEval == eq(τ, r) · pcs_constraint_eval
+    //
+    // This is computed from the (already flattened) constraint MLE evaluated at r.
+    // We use the original padded_constraints (before sumcheck consumed it).
+    let constraint_mle_for_eval = DenseMultilinearExtension::new(
+        flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge)
+            .into_iter()
+            .chain(std::iter::repeat(F::ZERO))
+            .take(1 << degree_bits)
+            .collect(),
+    );
+    let pcs_constraint_eval = constraint_mle_for_eval.evaluate(&sumcheck_challenges);
+
+    // pcs_perm_numerator_eval: h(r_perm) at the permutation sumcheck output point.
+    // The permutation sumcheck produced perm_challenges as its output point.
+    // We recompute h as an MLE and evaluate it at perm_challenges.
+    let id_values = crate::permutation::logup::compute_identity_values(
+        &tables.k_is,
+        &tables.subgroup,
+        num_routed_wires,
+        degree,
+    );
+    let perm_h = crate::permutation::logup::compute_permutation_numerator(
+        &tables.wire_values,
+        &tables.sigma_values,
+        &id_values,
+        beta,
+        gamma,
+        num_routed_wires,
+        degree,
+    );
+    let mut perm_h_padded = perm_h;
+    perm_h_padded.resize(1 << degree_bits, F::ZERO);
+    let perm_h_mle = DenseMultilinearExtension::new(perm_h_padded);
+    let pcs_perm_numerator_eval = perm_h_mle.evaluate(&perm_challenges);
+
     // Recompute batched evaluation for PCS opening
     let mut batched_eval = F::ZERO;
     let mut r_pow = F::ONE;
@@ -230,6 +270,11 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         gamma,
         tau,
         tau_perm,
+        pcs_constraint_eval,
+        pcs_perm_numerator_eval,
+        num_wires: tables.num_wires,
+        num_routed_wires,
+        num_constants: common_data.num_constants,
     })
 }
 

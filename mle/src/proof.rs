@@ -35,4 +35,15 @@ pub struct MleProof<F: Field> {
     pub gamma: F,
     pub tau: Vec<F>,
     pub tau_perm: Vec<F>,
+    /// PCS-bound constraint evaluation C(r) at the sumcheck output point.
+    /// Computed by the prover as the flattened extension-field combined constraint.
+    /// The Solidity verifier checks: constraintFinalEval == eq(τ, r) · pcs_constraint_eval.
+    pub pcs_constraint_eval: F,
+    /// PCS-bound permutation numerator h(r_perm) at the permutation sumcheck output point.
+    /// The Solidity verifier checks: permFinalEval == pcs_perm_numerator_eval.
+    pub pcs_perm_numerator_eval: F,
+    /// Circuit dimensions for verifier decomposition of individual_evals.
+    pub num_wires: usize,
+    pub num_routed_wires: usize,
+    pub num_constants: usize,
 }

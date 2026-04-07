@@ -10,6 +10,7 @@ use anyhow::{ensure, Result};
 use plonky2::hash::hash_types::RichField;
 use plonky2::plonk::circuit_data::CommonCircuitData;
 use plonky2_field::extension::Extendable;
+use plonky2_field::types::Field;
 
 use crate::commitment::merkle_pcs::MerklePCS;
 use crate::commitment::traits::MultilinearPCS;
@@ -120,19 +121,32 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         &mut transcript,
     );
 
-    let (sumcheck_challenges, _final_eval) = constraint_result
+    let (sumcheck_challenges, final_eval) = constraint_result
         .map_err(|e| anyhow::anyhow!("Constraint sumcheck verification failed: {}", e))?;
 
-    // Step 6: Verify the final sumcheck evaluation
-    // final_eval should equal eq(τ, r) · C(r)
-    let _eq_at_r = eq_poly::eq_eval(&tau, &sumcheck_challenges);
+    // Step 6: Verify the final sumcheck evaluation.
+    // SECURITY: final_eval must equal eq(τ, r) · C(r), where C(r) is the
+    // PCS-bound constraint evaluation supplied by the prover.
+    let eq_at_r = eq_poly::eq_eval(&tau, &sumcheck_challenges);
+    let expected_final = eq_at_r * proof.pcs_constraint_eval;
+    ensure!(
+        expected_final == final_eval,
+        "Constraint final eval mismatch: eq(τ,r)*C(r) != finalEval"
+    );
 
-    // Reconstruct C(r) from individual evaluations
-    // C(r) = Σ_j α^j · constraint_j(wire_evals, const_evals)
-    // For now, verify that final_eval == eq(τ,r) · C(r) using the prover's claim.
-    // SECURITY: In a full implementation, C(r) would be recomputed from the
-    // individual MLE evaluations (which are bound to the PCS commitment).
-    // The current prototype trusts the individual_evals from the proof.
+    // Step 6b: Verify the permutation final evaluation.
+    // SECURITY: The permutation sumcheck's final eval must equal h(r_perm),
+    // the PCS-bound permutation numerator evaluation.
+    if let (Some(last_rp), Some(&last_challenge)) = (
+        proof.permutation_proof.sumcheck_proof.round_polys.last(),
+        proof.permutation_proof.challenges.last(),
+    ) {
+        let perm_final = last_rp.evaluate(last_challenge);
+        ensure!(
+            perm_final == proof.pcs_perm_numerator_eval,
+            "Permutation final eval mismatch: h(r_perm) != pcsPermNumeratorEval"
+        );
+    }
 
     // Step 7: Verify PCS evaluation proof
     transcript.domain_separate("pcs-eval");
