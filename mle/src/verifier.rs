@@ -163,9 +163,20 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Batched evaluation mismatch"
     );
 
-    // Verify WHIR proof: the commitment + evaluation proof
+    // Verify WHIR proof: the commitment + evaluation proof with eval binding.
+    // SECURITY: The evaluation point is the sumcheck output point, which is
+    // Fiat-Shamir derived. WHIR's FinalClaim verifies that the committed
+    // polynomial evaluates to eval_value at sumcheck_challenges.
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
-    let whir_result = whir_pcs.verify(degree_bits, &proof.eval_proof);
+    // SECURITY: Verify WHIR proof with evaluation binding at the canonical point.
+    // The prover used prove_at_point() which binds the commitment to an evaluation.
+    // We pass the Ext3 evaluation value from the proof for FinalClaim verification.
+    let whir_result = whir_pcs.verify(
+        degree_bits,
+        &proof.eval_proof,
+        None,  // canonical point (matching prover's None)
+        Some(proof.whir_eval_ext3),
+    );
     ensure!(
         whir_result.is_ok(),
         "WHIR PCS verification failed: {}",

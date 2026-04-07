@@ -440,10 +440,10 @@ fn test_tampered_eval_value_rejected() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_whir_config_rate_64() {
-    let config = WhirConfig::default_rate_64();
-    assert_eq!(config.rate_bits, 6);
-    assert_eq!(config.inv_rate(), 64);
+fn test_whir_config_rate_16() {
+    let config = WhirConfig::default_rate_16();
+    assert_eq!(config.rate_bits, 4);
+    assert_eq!(config.inv_rate(), 16);
 
     // For n=16 (65536 gates), proof should be sublinear
     let proof_size = config.estimated_proof_field_elements(16);
@@ -540,7 +540,7 @@ fn test_swapped_commitment_rejected() {
     ).unwrap();
 
     // Tamper with the commitment root (simulates a different committed polynomial)
-    proof.commitment.root[0] ^= 0xFF;
+    proof.commitment.proof_bytes[0] ^= 0xFF;
 
     let result = mle_verify::<F, D>(&circuit.common, &proof);
     assert!(result.is_err(), "Should reject tampered commitment");

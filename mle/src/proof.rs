@@ -1,5 +1,6 @@
 /// Proof structure for the MLE-native proving system.
 use plonky2_field::types::Field;
+use whir::algebra::fields::Field64_3;
 
 use crate::commitment::whir_pcs::{WhirCommitment, WhirEvalProof};
 use crate::permutation::logup::PermutationProof;
@@ -46,4 +47,7 @@ pub struct MleProof<F: Field> {
     pub num_wires: usize,
     pub num_routed_wires: usize,
     pub num_constants: usize,
+    /// WHIR evaluation value in Ext3 (for verifier to pass to WHIR verify).
+    /// Computed by the prover via WHIR's mixed_multilinear_extend.
+    pub whir_eval_ext3: Field64_3,
 }

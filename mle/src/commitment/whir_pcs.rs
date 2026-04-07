@@ -10,15 +10,18 @@ use std::borrow::Cow;
 use ark_ff::{Field as ArkField, PrimeField as ArkPrimeField};
 use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::{Field, PrimeField64};
-use whir::algebra::embedding::Identity;
-use whir::algebra::fields::Field64 as ArkGoldilocks;
+use whir::algebra::embedding::Basefield;
+use whir::algebra::fields::{Field64 as ArkGoldilocks, Field64_3};
+use whir::algebra::linear_form::{Evaluate, LinearForm, MultilinearExtension};
 use whir::parameters::ProtocolParameters;
 use whir::protocols::whir::Config as WhirConfig;
-use whir::transcript::{Codec, DomainSeparator, Proof as WhirProofData, ProverState, VerifierState};
+use whir::transcript::{DomainSeparator, Proof as WhirProofData, ProverState, VerifierState};
 use whir::transcript::codecs::Empty;
 
 use crate::dense_mle::DenseMultilinearExtension;
-use crate::transcript::Transcript;
+
+/// WHIR session name used for domain separation in Fiat-Shamir.
+pub const WHIR_SESSION_NAME: &str = "plonky2-mle-whir";
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Field conversion
@@ -51,7 +54,8 @@ pub fn ark_vec_to_plonky2(vals: &[ArkGoldilocks]) -> Vec<GoldilocksField> {
 
 /// WHIR polynomial commitment scheme operating over GoldilocksField.
 ///
-/// Uses `Identity<Field64>` embedding (base field only, no extension).
+/// Uses `Basefield<Field64_3>` embedding: polynomial data lives in the 64-bit
+/// base field, challenges use the 192-bit cubic extension for security.
 /// The WHIR config is parameterised by rate, security level, and folding factor.
 pub struct WhirPCS {
     pub params: ProtocolParameters,
@@ -65,6 +69,7 @@ pub struct WhirCommitment {
 }
 
 /// Commit state: data the prover retains for the opening phase.
+/// (Unused in the current two-phase API; kept for backward compat.)
 #[derive(Clone)]
 pub struct WhirCommitState {
     /// The original polynomial evaluations in arkworks representation.
@@ -81,7 +86,7 @@ pub struct WhirEvalProof {
 
 impl WhirPCS {
     /// Create a WHIR PCS with the given parameters.
-    /// rate = 1/2^starting_log_inv_rate (e.g., 6 for rate 1/64).
+    /// rate = 1/2^starting_log_inv_rate (e.g., 4 for rate 1/16).
     pub fn new(
         security_level: usize,
         pow_bits: usize,
@@ -101,55 +106,68 @@ impl WhirPCS {
         Self { params }
     }
 
-    /// Default: rate 1/64, 128-bit security, 20 PoW bits, folding factor 4.
-    pub fn default_rate_64() -> Self {
-        Self::new(128, 20, 6, 4)
+    /// Default: rate 1/16, 90-bit security, 0 PoW bits, folding factor 4.
+    pub fn default_rate_16() -> Self {
+        Self::new(90, 0, 4, 4)
     }
 
     /// Create a WHIR PCS with parameters adapted for a given polynomial size.
-    /// Ensures folding_factor <= num_vars to avoid size assertion failures.
+    /// Ensures folding_factor <= num_vars and PoW bits within WHIR limits.
     pub fn for_num_vars(num_vars: usize) -> Self {
         // WHIR requires num_vars >= folding_factor
         let folding_factor = num_vars.min(4).max(1);
-        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 6 };
-        let security_level = if num_vars <= 8 { 64 } else { 128 };
-        let pow_bits = if num_vars <= 8 { 0 } else { 20 };
+        // Rate must leave room for folding: num_vars > starting_log_inv_rate + folding
+        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 3.min(num_vars - folding_factor) };
+        // PoW disabled; security level capped at 90 bits.
+        let security_level = 90.min(num_vars * 5 + 10);
+        let pow_bits = 0;
         Self::new(security_level, pow_bits, starting_log_inv_rate, folding_factor)
     }
 
-    /// Generate a WHIR proof for a multilinear polynomial.
+    /// Generate a WHIR proof with evaluation binding at a specific point.
     ///
-    /// Commits to the polynomial evaluations and produces an evaluation proof
-    /// that can be verified without the full evaluation table.
-    pub fn prove(
+    /// SECURITY: The evaluation value is computed internally using WHIR's
+    /// `mixed_multilinear_extend` to ensure consistency with how WHIR verifies.
+    /// If `eval_point` is None, uses a canonical evaluation point.
+    /// Returns (commitment, proof, whir_eval_value) where whir_eval_value is the
+    /// evaluation computed via WHIR's mixed_multilinear_extend (needed for verify).
+    pub fn prove_at_point(
         &self,
         poly: &DenseMultilinearExtension<GoldilocksField>,
-    ) -> (WhirCommitment, WhirEvalProof) {
+        eval_point: Option<&[GoldilocksField]>,
+        _eval_value: Option<GoldilocksField>,
+    ) -> (WhirCommitment, WhirEvalProof, Field64_3) {
         let num_vars = poly.num_vars;
         let size = 1 << num_vars;
-
         let ark_evals = plonky2_vec_to_ark(&poly.evaluations);
 
-        // Build WHIR config
-        let config = WhirConfig::<Identity<ArkGoldilocks>>::new(size, &self.params);
-
-        // Create transcript domain separator
+        let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
         let ds = DomainSeparator::protocol(&config)
-            .session(&"plonky2-mle-whir")
+            .session(&WHIR_SESSION_NAME.to_string())
             .instance(&Empty);
 
         let mut prover_state = ProverState::new_std(&ds);
-
-        // Commit
         let witness = config.commit(&mut prover_state, &[&ark_evals]);
 
-        // Prove (no linear forms for basic evaluation proof)
+        // Build evaluation point — always compute value via WHIR's own evaluate()
+        // to ensure consistency with verifier-side computation.
+        let point_ext3: Vec<Field64_3> = if let Some(pt) = eval_point {
+            pt.iter().map(|f| Field64_3::from(f.to_canonical_u64())).collect()
+        } else {
+            (0..num_vars).map(|i| Field64_3::from((i + 1) as u64)).collect()
+        };
+        let lf = MultilinearExtension::new(point_ext3.clone());
+        let eval_ext3 = lf.evaluate(config.embedding(), &ark_evals);
+
+        let prove_lf: Vec<Box<dyn LinearForm<Field64_3>>> =
+            vec![Box::new(MultilinearExtension::new(point_ext3))];
+
         let _final_claim = config.prove(
             &mut prover_state,
             vec![Cow::Borrowed(ark_evals.as_slice())],
             vec![Cow::Owned(witness)],
-            vec![],
-            Cow::Owned(vec![]),
+            prove_lf,
+            Cow::Owned(vec![eval_ext3]),
         );
 
         let proof = prover_state.proof();
@@ -162,20 +180,37 @@ impl WhirPCS {
                 narg_string: proof.narg_string,
                 hints: proof.hints,
             },
+            eval_ext3,
         )
     }
 
-    /// Verify a WHIR proof.
+    /// Generate a WHIR proof with canonical evaluation point (legacy API).
+    pub fn prove(
+        &self,
+        poly: &DenseMultilinearExtension<GoldilocksField>,
+    ) -> (WhirCommitment, WhirEvalProof) {
+        let (c, p, _) = self.prove_at_point(poly, None, None);
+        (c, p)
+    }
+
+    /// Verify a WHIR proof with evaluation binding.
+    ///
+    /// If `eval_point` is provided, verifies that the committed polynomial
+    /// evaluates correctly at that point (via WHIR's FinalClaim + linear form).
+    /// `eval_value` is the expected evaluation (used as the claimed sum).
+    /// If None, verifies only the commitment.
     pub fn verify(
         &self,
         num_vars: usize,
         proof: &WhirEvalProof,
+        eval_point: Option<&[GoldilocksField]>,
+        eval_value_ext3: Option<Field64_3>,
     ) -> Result<(), String> {
         let size = 1 << num_vars;
 
-        let config = WhirConfig::<Identity<ArkGoldilocks>>::new(size, &self.params);
+        let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
         let ds = DomainSeparator::protocol(&config)
-            .session(&"plonky2-mle-whir")
+            .session(&WHIR_SESSION_NAME.to_string())
             .instance(&Empty);
 
         let proof_data = WhirProofData {
@@ -191,12 +226,32 @@ impl WhirPCS {
             .receive_commitment(&mut verifier_state)
             .map_err(|e| format!("WHIR commitment verification failed: {:?}", e))?;
 
+        // Build evaluations and linear forms matching what the prover passed
+        let (evaluations, verify_lf): (Vec<Field64_3>, Vec<Box<dyn LinearForm<Field64_3>>>) =
+            if let (Some(point), Some(val)) = (eval_point, eval_value_ext3) {
+                let point_ext3: Vec<Field64_3> = point
+                    .iter()
+                    .map(|f| Field64_3::from(f.to_canonical_u64()))
+                    .collect();
+                (
+                    vec![val],
+                    vec![Box::new(MultilinearExtension::new(point_ext3))
+                        as Box<dyn LinearForm<Field64_3>>],
+                )
+            } else {
+                (vec![], vec![])
+            };
+
         let final_claim = config
-            .verify(&mut verifier_state, &[&commitment], &[])
+            .verify(&mut verifier_state, &[&commitment], &evaluations)
             .map_err(|e| format!("WHIR verification failed: {:?}", e))?;
 
-        // No linear forms to check, so final_claim is trivially valid
-        let _ = final_claim;
+        // Verify the linear form (evaluation at the claimed point)
+        if !verify_lf.is_empty() {
+            final_claim
+                .verify(verify_lf.iter().map(|l| l.as_ref() as &dyn LinearForm<Field64_3>))
+                .map_err(|e| format!("WHIR evaluation verification failed: {:?}", e))?;
+        }
 
         Ok(())
     }
@@ -240,16 +295,15 @@ mod tests {
 
     #[test]
     fn test_whir_prove_verify_small() {
-        // Commit to a small polynomial and verify
         let evals: Vec<GoldilocksField> = (0..16)
             .map(|i| GoldilocksField::from_canonical_u64(i + 1))
             .collect();
         let poly = DenseMultilinearExtension::new(evals);
 
-        let pcs = WhirPCS::new(32, 0, 1, 2); // Minimal security for fast test
+        let pcs = WhirPCS::new(32, 0, 1, 2);
         let (_commitment, proof) = pcs.prove(&poly);
 
-        let result = pcs.verify(poly.num_vars, &proof);
+        let result = pcs.verify(poly.num_vars, &proof, None, None);
         assert!(result.is_ok(), "WHIR verify failed: {:?}", result.err());
     }
 
@@ -260,10 +314,33 @@ mod tests {
             .collect();
         let poly = DenseMultilinearExtension::new(evals);
 
-        let pcs = WhirPCS::new(32, 0, 1, 2); // Minimal security for fast test
+        let pcs = WhirPCS::new(32, 0, 1, 2);
         let (_commitment, proof) = pcs.prove(&poly);
 
-        let result = pcs.verify(poly.num_vars, &proof);
+        let result = pcs.verify(poly.num_vars, &proof, None, None);
         assert!(result.is_ok(), "WHIR verify failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_whir_prove_at_point_verify() {
+        let evals: Vec<GoldilocksField> = (0..16)
+            .map(|i| GoldilocksField::from_canonical_u64(i + 1))
+            .collect();
+        let poly = DenseMultilinearExtension::new(evals);
+        let num_vars = poly.num_vars;
+
+        let pcs = WhirPCS::new(32, 0, 1, 2);
+
+        // Simulate a sumcheck-derived evaluation point
+        let eval_point: Vec<GoldilocksField> = (0..num_vars)
+            .map(|i| GoldilocksField::from_canonical_u64((i as u64) * 3 + 7))
+            .collect();
+
+        // Prove with eval binding — eval_ext3 is computed internally by prove_at_point
+        let (_commitment, proof, eval_ext3) = pcs.prove_at_point(&poly, Some(&eval_point), None);
+
+        // Verify with evaluation binding — pass the same Ext3 value
+        let result = pcs.verify(num_vars, &proof, Some(&eval_point), Some(eval_ext3));
+        assert!(result.is_ok(), "prove_at_point verify failed: {:?}", result.err());
     }
 }

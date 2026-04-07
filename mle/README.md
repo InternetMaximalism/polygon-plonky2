@@ -186,11 +186,11 @@ The system targets WHIR with the following parameters (defined in `src/config.rs
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
-| `rate_bits` | 6 | Code rate = 1/2^6 = 1/64 |
-| `inv_rate` | 64 | Codeword is 64x the message length |
-| `num_queries` | 28 | Query rounds for 128-bit security |
-| `security_bits` | 128 | Target security level |
-| `pow_bits` | 20 | Proof-of-work grinding |
+| `rate_bits` | 4 | Code rate = 1/2^4 = 1/16 |
+| `inv_rate` | 16 | Codeword is 16x the message length |
+| `num_queries` | 28 | Query rounds for 90-bit security |
+| `security_bits` | 90 | Target security level |
+| `pow_bits` | 0 | Proof-of-work disabled |
 | `folding_factor` | 4 | Fold 2^4 = 16 per WHIR round |
 
 The current PCS is a Merkle-tree fallback (`merkle_pcs.rs`) with O(2^n) proof

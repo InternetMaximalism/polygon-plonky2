@@ -63,6 +63,9 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let _num_wires = tables.num_wires;
     let num_routed_wires = tables.num_routed_wires;
 
+    let _prover_start = std::time::Instant::now();
+    eprintln!("[prover] degree_bits={degree_bits}, degree={degree}");
+
     // Step 2: Initialize transcript with circuit identity
     let mut transcript = Transcript::new();
     transcript.domain_separate("circuit");
@@ -70,9 +73,11 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     transcript.absorb_field_vec(&tables.public_inputs);
 
     // Step 3: Build MLEs from evaluation tables
+    let _t = std::time::Instant::now();
     let wire_mles = tables_to_mles(&tables.wire_values);
     let const_mles = row_major_to_mles(&tables.constant_values, common_data.num_constants);
     let sigma_mles = row_major_to_mles(&tables.sigma_values, num_routed_wires);
+    eprintln!("[prover] step3 build MLEs: {:?}", _t.elapsed());
 
     // Collect all MLEs for batching
     let mut all_mles: Vec<&DenseMultilinearExtension<F>> = Vec::new();
@@ -88,6 +93,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let num_polys = all_mles.len();
 
     // Step 4: Batch MLEs and commit via PCS
+    let _t = std::time::Instant::now();
     transcript.domain_separate("batch-commit");
     let batch_r: F = transcript.squeeze_challenge();
 
@@ -103,8 +109,10 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         r_pow = r_pow * batch_r;
     }
     let batched_mle = DenseMultilinearExtension::new(batched_evals);
+    eprintln!("[prover] step4 batch MLEs: {:?}", _t.elapsed());
 
     // Step 4b: WHIR commit + eval proof
+    let _t = std::time::Instant::now();
     // WHIR handles its own transcript internally (spongefish).
     // We absorb the WHIR commitment root into our Keccak transcript
     // to bind the two transcript systems.
@@ -123,7 +131,11 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let goldilocks_mle = DenseMultilinearExtension::new(goldilocks_evals);
 
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
-    let (whir_commitment, whir_proof) = whir_pcs.prove(&goldilocks_mle);
+    let (whir_commitment, whir_proof, whir_eval_ext3) = whir_pcs.prove_at_point(
+        &goldilocks_mle, None, None,
+    );
+
+    eprintln!("[prover] step4b WHIR prove: {:?}", _t.elapsed());
 
     // Absorb WHIR commitment (proof hash) into our transcript
     let commitment_bytes = &whir_commitment.proof_bytes[..32.min(whir_commitment.proof_bytes.len())];
@@ -138,6 +150,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let tau_perm: Vec<F> = transcript.squeeze_challenges(degree_bits);
 
     // Step 6: Permutation check
+    let _t = std::time::Instant::now();
     transcript.domain_separate("permutation");
     let (perm_sumcheck, perm_challenges, perm_claimed_sum) =
         crate::permutation::logup::prove_permutation_check(
@@ -152,6 +165,8 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
             &tau_perm,
             &mut transcript,
         );
+
+    eprintln!("[prover] step6 permutation: {:?}", _t.elapsed());
 
     // Step 6b: Lookup argument (if circuit has lookup tables)
     let has_lookup = !common_data.luts.is_empty();
@@ -171,6 +186,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         Vec::new()
     };
 
+    let _t = std::time::Instant::now();
     // Step 7: Compute combined gate constraints (extension field)
     // SECURITY: Gate constraints live in F::Extension (D=2 components).
     // ALL components must be zero for the constraint to be satisfied.
@@ -190,11 +206,14 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
 
     let combined_constraints = flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
 
+    eprintln!("[prover] step7 constraints: {:?}", _t.elapsed());
+
     // Pad to power of 2
     let mut padded_constraints = combined_constraints;
     padded_constraints.resize(1 << degree_bits, F::ZERO);
 
     // Step 8: Zero-check sumcheck
+    let _t = std::time::Instant::now();
     transcript.domain_separate("zero-check");
     let eq_table = eq_poly::eq_evals(&tau);
     let _claimed_sum = compute_claimed_sum(&eq_table, &padded_constraints);
@@ -205,7 +224,10 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let (constraint_proof, sumcheck_challenges) =
         prove_sumcheck_product(&mut eq_mle, &mut constraint_mle, 2, &mut transcript);
 
+    eprintln!("[prover] step8 zero-check sumcheck: {:?}", _t.elapsed());
+
     // Step 9: Evaluate all individual MLEs at the sumcheck point
+    let _t = std::time::Instant::now();
     let mut individual_evals = Vec::with_capacity(num_polys);
     for mle in &all_mles {
         individual_evals.push(mle.evaluate(&sumcheck_challenges));
@@ -259,6 +281,8 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         r_pow = r_pow * batch_r;
     }
 
+    eprintln!("[prover] step9 individual evals + pcs: {:?}", _t.elapsed());
+
     // Step 10: WHIR evaluation proof is already generated in step 4b.
     // The WHIR proof covers both commitment and evaluation.
     transcript.domain_separate("pcs-eval");
@@ -288,6 +312,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         num_wires: tables.num_wires,
         num_routed_wires,
         num_constants: common_data.num_constants,
+        whir_eval_ext3,
     })
 }
 

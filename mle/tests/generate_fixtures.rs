@@ -136,7 +136,7 @@ fn generate_and_verify_all_fixtures() {
         println!("  num_polys={}", proof.num_polys);
         println!("  perm_rounds={}", proof.permutation_proof.sumcheck_proof.round_polys.len());
         println!("  constraint_rounds={}", proof.constraint_proof.round_polys.len());
-        println!("  pcs_evals_len={}", proof.eval_proof.evaluations.len());
+        println!("  whir_proof_bytes={}", proof.eval_proof.narg_string.len() + proof.eval_proof.hints.len());
 
         // Verify in Rust
         let start = std::time::Instant::now();
