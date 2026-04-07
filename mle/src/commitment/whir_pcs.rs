@@ -106,18 +106,18 @@ impl WhirPCS {
         Self { params }
     }
 
-    /// Default: rate 1/256, 90-bit security, 0 PoW bits, folding factor 4.
-    pub fn default_rate_256() -> Self {
-        Self::new(90, 0, 8, 4)
+    /// Default: rate 1/16, 90-bit security, 0 PoW bits, folding factor 4.
+    pub fn default_rate_16() -> Self {
+        Self::new(90, 0, 4, 4)
     }
 
     /// Create a WHIR PCS with parameters adapted for a given polynomial size.
     /// Ensures folding_factor <= num_vars and PoW bits within WHIR limits.
     pub fn for_num_vars(num_vars: usize) -> Self {
         let folding_factor = num_vars.min(4).max(1);
-        // Rate 1/256 (starting_log_inv_rate=8) for strong soundness.
+        // Rate 1/16 (starting_log_inv_rate=4).
         // Must leave room for folding: num_vars > starting_log_inv_rate + folding
-        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 8.min(num_vars - folding_factor) };
+        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 4.min(num_vars - folding_factor) };
         // PoW disabled; security level capped at 90 bits.
         let security_level = 90.min(num_vars * 5 + 10);
         let pow_bits = 0;

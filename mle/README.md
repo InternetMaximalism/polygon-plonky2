@@ -186,8 +186,8 @@ The system targets WHIR with the following parameters (defined in `src/config.rs
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
-| `rate_bits` | 8 | Code rate = 1/2^8 = 1/256 |
-| `inv_rate` | 256 | Codeword is 256x the message length |
+| `rate_bits` | 4 | Code rate = 1/2^4 = 1/16 |
+| `inv_rate` | 16 | Codeword is 16x the message length |
 | `num_queries` | 28 | Query rounds for 90-bit security |
 | `security_bits` | 90 | Target security level |
 | `pow_bits` | 0 | Proof-of-work disabled |

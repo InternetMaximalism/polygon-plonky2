@@ -22,14 +22,14 @@ pub struct WhirConfig {
 }
 
 impl WhirConfig {
-    /// Default WHIR configuration with rate = 1/256 (rate_bits = 8).
+    /// Default WHIR configuration with rate = 1/16 (rate_bits = 4).
     ///
-    /// This gives a code rate of 1/256, meaning each codeword is 256x the message length.
+    /// This gives a code rate of 1/16, meaning each codeword is 16x the message length.
     /// Combined with 90-bit security target and appropriate query count.
-    pub fn default_rate_256() -> Self {
+    pub fn default_rate_16() -> Self {
         Self {
-            rate_bits: 8,       // rate = 1/2^8 = 1/256
-            num_queries: 28,    // Sufficient for 90-bit security at rate 1/256
+            rate_bits: 4,       // rate = 1/2^4 = 1/16
+            num_queries: 28,    // Sufficient for 90-bit security at rate 1/16
             security_bits: 90,
             pow_bits: 0,
             folding_factor: 4,  // Fold by 2^4 = 16 per round
@@ -57,7 +57,7 @@ impl WhirConfig {
 
 impl Default for WhirConfig {
     fn default() -> Self {
-        Self::default_rate_256()
+        Self::default_rate_16()
     }
 }
 
@@ -88,14 +88,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = WhirConfig::default();
-        assert_eq!(config.rate_bits, 8);
-        assert_eq!(config.inv_rate(), 256);
+        assert_eq!(config.rate_bits, 4);
+        assert_eq!(config.inv_rate(), 16);
         assert_eq!(config.security_bits, 90);
     }
 
     #[test]
     fn test_proof_size_estimate() {
-        let config = WhirConfig::default_rate_256();
+        let config = WhirConfig::default_rate_16();
         // For a circuit with 2^16 gates (n=16)
         let size = config.estimated_proof_field_elements(16);
         // Should be much smaller than 2^16 = 65536

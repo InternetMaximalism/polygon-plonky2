@@ -441,9 +441,9 @@ fn test_tampered_eval_value_rejected() {
 
 #[test]
 fn test_whir_config_rate_16() {
-    let config = WhirConfig::default_rate_256();
-    assert_eq!(config.rate_bits, 8);
-    assert_eq!(config.inv_rate(), 256);
+    let config = WhirConfig::default_rate_16();
+    assert_eq!(config.rate_bits, 4);
+    assert_eq!(config.inv_rate(), 16);
 
     // For n=16 (65536 gates), proof should be sublinear
     let proof_size = config.estimated_proof_field_elements(16);
