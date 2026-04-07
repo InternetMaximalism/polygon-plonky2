@@ -58,8 +58,6 @@ contract MleVerifier {
         uint256 numWires;
         uint256 numRoutedWires;
         uint256 numConstants;
-        // Public inputs hash (4 Goldilocks elements)
-        uint256[4] publicInputsHash;
         // ORACLE: PCS-opened constraint value C(r).
         // SECURITY: Bound to WHIR commitment — prover cannot lie.
         uint256 pcsConstraintEval;
