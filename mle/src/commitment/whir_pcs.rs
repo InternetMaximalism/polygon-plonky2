@@ -113,9 +113,21 @@ impl WhirPCS {
 
     /// Create a WHIR PCS with parameters adapted for a given polynomial size.
     /// Ensures folding_factor <= num_vars and PoW bits within WHIR limits.
+    ///
+    /// For num_vars >= 12, folding_factor is increased to keep numRounds <= 1,
+    /// which reduces on-chain WHIR verification gas cost.
     pub fn for_num_vars(num_vars: usize) -> Self {
-        // WHIR requires num_vars >= folding_factor
-        let folding_factor = num_vars.min(4).max(1);
+        // Adaptive folding_factor: increase for large circuits to keep numRounds=1.
+        // After initial folding, remaining_vars = num_vars - folding_factor.
+        // WHIR produces intermediate rounds while remaining_vars >= folding_factor.
+        // To get numRounds <= 1: need num_vars - initial_folding - rate <= folding_factor,
+        // i.e. folding_factor >= (num_vars - rate) / 2.
+        let folding_factor = if num_vars >= 12 {
+            // folding by 8 covers up to num_vars=20 with numRounds=1
+            num_vars.min(8).max(1)
+        } else {
+            num_vars.min(4).max(1)
+        };
         // Rate must leave room for folding: num_vars > starting_log_inv_rate + folding
         let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 4.min(num_vars - folding_factor) };
         // PoW disabled; security level capped at 90 bits.
