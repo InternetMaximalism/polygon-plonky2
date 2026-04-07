@@ -6,40 +6,41 @@ import {TranscriptLib} from "./TranscriptLib.sol";
 import {SumcheckVerifier} from "./SumcheckVerifier.sol";
 import {EqPolyLib} from "./EqPolyLib.sol";
 import {ConstraintEvaluator} from "./ConstraintEvaluator.sol";
+import {SpongefishWhirVerify} from "./spongefish/SpongefishWhirVerify.sol";
+import {GoldilocksExt3} from "./spongefish/GoldilocksExt3.sol";
 
 /// @title MleVerifier
-/// @notice On-chain verifier for the Plonky2-MLE proof system.
+/// @notice On-chain verifier for the Plonky2-MLE proof system with WHIR PCS.
 /// @dev Verifies:
-///      1. Fiat-Shamir transcript reconstruction
+///      1. Fiat-Shamir transcript reconstruction (Keccak-based)
 ///      2. Permutation check (plain sumcheck, Σ h(b) = 0) + final eval via PCS
 ///      3. Zero-check sumcheck (Σ eq(τ,b)·C(b) = 0) + final eval via PCS
-///      4. PCS evaluation proof (Merkle root + MLE evaluation)
+///      4. WHIR polynomial commitment proof (replaces old Merkle PCS)
 ///
-///      WHIR configuration: rate = 8 (code rate 1/64).
-///      Goldilocks field: p = 2^64 - 2^32 + 1.
+///      Two independent transcript systems are cryptographically bound:
+///      - TranscriptLib (Keccak): MLE protocol challenges
+///      - Spongefish (WHIR internal): WHIR folding/sumcheck challenges
+///      Binding: WHIR commitment root (first 32 bytes of transcript) is
+///      absorbed into the Keccak transcript.
 ///
 ///      CONSTRAINT EVALUATION STRATEGY (oracle approach):
-///      The Rust prover computes C(r) for ALL gate types (including Poseidon,
-///      CosetInterpolation, extension field gates) and commits it as an
-///      additional MLE in the PCS batch. The verifier receives C(r) as a
-///      PCS-bound value, avoiding the need to re-implement 12+ gate types
-///      in Solidity. Soundness follows from PCS binding.
+///      The Rust prover computes C(r) for ALL gate types and commits it in
+///      the PCS batch. Soundness follows from WHIR commitment binding.
+///      Goldilocks field: p = 2^64 - 2^32 + 1.
 contract MleVerifier {
     using F for uint256;
 
     uint256 constant P = 0xFFFFFFFF00000001;
-    uint256 constant WHIR_RATE = 8;
-    uint256 constant WHIR_INV_RATE = 64;
-    uint256 constant SECURITY_BITS = 128;
 
     struct MleProof {
-        bytes32 commitmentRoot;
+        // WHIR PCS proof data (replaces old commitmentRoot + pcsEvaluations)
+        bytes whirTranscript;       // Serialized WHIR spongefish transcript
+        bytes whirHints;            // WHIR verification hints (Merkle paths etc.)
         // Sumcheck proofs
         SumcheckVerifier.SumcheckProof permProof;
         uint256 permClaimedSum;
         SumcheckVerifier.SumcheckProof constraintProof;
-        // PCS: batched polynomial evaluations at sumcheck point
-        uint256[] pcsEvaluations;    // Full evaluation table for Merkle root verification
+        // Batched evaluation
         uint256 evalValue;           // P(r) batched evaluation
         // Public inputs
         uint256[] publicInputs;
@@ -59,21 +60,27 @@ contract MleVerifier {
         uint256 numConstants;
         // Public inputs hash (4 Goldilocks elements)
         uint256[4] publicInputsHash;
-        // ORACLE: PCS-opened constraint value C(r) (flattened extension field).
-        // This is the combined gate constraint evaluation at the sumcheck point,
-        // committed as an additional MLE in the PCS batch.
-        // SECURITY: This value is bound to the PCS commitment — the prover
-        // cannot lie about it without breaking Merkle/PCS binding.
+        // ORACLE: PCS-opened constraint value C(r).
+        // SECURITY: Bound to WHIR commitment — prover cannot lie.
         uint256 pcsConstraintEval;
-        // ORACLE: PCS-opened permutation numerator h(r_perm) at the permutation
-        // sumcheck point. Also committed in the PCS batch.
+        // ORACLE: PCS-opened permutation numerator h(r_perm).
         uint256 pcsPermNumeratorEval;
     }
 
-    /// @notice Verify an MLE proof.
-    /// @param proof The complete proof.
+    /// @notice Verify an MLE proof with WHIR PCS.
+    /// @param proof The complete proof including WHIR transcript/hints.
     /// @param degreeBits log2 of the circuit degree (number of sumcheck rounds).
-    function verify(MleProof calldata proof, uint256 degreeBits)
+    /// @param whirParams WHIR protocol parameters (set per circuit at deployment).
+    /// @param protocolId WHIR protocol ID (64 bytes, from CBOR-encoded config).
+    /// @param sessionId WHIR session ID (32 bytes, from session name).
+    function verify(
+        MleProof calldata proof,
+        uint256 degreeBits,
+        SpongefishWhirVerify.WhirParams memory whirParams,
+        bytes memory protocolId,
+        bytes memory sessionId,
+        GoldilocksExt3.Ext3[] memory whirEvaluations
+    )
         external
         pure
         returns (bool)
@@ -93,7 +100,14 @@ contract MleVerifier {
         uint256 batchR = TranscriptLib.squeezeChallenge(transcript);
         require(batchR == proof.batchR, "Batch R mismatch");
 
-        TranscriptLib.absorbBytes(transcript, abi.encodePacked(proof.commitmentRoot));
+        // Extract WHIR commitment root from transcript (first 32 bytes)
+        // SECURITY: This binds the WHIR transcript to our Keccak transcript.
+        require(proof.whirTranscript.length >= 32, "WHIR transcript too short");
+        bytes memory commitmentRoot = new bytes(32);
+        for (uint256 i = 0; i < 32; i++) {
+            commitmentRoot[i] = proof.whirTranscript[i];
+        }
+        TranscriptLib.absorbBytes(transcript, commitmentRoot);
 
         // ── Step 3: Derive challenges ──
         TranscriptLib.domainSeparate(transcript, "challenges");
@@ -116,9 +130,7 @@ contract MleVerifier {
         (, uint256 permFinalEval) =
             SumcheckVerifier.verify(permProofMem, proof.permClaimedSum, degreeBits, transcript);
 
-        // SECURITY (Finding 3 fix): Verify permutation final evaluation.
-        // permFinalEval = h(r_perm), and the prover supplies the PCS-opened
-        // h(r_perm) value. These must match.
+        // SECURITY: Verify permutation final evaluation matches PCS-opened value.
         require(
             permFinalEval == proof.pcsPermNumeratorEval,
             "Perm final eval != PCS-opened h(r_perm)"
@@ -136,9 +148,8 @@ contract MleVerifier {
         (uint256[] memory sumcheckChallenges, uint256 constraintFinalEval) =
             SumcheckVerifier.verify(constraintProofMem, 0, degreeBits, transcript);
 
-        // ── Step 6: Verify constraint final evaluation (Finding 2 fix) ──
+        // ── Step 6: Verify constraint final evaluation ──
         // SECURITY: constraintFinalEval == eq(τ, r) · C(r)
-        // C(r) is the PCS-opened constraint evaluation (covers ALL gate types).
         uint256 eqAtR = EqPolyLib.eqEval(tau, sumcheckChallenges);
         require(
             ConstraintEvaluator.verifyConstraintEval(
@@ -149,50 +160,35 @@ contract MleVerifier {
             "Constraint final eval mismatch: eq(tau,r)*C(r) != finalEval"
         );
 
-        // ── Step 7: Verify PCS evaluation proof ──
+        // ── Step 7: Verify batched evaluation consistency ──
         TranscriptLib.domainSeparate(transcript, "pcs-eval");
 
-        // Verify batched evaluation consistency
         uint256 expectedBatched = _computeBatchedEval(proof.individualEvals, batchR);
         require(expectedBatched == proof.evalValue, "Batched eval mismatch");
 
-        // Verify individual evals count matches circuit dimensions
-        // Layout: [wire_0,..,wire_{W-1}, const_0,..,const_{C-1}, sigma_0,..,sigma_{R-1}]
         require(
             proof.individualEvals.length == proof.numWires + proof.numConstants + proof.numRoutedWires,
             "individualEvals length mismatch"
         );
 
-        // Verify Merkle root
-        require(
-            proof.pcsEvaluations.length > 0 &&
-            (proof.pcsEvaluations.length & (proof.pcsEvaluations.length - 1)) == 0,
-            "PCS evals must be power of 2"
+        // ── Step 8: Verify WHIR polynomial commitment proof ──
+        // SECURITY: This replaces the old Merkle root + MLE evaluation check.
+        // SpongefishWhirVerify verifies the WHIR commitment and evaluation
+        // proof using its own spongefish transcript (independent of our Keccak).
+        // The binding between the two transcripts is established by absorbing
+        // the WHIR commitment root into our Keccak transcript (Step 2 above).
+        bool whirValid = SpongefishWhirVerify.verifyWhirProof(
+            protocolId,
+            sessionId,
+            "" /* instance: empty for our usage */,
+            proof.whirTranscript,
+            proof.whirHints,
+            whirEvaluations,
+            whirParams
         );
-        bytes32 computedRoot = _computeMerkleRoot(proof.pcsEvaluations);
-        require(computedRoot == proof.commitmentRoot, "Merkle root mismatch");
-
-        // Verify MLE evaluation at sumcheck point
-        uint256 computedEval = _evaluateMLE(proof.pcsEvaluations, sumcheckChallenges);
-        require(computedEval == proof.evalValue, "MLE eval mismatch");
+        require(whirValid, "WHIR PCS verification failed");
 
         return true;
-    }
-
-    /// @notice Estimate verification gas for a given circuit size.
-    function estimateGas(uint256 degreeBits, uint256 numPolys)
-        external
-        pure
-        returns (uint256 gasEstimate)
-    {
-        uint256 sumcheckGas = degreeBits * 22000;
-        uint256 totalSumcheckGas = sumcheckGas * 2;
-        uint256 eqGas = degreeBits * 200;
-        uint256 size = 1 << degreeBits;
-        uint256 merkleGas = size * 36;
-        uint256 mleGas = size * 15;
-        uint256 transcriptGas = degreeBits * numPolys * 50;
-        gasEstimate = totalSumcheckGas + eqGas + merkleGas + mleGas + transcriptGas + 21000;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -250,77 +246,6 @@ contract MleVerifier {
                 let v := calldataload(add(off, mul(i, 0x20)))
                 result := addmod(result, mulmod(rPow, v, p), p)
                 rPow := mulmod(rPow, batchR, p)
-            }
-        }
-    }
-
-    function _computeMerkleRoot(uint256[] calldata evals)
-        private pure returns (bytes32 root)
-    {
-        uint256 n = evals.length;
-        if (n == 0) return bytes32(0);
-        bytes32[] memory layer = new bytes32[](n);
-        for (uint256 i = 0; i < n; i++) {
-            uint64 val = uint64(evals[i]);
-            assembly {
-                mstore8(0x00, and(val, 0xff))
-                mstore8(0x01, and(shr(8, val), 0xff))
-                mstore8(0x02, and(shr(16, val), 0xff))
-                mstore8(0x03, and(shr(24, val), 0xff))
-                mstore8(0x04, and(shr(32, val), 0xff))
-                mstore8(0x05, and(shr(40, val), 0xff))
-                mstore8(0x06, and(shr(48, val), 0xff))
-                mstore8(0x07, and(shr(56, val), 0xff))
-                mstore(add(add(layer, 0x20), mul(i, 0x20)), keccak256(0x00, 8))
-            }
-        }
-        while (n > 1) {
-            uint256 nextN = (n + 1) / 2;
-            for (uint256 i = 0; i < nextN; i++) {
-                bytes32 left = layer[2 * i];
-                bytes32 right = (2 * i + 1 < n) ? layer[2 * i + 1] : layer[2 * i];
-                assembly {
-                    mstore(0x00, left)
-                    mstore(0x20, right)
-                    mstore(add(add(layer, 0x20), mul(i, 0x20)), keccak256(0x00, 0x40))
-                }
-            }
-            n = nextN;
-        }
-        root = layer[0];
-    }
-
-    function _evaluateMLE(uint256[] calldata evals, uint256[] memory point)
-        private pure returns (uint256 result)
-    {
-        uint256 n = point.length;
-        uint256 size = evals.length;
-        require(size == (1 << n), "MLE size mismatch");
-        uint256[] memory eqTable = new uint256[](size);
-        assembly {
-            let p := 0xFFFFFFFF00000001
-            let tPtr := add(eqTable, 0x20)
-            let pPtr := add(point, 0x20)
-            for { let i := 0 } lt(i, size) { i := add(i, 1) } {
-                mstore(add(tPtr, mul(i, 0x20)), 1)
-            }
-            for { let j := 0 } lt(j, n) { j := add(j, 1) } {
-                let t_j := mload(add(pPtr, mul(j, 0x20)))
-                let omt := addmod(1, sub(p, t_j), p)
-                for { let i := 0 } lt(i, size) { i := add(i, 1) } {
-                    let pos := add(tPtr, mul(i, 0x20))
-                    let cur := mload(pos)
-                    switch and(shr(j, i), 1)
-                    case 0 { mstore(pos, mulmod(cur, omt, p)) }
-                    default { mstore(pos, mulmod(cur, t_j, p)) }
-                }
-            }
-            result := 0
-            let off := evals.offset
-            for { let i := 0 } lt(i, size) { i := add(i, 1) } {
-                let fi := calldataload(add(off, mul(i, 0x20)))
-                let ei := mload(add(tPtr, mul(i, 0x20)))
-                result := addmod(result, mulmod(fi, ei, p), p)
             }
         }
     }

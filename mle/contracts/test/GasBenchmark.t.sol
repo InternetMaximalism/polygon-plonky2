@@ -82,8 +82,5 @@ contract GasBenchmarkTest {
         testContract.benchmarkSumcheck(16);
     }
 
-    function test_gasEstimates() public view {
-        (uint256 g8, uint256 g12, uint256 g16, uint256 g20) = testContract.getGasEstimates(address(verifier));
-        g8; g12; g16; g20;
-    }
+    // Gas estimates removed — WHIR verification gas depends on proof size, not O(2^n).
 }

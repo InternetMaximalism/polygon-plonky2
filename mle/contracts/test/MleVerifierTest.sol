@@ -241,22 +241,4 @@ contract MleVerifierTest {
         gasUsed = g - gasleft();
     }
 
-    /// @notice Get gas estimates for various circuit sizes.
-    /// @dev Uses the MleVerifier.estimateGas static function.
-    function getGasEstimates(address verifierAddr)
-        external
-        view
-        returns (
-            uint256 gasN8,
-            uint256 gasN12,
-            uint256 gasN16,
-            uint256 gasN20
-        )
-    {
-        MleVerifier v = MleVerifier(verifierAddr);
-        gasN8 = v.estimateGas(8, 100);
-        gasN12 = v.estimateGas(12, 100);
-        gasN16 = v.estimateGas(16, 200);
-        gasN20 = v.estimateGas(20, 300);
-    }
 }
