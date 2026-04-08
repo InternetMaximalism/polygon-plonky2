@@ -41,13 +41,56 @@ library TranscriptLib {
     }
 
     /// @notice Absorb a slice of Goldilocks field elements.
+    /// @dev Optimized: single allocation instead of N+1 abi.encodePacked calls.
+    ///      Appends [length_u64_LE || elem0_u64_LE || ... || elemN_u64_LE] to state.
     function absorbFieldVec(Transcript memory t, uint256[] memory elems) internal pure {
-        bytes memory lenBytes = _u64ToLE(uint64(elems.length));
-        t.state = abi.encodePacked(t.state, lenBytes);
-        for (uint256 i = 0; i < elems.length; i++) {
+        uint256 n = elems.length;
+        // Validate all elements < P first
+        for (uint256 i = 0; i < n; i++) {
             require(elems[i] < P, "Field element >= P");
-            t.state = abi.encodePacked(t.state, _u64ToLE(uint64(elems[i])));
         }
+        // Append (1 + n) * 8 bytes to state in a single allocation
+        bytes memory oldState = t.state;
+        uint256 oldLen = oldState.length;
+        uint256 appendLen = (1 + n) * 8; // length prefix + n elements, each 8 bytes
+        bytes memory newState = new bytes(oldLen + appendLen);
+        assembly {
+            // Copy old state
+            let src := add(oldState, 0x20)
+            let dst := add(newState, 0x20)
+            // Copy in 32-byte chunks
+            for { let off := 0 } lt(off, oldLen) { off := add(off, 0x20) } {
+                mstore(add(dst, off), mload(add(src, off)))
+            }
+            // Write length prefix as u64 LE
+            let writePtr := add(dst, oldLen)
+            // Store n as u64 LE (8 bytes) — byte-reverse the low 64 bits
+            // u64 LE of n: byte 0 = n & 0xFF, byte 1 = (n >> 8) & 0xFF, ...
+            mstore8(writePtr, and(n, 0xff))
+            mstore8(add(writePtr, 1), and(shr(8, n), 0xff))
+            mstore8(add(writePtr, 2), and(shr(16, n), 0xff))
+            mstore8(add(writePtr, 3), and(shr(24, n), 0xff))
+            mstore8(add(writePtr, 4), and(shr(32, n), 0xff))
+            mstore8(add(writePtr, 5), and(shr(40, n), 0xff))
+            mstore8(add(writePtr, 6), and(shr(48, n), 0xff))
+            mstore8(add(writePtr, 7), and(shr(56, n), 0xff))
+            writePtr := add(writePtr, 8)
+            // Write each element as u64 LE
+            let elemsData := add(elems, 0x20)
+            for { let i := 0 } lt(i, n) { i := add(i, 1) } {
+                let val := mload(add(elemsData, mul(i, 0x20)))
+                mstore8(writePtr, and(val, 0xff))
+                mstore8(add(writePtr, 1), and(shr(8, val), 0xff))
+                mstore8(add(writePtr, 2), and(shr(16, val), 0xff))
+                mstore8(add(writePtr, 3), and(shr(24, val), 0xff))
+                mstore8(add(writePtr, 4), and(shr(32, val), 0xff))
+                mstore8(add(writePtr, 5), and(shr(40, val), 0xff))
+                mstore8(add(writePtr, 6), and(shr(48, val), 0xff))
+                mstore8(add(writePtr, 7), and(shr(56, val), 0xff))
+                writePtr := add(writePtr, 8)
+            }
+        }
+        t.state = newState;
         t.squeezeCounter = 0;
     }
 

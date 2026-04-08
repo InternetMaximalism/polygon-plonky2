@@ -79,11 +79,18 @@ library SpongefishWhir {
         bytes memory transcript
     ) internal pure returns (uint64 val) {
         bytes memory data = proverMessage(ts, transcript, 8);
-        // Little-endian decode
-        for (uint256 i = 0; i < 8; i++) {
-            val |= uint64(uint8(data[i])) << (i * 8);
+        // Little-endian decode: load 8 bytes at data+0x20, mask, and byte-swap
+        assembly {
+            let raw := mload(add(data, 0x20))
+            // raw has our 8 bytes in the HIGH 64 bits (big-endian memory layout)
+            // Shift right by 192 bits to get them in the low 64 bits
+            raw := shr(192, raw)
+            // Byte-swap from BE to LE: abcdefgh -> hgfedcba
+            raw := or(shl(32, and(raw, 0x00000000FFFFFFFF)), shr(32, and(raw, 0xFFFFFFFF00000000)))
+            raw := or(shl(16, and(raw, 0x0000FFFF0000FFFF)), shr(16, and(raw, 0xFFFF0000FFFF0000)))
+            raw := or(shl(8,  and(raw, 0x00FF00FF00FF00FF)), shr(8,  and(raw, 0xFF00FF00FF00FF00)))
+            val := mod(raw, 0xFFFFFFFF00000001) // GL_P
         }
-        val = val % GL_P;
     }
 
     /// @dev Squeeze N bytes from sponge (verifier challenge).
@@ -368,36 +375,84 @@ library SpongefishWhir {
         }
     }
 
+    /// @dev Sort array in-place and remove duplicates. Updates array length.
     function _sortAndDedup(uint256[] memory arr) private pure {
         uint256 n = arr.length;
-        if (n > 1) _quicksort(arr, 0, n - 1);
-        // Dedup
         if (n <= 1) return;
-        uint256 write = 1;
-        for (uint256 i = 1; i < n; i++) {
-            if (arr[i] != arr[i - 1]) {
-                arr[write++] = arr[i];
-            }
-        }
-        assembly { mstore(arr, write) }
-    }
 
-    function _quicksort(uint256[] memory arr, uint256 lo, uint256 hi) private pure {
-        if (lo >= hi) return;
-        uint256 pivot = arr[(lo + hi) / 2];
-        uint256 i = lo;
-        uint256 j = hi;
-        while (i <= j) {
-            while (arr[i] < pivot) i++;
-            while (arr[j] > pivot) { if (j == 0) break; j--; }
-            if (i <= j) {
-                (arr[i], arr[j]) = (arr[j], arr[i]);
-                i++;
-                if (j == 0) break;
-                j--;
+        // Iterative quicksort in assembly — avoids recursive function call overhead
+        assembly {
+            let base := add(arr, 0x20) // pointer to arr[0]
+
+            // Use scratch memory for an explicit stack (max depth ~64 for any practical size)
+            let stackPtr := mload(0x40)
+            let stackBase := stackPtr
+
+            // Push initial (lo=0, hi=n-1)
+            mstore(stackPtr, 0)
+            mstore(add(stackPtr, 0x20), sub(n, 1))
+            stackPtr := add(stackPtr, 0x40)
+
+            for { } gt(stackPtr, stackBase) { } {
+                // Pop (lo, hi)
+                stackPtr := sub(stackPtr, 0x40)
+                let lo := mload(stackPtr)
+                let hi := mload(add(stackPtr, 0x20))
+
+                if lt(lo, hi) {
+                    // Partition: pivot = arr[(lo+hi)/2]
+                    let mid := add(lo, shr(1, sub(hi, lo)))
+                    let pivot := mload(add(base, mul(mid, 0x20)))
+                    let i := lo
+                    let j := hi
+
+                    for { } iszero(gt(i, j)) { } {
+                        // while arr[i] < pivot: i++
+                        for { } lt(mload(add(base, mul(i, 0x20))), pivot) { i := add(i, 1) } { }
+                        // while arr[j] > pivot: j--
+                        for { } gt(mload(add(base, mul(j, 0x20))), pivot) { } {
+                            if iszero(j) { break }
+                            j := sub(j, 1)
+                        }
+                        if iszero(gt(i, j)) {
+                            // swap arr[i], arr[j]
+                            let pi := add(base, mul(i, 0x20))
+                            let pj := add(base, mul(j, 0x20))
+                            let tmp := mload(pi)
+                            mstore(pi, mload(pj))
+                            mstore(pj, tmp)
+                            i := add(i, 1)
+                            if iszero(j) { break }
+                            j := sub(j, 1)
+                        }
+                    }
+
+                    // Push sub-partitions onto stack
+                    if lt(lo, j) {
+                        mstore(stackPtr, lo)
+                        mstore(add(stackPtr, 0x20), j)
+                        stackPtr := add(stackPtr, 0x40)
+                    }
+                    if lt(i, hi) {
+                        mstore(stackPtr, i)
+                        mstore(add(stackPtr, 0x20), hi)
+                        stackPtr := add(stackPtr, 0x40)
+                    }
+                }
             }
+
+            // Dedup in-place
+            let write := 1
+            for { let k := 1 } lt(k, n) { k := add(k, 1) } {
+                let curr := mload(add(base, mul(k, 0x20)))
+                let prev := mload(add(base, mul(sub(k, 1), 0x20)))
+                if iszero(eq(curr, prev)) {
+                    mstore(add(base, mul(write, 0x20)), curr)
+                    write := add(write, 1)
+                }
+            }
+            // Update array length
+            mstore(arr, write)
         }
-        if (lo < j) _quicksort(arr, lo, j);
-        if (i < hi) _quicksort(arr, i, hi);
     }
 }

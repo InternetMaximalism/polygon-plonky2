@@ -52,10 +52,10 @@ contract WhirVerifyTest is Test {
         string memory json = vm.readFile("test/fixtures/small_mul.json");
 
         // Parse the WHIR data
-        bytes memory transcript = vm.parseJsonBytes(json, ".whirTranscript");
-        bytes memory hints = vm.parseJsonBytes(json, ".whirHints");
+        bytes memory transcript = vm.parseJsonBytes(json, ".witnessWhirTranscript");
+        bytes memory hints = vm.parseJsonBytes(json, ".witnessWhirHints");
         bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory sessionId = vm.parseJsonBytes(json, ".whirSessionId");
+        bytes memory sessionId = vm.parseJsonBytes(json, ".whirWitnessSessionId");
 
         // Build evaluations
         GoldilocksExt3.Ext3[] memory evaluations = _parseEvaluations(json);
@@ -96,10 +96,10 @@ contract WhirVerifyTest is Test {
     // ═══════════════════════════════════════════════════════════════════════
 
     function _verifyWhirFromFixture(string memory json) internal view {
-        bytes memory transcript = vm.parseJsonBytes(json, ".whirTranscript");
-        bytes memory hints = vm.parseJsonBytes(json, ".whirHints");
+        bytes memory transcript = vm.parseJsonBytes(json, ".witnessWhirTranscript");
+        bytes memory hints = vm.parseJsonBytes(json, ".witnessWhirHints");
         bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory sessionId = vm.parseJsonBytes(json, ".whirSessionId");
+        bytes memory sessionId = vm.parseJsonBytes(json, ".whirWitnessSessionId");
 
         console.log("WHIR transcript length:", transcript.length);
         console.log("WHIR hints length:", hints.length);
@@ -127,9 +127,9 @@ contract WhirVerifyTest is Test {
     }
 
     function _parseEvaluations(string memory json) internal pure returns (GoldilocksExt3.Ext3[] memory) {
-        uint64 c0 = uint64(vm.parseJsonUint(json, ".whirEval.c0"));
-        uint64 c1 = uint64(vm.parseJsonUint(json, ".whirEval.c1"));
-        uint64 c2 = uint64(vm.parseJsonUint(json, ".whirEval.c2"));
+        uint64 c0 = uint64(vm.parseJsonUint(json, ".witnessWhirEval.c0"));
+        uint64 c1 = uint64(vm.parseJsonUint(json, ".witnessWhirEval.c1"));
+        uint64 c2 = uint64(vm.parseJsonUint(json, ".witnessWhirEval.c2"));
 
         GoldilocksExt3.Ext3[] memory evals = new GoldilocksExt3.Ext3[](1);
         evals[0] = GoldilocksExt3.Ext3(c0, c1, c2);

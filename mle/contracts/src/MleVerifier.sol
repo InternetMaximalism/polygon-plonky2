@@ -275,9 +275,10 @@ contract MleVerifier {
 
     function _validateInputs(MleProof calldata proof) private pure {
         require(proof.circuitDigest.length == 4, "circuitDigest must be 4 elements");
-        for (uint256 i = 0; i < 4; i++) {
-            require(proof.circuitDigest[i] < P, "circuitDigest >= P");
-        }
+
+        // Validate scalar fields < P
+        require(proof.circuitDigest[0] < P && proof.circuitDigest[1] < P
+             && proof.circuitDigest[2] < P && proof.circuitDigest[3] < P, "circuitDigest >= P");
         require(proof.preprocessedEvalValue < P, "preprocessedEvalValue >= P");
         require(proof.preprocessedBatchR < P, "preprocessedBatchR >= P");
         require(proof.witnessEvalValue < P, "witnessEvalValue >= P");
@@ -289,29 +290,38 @@ contract MleVerifier {
         require(proof.pcsConstraintEval < P, "pcsConstraintEval >= P");
         require(proof.pcsPermNumeratorEval < P, "pcsPermNumeratorEval >= P");
 
-        for (uint256 i = 0; i < proof.publicInputs.length; i++) {
-            require(proof.publicInputs[i] < P, "publicInput >= P");
-        }
-        for (uint256 i = 0; i < proof.preprocessedIndividualEvals.length; i++) {
-            require(proof.preprocessedIndividualEvals[i] < P, "preprocessedIndividualEval >= P");
-        }
-        for (uint256 i = 0; i < proof.witnessIndividualEvals.length; i++) {
-            require(proof.witnessIndividualEvals[i] < P, "witnessIndividualEval >= P");
-        }
-        for (uint256 i = 0; i < proof.tau.length; i++) {
-            require(proof.tau[i] < P, "tau >= P");
-        }
-        for (uint256 i = 0; i < proof.tauPerm.length; i++) {
-            require(proof.tauPerm[i] < P, "tauPerm >= P");
-        }
+        // Validate array fields < P using assembly loops
+        _validateCalldataArray(proof.publicInputs);
+        _validateCalldataArray(proof.preprocessedIndividualEvals);
+        _validateCalldataArray(proof.witnessIndividualEvals);
+        _validateCalldataArray(proof.tau);
+        _validateCalldataArray(proof.tauPerm);
+
+        // Validate sumcheck round polys
         for (uint256 i = 0; i < proof.permProof.roundPolys.length; i++) {
-            for (uint256 j = 0; j < proof.permProof.roundPolys[i].evals.length; j++) {
-                require(proof.permProof.roundPolys[i].evals[j] < P, "permRoundPoly >= P");
-            }
+            _validateCalldataArray(proof.permProof.roundPolys[i].evals);
         }
         for (uint256 i = 0; i < proof.constraintProof.roundPolys.length; i++) {
-            for (uint256 j = 0; j < proof.constraintProof.roundPolys[i].evals.length; j++) {
-                require(proof.constraintProof.roundPolys[i].evals[j] < P, "constraintRoundPoly >= P");
+            _validateCalldataArray(proof.constraintProof.roundPolys[i].evals);
+        }
+    }
+
+    /// @dev Validate all elements of a calldata uint256 array are < P.
+    function _validateCalldataArray(uint256[] calldata arr) private pure {
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let n := arr.length
+            let off := arr.offset
+            for { let i := 0 } lt(i, n) { i := add(i, 1) } {
+                let v := calldataload(add(off, mul(i, 0x20)))
+                if iszero(lt(v, p)) {
+                    // revert with "Field >= P"
+                    mstore(0x00, 0x08c379a000000000000000000000000000000000000000000000000000000000)
+                    mstore(0x04, 0x20)
+                    mstore(0x24, 10)
+                    mstore(0x44, "Field >= P")
+                    revert(0x00, 0x64)
+                }
             }
         }
     }
@@ -340,8 +350,8 @@ contract MleVerifier {
     /// @dev Extract the first 32 bytes from a calldata bytes array into memory.
     function _extractFirst32(bytes calldata data) private pure returns (bytes memory result) {
         result = new bytes(32);
-        for (uint256 i = 0; i < 32; i++) {
-            result[i] = data[i];
+        assembly {
+            calldatacopy(add(result, 0x20), data.offset, 32)
         }
     }
 
