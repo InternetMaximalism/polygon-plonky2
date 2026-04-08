@@ -12,43 +12,80 @@ use plonky2::plonk::circuit_data::CommonCircuitData;
 use plonky2_field::extension::Extendable;
 use plonky2_field::types::Field;
 
-use crate::commitment::whir_pcs::WhirPCS;
+use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_PREPROCESSED, WHIR_SESSION_WITNESS};
 use crate::eq_poly;
-use crate::proof::MleProof;
+use crate::proof::{MleProof, MleVerificationKey};
+use crate::prover::derive_preprocessed_batch_r;
 use crate::sumcheck::verifier::verify_sumcheck;
 use crate::transcript::Transcript;
 
 /// Verify an MLE proof for a Plonky2 circuit.
+///
+/// SECURITY: The `vk` parameter binds the verifier to a specific circuit.
+/// The preprocessed_commitment_root in the VK ensures the prover used the
+/// correct constants and sigma permutation polynomials.
 pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     common_data: &CommonCircuitData<F, D>,
+    vk: &MleVerificationKey<F>,
     proof: &MleProof<F>,
 ) -> Result<()> {
     let degree_bits = plonky2_util::log2_strict(
         common_data.degree(),
     );
 
-    // Step 1: Reconstruct transcript (must match prover exactly)
-    // SECURITY: Absorb circuit_digest first to verify this proof is for the
-    // expected circuit. The circuit_digest is a hash of the verifying key
-    // (constants, sigmas, circuit topology).
+    // Step 1: Verify circuit digest matches VK
+    // SECURITY: This is the first check — ensures this proof claims to be
+    // for the circuit described by the VK.
+    ensure!(
+        proof.circuit_digest == vk.circuit_digest,
+        "Circuit digest mismatch: proof does not match verification key"
+    );
+
+    // Step 1b: Verify preprocessed batch_r is correctly derived
+    // SECURITY: The preprocessed batch_r must be deterministic from circuit_digest.
+    // This prevents the prover from choosing a favorable batch_r.
+    let expected_pre_r: F = derive_preprocessed_batch_r(&proof.circuit_digest);
+    ensure!(
+        expected_pre_r == proof.preprocessed_batch_r,
+        "Preprocessed batch_r mismatch: not correctly derived from circuit_digest"
+    );
+
+    // Step 2: Verify preprocessed commitment root matches VK
+    // SECURITY: This is the critical circuit-binding check. The WHIR commitment
+    // root for the preprocessed polynomial must match the VK. An attacker who
+    // substitutes different constants/sigmas would produce a different Merkle
+    // root, failing this check.
+    let pre_root = &proof.preprocessed_commitment.proof_bytes
+        [..32.min(proof.preprocessed_commitment.proof_bytes.len())];
+    ensure!(
+        pre_root == vk.preprocessed_commitment_root.as_slice(),
+        "Preprocessed commitment root mismatch — circuit binding violated. \
+         The prover used different constants/sigmas than the verification key expects."
+    );
+
+    // Step 3: Reconstruct Fiat-Shamir transcript (must match prover exactly)
     let mut transcript = Transcript::new();
     transcript.domain_separate("circuit");
     transcript.absorb_field_vec(&proof.circuit_digest);
     transcript.absorb_field_vec(&proof.public_inputs);
 
-    // Step 2: Derive batch_r
-    transcript.domain_separate("batch-commit");
-    let batch_r: F = transcript.squeeze_challenge();
+    // Absorb preprocessed commitment root (binds preprocessed to transcript)
+    transcript.absorb_bytes(pre_root);
+
+    // Derive witness batch_r
+    transcript.domain_separate("batch-commit-witness");
+    let batch_r_wit: F = transcript.squeeze_challenge();
     ensure!(
-        batch_r == proof.batch_r,
-        "Batch random scalar mismatch"
+        batch_r_wit == proof.witness_batch_r,
+        "Witness batch random scalar mismatch"
     );
 
-    // Absorb commitment
-    let commitment_bytes = &proof.commitment.proof_bytes[..32.min(proof.commitment.proof_bytes.len())];
-    transcript.absorb_bytes(commitment_bytes);
+    // Absorb witness commitment root
+    let wit_root = &proof.witness_commitment.proof_bytes
+        [..32.min(proof.witness_commitment.proof_bytes.len())];
+    transcript.absorb_bytes(wit_root);
 
-    // Step 3: Re-derive challenges
+    // Step 4: Re-derive challenges
     transcript.domain_separate("challenges");
     let beta: F = transcript.squeeze_challenge();
     let gamma: F = transcript.squeeze_challenge();
@@ -62,13 +99,11 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     ensure!(tau == proof.tau, "Tau mismatch");
     ensure!(tau_perm == proof.tau_perm, "Tau_perm mismatch");
 
-    // Step 4: Verify permutation check sumcheck
+    // Step 5: Verify permutation check sumcheck
     transcript.domain_separate("permutation");
     let perm_proof = &proof.permutation_proof;
 
-    // Verify the permutation check: Σ_b h(b) = 0 via plain sumcheck.
     // SECURITY: The claimed sum MUST be 0 for a valid permutation.
-    // The logUp terms telescope across permutation cycles, giving Σ h(b) = 0.
     ensure!(
         perm_proof.claimed_sum == F::ZERO,
         "Permutation check failed: Σ h(b) = {} ≠ 0",
@@ -86,7 +121,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Permutation sumcheck verification failed"
     );
 
-    // Step 4b: Verify lookup proofs (if any)
+    // Step 5b: Verify lookup proofs (if any)
     let has_lookup = !common_data.luts.is_empty();
     if has_lookup {
         transcript.domain_separate("lookup");
@@ -109,14 +144,13 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         }
     }
 
-    // Step 4c: Extension field combination challenge (must match prover)
+    // Step 5c: Extension field combination challenge (must match prover)
     transcript.domain_separate("extension-combine");
     let _ext_challenge: F = transcript.squeeze_challenge();
 
-    // Step 5: Verify zero-check sumcheck (claimed sum = 0 for valid circuit)
+    // Step 6: Verify zero-check sumcheck (claimed sum = 0 for valid circuit)
     transcript.domain_separate("zero-check");
 
-    // The claimed sum should be 0 for a valid zero-check
     let zero_claim = F::ZERO;
     let constraint_result = verify_sumcheck(
         &proof.constraint_proof,
@@ -128,7 +162,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     let (sumcheck_challenges, final_eval) = constraint_result
         .map_err(|e| anyhow::anyhow!("Constraint sumcheck verification failed: {}", e))?;
 
-    // Step 6: Verify the final sumcheck evaluation.
+    // Step 7: Verify the final sumcheck evaluation.
     // SECURITY: final_eval must equal eq(τ, r) · C(r), where C(r) is the
     // PCS-bound constraint evaluation supplied by the prover.
     let eq_at_r = eq_poly::eq_eval(&tau, &sumcheck_challenges);
@@ -138,9 +172,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Constraint final eval mismatch: eq(τ,r)*C(r) != finalEval"
     );
 
-    // Step 6b: Verify the permutation final evaluation.
-    // SECURITY: The permutation sumcheck's final eval must equal h(r_perm),
-    // the PCS-bound permutation numerator evaluation.
+    // Step 7b: Verify the permutation final evaluation.
     if let (Some(last_rp), Some(&last_challenge)) = (
         proof.permutation_proof.sumcheck_proof.round_polys.last(),
         proof.permutation_proof.challenges.last(),
@@ -152,39 +184,67 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         );
     }
 
-    // Step 7: Verify PCS evaluation proof
+    // Step 8: Verify PCS evaluation proofs
     transcript.domain_separate("pcs-eval");
 
-    // Recompute batched evaluation from individual evals
-    let mut expected_batched = F::ZERO;
+    // Step 8a: Preprocessed batch consistency
+    let batch_r_pre = proof.preprocessed_batch_r;
+    let mut expected_pre_batched = F::ZERO;
     let mut r_pow = F::ONE;
-    for &eval in &proof.individual_evals {
-        expected_batched = expected_batched + r_pow * eval;
-        r_pow = r_pow * batch_r;
+    for &eval in &proof.preprocessed_individual_evals {
+        expected_pre_batched = expected_pre_batched + r_pow * eval;
+        r_pow = r_pow * batch_r_pre;
     }
     ensure!(
-        expected_batched == proof.eval_value,
-        "Batched evaluation mismatch"
+        expected_pre_batched == proof.preprocessed_eval_value,
+        "Preprocessed batched evaluation mismatch"
     );
 
-    // Verify WHIR proof: the commitment + evaluation proof with eval binding.
-    // SECURITY: The evaluation point is the sumcheck output point, which is
-    // Fiat-Shamir derived. WHIR's FinalClaim verifies that the committed
-    // polynomial evaluates to eval_value at sumcheck_challenges.
+    // Step 8b: Witness batch consistency
+    let mut expected_wit_batched = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.witness_individual_evals {
+        expected_wit_batched = expected_wit_batched + r_pow * eval;
+        r_pow = r_pow * batch_r_wit;
+    }
+    ensure!(
+        expected_wit_batched == proof.witness_eval_value,
+        "Witness batched evaluation mismatch"
+    );
+
+    // Step 8c: Verify WHIR proofs
+    // SECURITY: WHIR verification confirms that the committed polynomials are
+    // well-formed (proximity test) and evaluate correctly at the canonical point.
+    // The commitment binding ensures all evaluations are determined, and the
+    // batch_r Schwartz-Zippel argument ensures individual_evals are correct.
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
-    // SECURITY: Verify WHIR proof with evaluation binding at the canonical point.
-    // The prover used prove_at_point() which binds the commitment to an evaluation.
-    // We pass the Ext3 evaluation value from the proof for FinalClaim verification.
-    let whir_result = whir_pcs.verify(
+
+    // SECURITY: Use distinct session names for preprocessed vs witness to prevent
+    // cross-protocol proof swapping (adversarial review Finding 1).
+    let pre_whir_result = whir_pcs.verify_with_session(
         degree_bits,
-        &proof.eval_proof,
-        None,  // canonical point (matching prover's None)
-        Some(proof.whir_eval_ext3),
+        &proof.preprocessed_eval_proof,
+        None,
+        Some(proof.preprocessed_whir_eval_ext3),
+        WHIR_SESSION_PREPROCESSED,
     );
     ensure!(
-        whir_result.is_ok(),
-        "WHIR PCS verification failed: {}",
-        whir_result.err().unwrap_or_default()
+        pre_whir_result.is_ok(),
+        "Preprocessed WHIR PCS verification failed: {}",
+        pre_whir_result.err().unwrap_or_default()
+    );
+
+    let wit_whir_result = whir_pcs.verify_with_session(
+        degree_bits,
+        &proof.witness_eval_proof,
+        None,
+        Some(proof.witness_whir_eval_ext3),
+        WHIR_SESSION_WITNESS,
+    );
+    ensure!(
+        wit_whir_result.is_ok(),
+        "Witness WHIR PCS verification failed: {}",
+        wit_whir_result.err().unwrap_or_default()
     );
 
     Ok(())
@@ -193,7 +253,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prover::mle_prove;
+    use crate::prover::{mle_prove, mle_setup};
     use plonky2::iop::witness::{PartialWitness, WitnessWrite};
     use plonky2::plonk::circuit_builder::CircuitBuilder;
     use plonky2::plonk::circuit_data::CircuitConfig;
@@ -206,32 +266,132 @@ mod tests {
     type C = PoseidonGoldilocksConfig;
     const D: usize = 2;
 
-    #[test]
-    fn test_prove_verify_roundtrip() {
+    fn build_mul_circuit() -> (
+        plonky2::plonk::circuit_data::ProverOnlyCircuitData<F, C, D>,
+        plonky2::plonk::circuit_data::CommonCircuitData<F, D>,
+        plonky2::iop::target::Target,
+        plonky2::iop::target::Target,
+    ) {
         let config = CircuitConfig::standard_recursion_config();
         let mut builder = CircuitBuilder::<F, D>::new(config);
-
         let x = builder.add_virtual_target();
         let y = builder.add_virtual_target();
         let z = builder.mul(x, y);
         builder.register_public_input(z);
-
         let circuit = builder.build::<C>();
+        (circuit.prover_only, circuit.common, x, y)
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+
+        // Setup: compute verification key
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        // Prove
         let mut pw = PartialWitness::new();
         pw.set_target(x, F::from_canonical_u64(3));
         pw.set_target(y, F::from_canonical_u64(7));
 
         let mut timing = TimingTree::default();
         let proof = mle_prove::<F, C, D>(
-            &circuit.prover_only,
-            &circuit.common,
+            &prover_data,
+            &common_data,
             pw,
             &mut timing,
         )
         .unwrap();
 
         // Verify
-        let result = mle_verify::<F, D>(&circuit.common, &proof);
+        let result = mle_verify::<F, D>(&common_data, &vk, &proof);
         assert!(result.is_ok(), "Verification failed: {:?}", result.err());
+    }
+
+    /// SECURITY TEST: Tampered preprocessed commitment root must be rejected.
+    /// An attacker who modifies the commitment root (simulating different
+    /// constants/sigmas) should fail the VK binding check.
+    #[test]
+    fn test_tampered_preprocessed_root_rejected() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(x, F::from_canonical_u64(5));
+        pw.set_target(y, F::from_canonical_u64(11));
+
+        let mut timing = TimingTree::default();
+        let mut proof = mle_prove::<F, C, D>(
+            &prover_data,
+            &common_data,
+            pw,
+            &mut timing,
+        )
+        .unwrap();
+
+        // Tamper with the preprocessed commitment root
+        if !proof.preprocessed_commitment.proof_bytes.is_empty() {
+            proof.preprocessed_commitment.proof_bytes[0] ^= 0xFF;
+        }
+
+        let result = mle_verify::<F, D>(&common_data, &vk, &proof);
+        assert!(result.is_err(), "Tampered preprocessed root should be rejected");
+        let err_msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            err_msg.contains("circuit binding violated") || err_msg.contains("commitment root mismatch"),
+            "Error should mention circuit binding: {err_msg}"
+        );
+    }
+
+    /// SECURITY TEST: A proof from circuit A must not verify against VK from circuit B.
+    #[test]
+    fn test_cross_circuit_proof_rejected() {
+        // Circuit A: x * y
+        let (prover_data_a, common_data_a, x_a, y_a) = build_mul_circuit();
+        let _vk_a = mle_setup::<F, C, D>(&prover_data_a, &common_data_a);
+
+        // Circuit B: different circuit (x + y)
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder_b = CircuitBuilder::<F, D>::new(config);
+        let x_b = builder_b.add_virtual_target();
+        let y_b = builder_b.add_virtual_target();
+        let z_b = builder_b.add(x_b, y_b);
+        builder_b.register_public_input(z_b);
+        let circuit_b = builder_b.build::<C>();
+        let vk_b = mle_setup::<F, C, D>(&circuit_b.prover_only, &circuit_b.common);
+
+        // Generate proof for circuit A
+        let mut pw_a = PartialWitness::new();
+        pw_a.set_target(x_a, F::from_canonical_u64(3));
+        pw_a.set_target(y_a, F::from_canonical_u64(7));
+
+        let mut timing = TimingTree::default();
+        let proof_a = mle_prove::<F, C, D>(
+            &prover_data_a,
+            &common_data_a,
+            pw_a,
+            &mut timing,
+        )
+        .unwrap();
+
+        // Try to verify proof_a against vk_b — should fail
+        // Note: common_data might differ in degree, so this might fail at
+        // various points. The important thing is it DOES fail.
+        let result = mle_verify::<F, D>(&common_data_a, &vk_b, &proof_a);
+        assert!(result.is_err(), "Cross-circuit proof should be rejected");
+    }
+
+    /// SECURITY TEST: Setup must be deterministic — calling it twice produces
+    /// the same VK.
+    #[test]
+    fn test_setup_determinism() {
+        let (prover_data, common_data, _, _) = build_mul_circuit();
+        let vk1 = mle_setup::<F, C, D>(&prover_data, &common_data);
+        let vk2 = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        assert_eq!(vk1.circuit_digest, vk2.circuit_digest);
+        assert_eq!(vk1.preprocessed_commitment_root, vk2.preprocessed_commitment_root);
+        assert_eq!(vk1.num_constants, vk2.num_constants);
+        assert_eq!(vk1.num_routed_wires, vk2.num_routed_wires);
     }
 }

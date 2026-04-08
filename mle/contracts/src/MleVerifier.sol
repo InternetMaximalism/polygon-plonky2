@@ -11,21 +11,19 @@ import {GoldilocksExt3} from "./spongefish/GoldilocksExt3.sol";
 
 /// @title MleVerifier
 /// @notice On-chain verifier for the Plonky2-MLE proof system with WHIR PCS.
-/// @dev Verifies:
-///      1. Fiat-Shamir transcript reconstruction (Keccak-based)
-///      2. Permutation check (plain sumcheck, Σ h(b) = 0) + final eval via PCS
-///      3. Zero-check sumcheck (Σ eq(τ,b)·C(b) = 0) + final eval via PCS
-///      4. WHIR polynomial commitment proof (replaces old Merkle PCS)
+/// @dev Two-commitment architecture:
+///      - Preprocessed commitment (constants + sigmas): bound to VK
+///      - Witness commitment (wires): per-proof
 ///
-///      Two independent transcript systems are cryptographically bound:
-///      - TranscriptLib (Keccak): MLE protocol challenges
-///      - Spongefish (WHIR internal): WHIR folding/sumcheck challenges
-///      Binding: WHIR commitment root (first 32 bytes of transcript) is
-///      absorbed into the Keccak transcript.
+///      SECURITY: The preprocessedCommitmentRoot parameter is the VK.
+///      It binds the verifier to a specific circuit's constants and
+///      permutation routing. Without it, an attacker could substitute
+///      fabricated constants/sigmas that trivially satisfy all constraints.
 ///
-///      CONSTRAINT EVALUATION STRATEGY (oracle approach):
-///      The Rust prover computes C(r) for ALL gate types and commits it in
-///      the PCS batch. Soundness follows from WHIR commitment binding.
+///      Two independent WHIR session names prevent cross-protocol confusion:
+///      - Preprocessed: "plonky2-mle-whir-preprocessed"
+///      - Witness: "plonky2-mle-whir-witness"
+///
 ///      Goldilocks field: p = 2^64 - 2^32 + 1.
 contract MleVerifier {
     using F for uint256;
@@ -36,51 +34,64 @@ contract MleVerifier {
         // Circuit binding (verifying key hash)
         // SECURITY: Binds this proof to a specific Plonky2 circuit.
         uint256[] circuitDigest;    // 4 Goldilocks field elements
-        // WHIR PCS proof data
-        bytes whirTranscript;       // Serialized WHIR spongefish transcript
-        bytes whirHints;            // WHIR verification hints (Merkle paths etc.)
-        // Sumcheck proofs
+
+        // ── Preprocessed PCS (constants + sigmas) ────────────────────────
+        bytes preprocessedWhirTranscript;   // WHIR proof for preprocessed polynomial
+        bytes preprocessedWhirHints;
+        uint256 preprocessedEvalValue;      // Batched eval for preprocessed
+        uint256 preprocessedBatchR;         // Deterministic from circuit_digest
+        uint256[] preprocessedIndividualEvals; // [const_0..C, sigma_0..R]
+
+        // ── Witness PCS (wires) ──────────────────────────────────────────
+        bytes witnessWhirTranscript;        // WHIR proof for witness polynomial
+        bytes witnessWhirHints;
+        uint256 witnessEvalValue;           // Batched eval for witness
+        uint256 witnessBatchR;              // Fiat-Shamir derived
+        uint256[] witnessIndividualEvals;   // [wire_0..W]
+
+        // ── Sumcheck proofs ──────────────────────────────────────────────
         SumcheckVerifier.SumcheckProof permProof;
         uint256 permClaimedSum;
         SumcheckVerifier.SumcheckProof constraintProof;
-        // Batched evaluation
-        uint256 evalValue;           // P(r) batched evaluation
-        // Public inputs
+
+        // ── Public data ──────────────────────────────────────────────────
         uint256[] publicInputs;
-        // Batch parameters
-        uint256 batchR;
-        uint256 numPolys;
-        uint256[] individualEvals;   // Individual MLE evaluations at r
-        // Fiat-Shamir challenges (for transcript consistency check)
         uint256 alpha;
         uint256 beta;
         uint256 gamma;
         uint256[] tau;
         uint256[] tauPerm;
-        // Circuit dimensions
+
+        // ── Circuit dimensions ───────────────────────────────────────────
         uint256 numWires;
         uint256 numRoutedWires;
         uint256 numConstants;
-        // ORACLE: PCS-opened constraint value C(r).
-        // SECURITY: Bound to WHIR commitment — prover cannot lie.
+
+        // ── Oracle values (PCS-bound) ────────────────────────────────────
         uint256 pcsConstraintEval;
-        // ORACLE: PCS-opened permutation numerator h(r_perm).
         uint256 pcsPermNumeratorEval;
     }
 
-    /// @notice Verify an MLE proof with WHIR PCS.
-    /// @param proof The complete proof including WHIR transcript/hints.
+    /// @notice Verify an MLE proof with two-commitment WHIR PCS.
+    /// @param proof The complete proof with preprocessed and witness WHIR data.
     /// @param degreeBits log2 of the circuit degree (number of sumcheck rounds).
-    /// @param whirParams WHIR protocol parameters (set per circuit at deployment).
-    /// @param protocolId WHIR protocol ID (64 bytes, from CBOR-encoded config).
-    /// @param sessionId WHIR session ID (32 bytes, from session name).
+    /// @param preprocessedCommitmentRoot VK: expected WHIR Merkle root for preprocessed polynomial.
+    /// @param whirParams WHIR protocol parameters (shared between both commitments).
+    /// @param protocolId WHIR protocol ID (64 bytes, shared).
+    /// @param preprocessedSessionId WHIR session ID for preprocessed (32 bytes).
+    /// @param witnessSessionId WHIR session ID for witness (32 bytes).
+    /// @param preprocessedWhirEvals WHIR Ext3 evaluations for preprocessed.
+    /// @param witnessWhirEvals WHIR Ext3 evaluations for witness.
     function verify(
         MleProof calldata proof,
         uint256 degreeBits,
+        bytes32 preprocessedCommitmentRoot,
         SpongefishWhirVerify.WhirParams memory whirParams,
         bytes memory protocolId,
-        bytes memory sessionId,
-        GoldilocksExt3.Ext3[] memory whirEvaluations
+        bytes memory preprocessedSessionId,
+        bytes memory witnessSessionId,
+        GoldilocksExt3.Ext3[] memory preprocessedWhirEvals,
+        GoldilocksExt3.Ext3[] memory witnessWhirEvals
     )
         external
         pure
@@ -89,30 +100,50 @@ contract MleVerifier {
         // ── Step 0: Input validation ──
         _validateInputs(proof);
 
-        // ── Step 1: Reconstruct Fiat-Shamir transcript ──
+        // ── Step 1: Verify preprocessed batch_r is correctly derived ──
+        // SECURITY: preprocessedBatchR must be deterministic from circuitDigest.
+        // This prevents the prover from choosing a favorable batching scalar.
+        uint256 expectedPreBatchR = _derivePreprocessedBatchR(proof.circuitDigest);
+        require(expectedPreBatchR == proof.preprocessedBatchR, "Preprocessed batch_r mismatch");
+
+        // ── Step 2: VK binding check ──
+        // SECURITY: The first 32 bytes of the preprocessed WHIR transcript are
+        // the commitment root. This must match the VK parameter to ensure the
+        // prover used the correct constants and sigma permutation values.
+        require(proof.preprocessedWhirTranscript.length >= 32, "Preprocessed WHIR transcript too short");
+        bytes memory preRootBytes = _extractFirst32(proof.preprocessedWhirTranscript);
+        bytes32 proofPreRoot;
+        assembly {
+            proofPreRoot := mload(add(preRootBytes, 0x20))
+        }
+        require(
+            proofPreRoot == preprocessedCommitmentRoot,
+            "VK binding violated: preprocessed commitment root mismatch"
+        );
+
+        // ── Step 3: Reconstruct Fiat-Shamir transcript ──
         TranscriptLib.Transcript memory transcript;
         TranscriptLib.init(transcript);
 
         TranscriptLib.domainSeparate(transcript, "circuit");
-        // SECURITY: Absorb circuit_digest first to bind to verifying key.
         TranscriptLib.absorbFieldVec(transcript, proof.circuitDigest);
         TranscriptLib.absorbFieldVec(transcript, proof.publicInputs);
 
-        // ── Step 2: Derive batch_r ──
-        TranscriptLib.domainSeparate(transcript, "batch-commit");
-        uint256 batchR = TranscriptLib.squeezeChallenge(transcript);
-        require(batchR == proof.batchR, "Batch R mismatch");
+        // Absorb preprocessed commitment root into transcript
+        // SECURITY: This binds subsequent challenges to the preprocessed polynomial.
+        TranscriptLib.absorbBytes(transcript, preRootBytes);
 
-        // Extract WHIR commitment root from transcript (first 32 bytes)
-        // SECURITY: This binds the WHIR transcript to our Keccak transcript.
-        require(proof.whirTranscript.length >= 32, "WHIR transcript too short");
-        bytes memory commitmentRoot = new bytes(32);
-        for (uint256 i = 0; i < 32; i++) {
-            commitmentRoot[i] = proof.whirTranscript[i];
-        }
-        TranscriptLib.absorbBytes(transcript, commitmentRoot);
+        // ── Step 4: Derive witness batch_r ──
+        TranscriptLib.domainSeparate(transcript, "batch-commit-witness");
+        uint256 witnessBatchR = TranscriptLib.squeezeChallenge(transcript);
+        require(witnessBatchR == proof.witnessBatchR, "Witness batch_r mismatch");
 
-        // ── Step 3: Derive challenges ──
+        // Absorb witness commitment root
+        require(proof.witnessWhirTranscript.length >= 32, "Witness WHIR transcript too short");
+        bytes memory witRootBytes = _extractFirst32(proof.witnessWhirTranscript);
+        TranscriptLib.absorbBytes(transcript, witRootBytes);
+
+        // ── Step 5: Derive challenges ──
         TranscriptLib.domainSeparate(transcript, "challenges");
         uint256 beta = TranscriptLib.squeezeChallenge(transcript);
         uint256 gamma = TranscriptLib.squeezeChallenge(transcript);
@@ -124,7 +155,7 @@ contract MleVerifier {
         require(gamma == proof.gamma, "Gamma mismatch");
         require(alpha == proof.alpha, "Alpha mismatch");
 
-        // ── Step 4: Verify permutation sumcheck ──
+        // ── Step 6: Verify permutation sumcheck ──
         TranscriptLib.domainSeparate(transcript, "permutation");
         require(proof.permClaimedSum == 0, "Perm: claimed sum != 0");
 
@@ -133,17 +164,16 @@ contract MleVerifier {
         (, uint256 permFinalEval) =
             SumcheckVerifier.verify(permProofMem, proof.permClaimedSum, degreeBits, transcript);
 
-        // SECURITY: Verify permutation final evaluation matches PCS-opened value.
         require(
             permFinalEval == proof.pcsPermNumeratorEval,
             "Perm final eval != PCS-opened h(r_perm)"
         );
 
-        // ── Step 4d: Extension field combination challenge ──
+        // ── Step 7: Extension field combination challenge ──
         TranscriptLib.domainSeparate(transcript, "extension-combine");
         TranscriptLib.squeezeChallenge(transcript);
 
-        // ── Step 5: Verify constraint zero-check sumcheck ──
+        // ── Step 8: Verify constraint zero-check sumcheck ──
         TranscriptLib.domainSeparate(transcript, "zero-check");
 
         SumcheckVerifier.SumcheckProof memory constraintProofMem =
@@ -151,8 +181,7 @@ contract MleVerifier {
         (uint256[] memory sumcheckChallenges, uint256 constraintFinalEval) =
             SumcheckVerifier.verify(constraintProofMem, 0, degreeBits, transcript);
 
-        // ── Step 6: Verify constraint final evaluation ──
-        // SECURITY: constraintFinalEval == eq(τ, r) · C(r)
+        // ── Step 9: Verify constraint final evaluation ──
         uint256 eqAtR = EqPolyLib.eqEval(tau, sumcheckChallenges);
         require(
             ConstraintEvaluator.verifyConstraintEval(
@@ -163,35 +192,81 @@ contract MleVerifier {
             "Constraint final eval mismatch: eq(tau,r)*C(r) != finalEval"
         );
 
-        // ── Step 7: Verify batched evaluation consistency ──
+        // ── Step 10: Verify batched evaluation consistency ──
         TranscriptLib.domainSeparate(transcript, "pcs-eval");
 
-        uint256 expectedBatched = _computeBatchedEval(proof.individualEvals, batchR);
-        require(expectedBatched == proof.evalValue, "Batched eval mismatch");
-
+        // Preprocessed batch consistency
+        uint256 expectedPreBatched = _computeBatchedEval(
+            proof.preprocessedIndividualEvals, proof.preprocessedBatchR
+        );
+        require(expectedPreBatched == proof.preprocessedEvalValue, "Preprocessed batched eval mismatch");
         require(
-            proof.individualEvals.length == proof.numWires + proof.numConstants + proof.numRoutedWires,
-            "individualEvals length mismatch"
+            proof.preprocessedIndividualEvals.length == proof.numConstants + proof.numRoutedWires,
+            "preprocessedIndividualEvals length mismatch"
         );
 
-        // ── Step 8: Verify WHIR polynomial commitment proof ──
-        // SECURITY: This replaces the old Merkle root + MLE evaluation check.
-        // SpongefishWhirVerify verifies the WHIR commitment and evaluation
-        // proof using its own spongefish transcript (independent of our Keccak).
-        // The binding between the two transcripts is established by absorbing
-        // the WHIR commitment root into our Keccak transcript (Step 2 above).
-        bool whirValid = SpongefishWhirVerify.verifyWhirProof(
+        // Witness batch consistency
+        uint256 expectedWitBatched = _computeBatchedEval(
+            proof.witnessIndividualEvals, proof.witnessBatchR
+        );
+        require(expectedWitBatched == proof.witnessEvalValue, "Witness batched eval mismatch");
+        require(
+            proof.witnessIndividualEvals.length == proof.numWires,
+            "witnessIndividualEvals length mismatch"
+        );
+
+        // ── Step 11: Verify WHIR polynomial commitment proofs ──
+        // SECURITY: Two separate WHIR verifications with different session names
+        // prevent cross-protocol proof swapping.
+        bool preWhirValid = SpongefishWhirVerify.verifyWhirProof(
             protocolId,
-            sessionId,
-            "" /* instance: empty for our usage */,
-            proof.whirTranscript,
-            proof.whirHints,
-            whirEvaluations,
+            preprocessedSessionId,
+            "" /* instance: empty */,
+            proof.preprocessedWhirTranscript,
+            proof.preprocessedWhirHints,
+            preprocessedWhirEvals,
             whirParams
         );
-        require(whirValid, "WHIR PCS verification failed");
+        require(preWhirValid, "Preprocessed WHIR PCS verification failed");
+
+        bool witWhirValid = SpongefishWhirVerify.verifyWhirProof(
+            protocolId,
+            witnessSessionId,
+            "" /* instance: empty */,
+            proof.witnessWhirTranscript,
+            proof.witnessWhirHints,
+            witnessWhirEvals,
+            whirParams
+        );
+        require(witWhirValid, "Witness WHIR PCS verification failed");
 
         return true;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Preprocessed batch_r derivation
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Derive the deterministic preprocessed batch_r from circuit_digest.
+    ///      Must match Rust's derive_preprocessed_batch_r() exactly.
+    ///      Uses a separate mini-transcript: init() + domain("preprocessed-batch-r")
+    ///      + absorb(circuitDigest) + squeeze.
+    function _derivePreprocessedBatchR(uint256[] calldata circuitDigest)
+        private pure returns (uint256)
+    {
+        TranscriptLib.Transcript memory t;
+        TranscriptLib.init(t); // Adds "plonky2-mle-v0" protocol separator
+
+        TranscriptLib.domainSeparate(t, "preprocessed-batch-r");
+
+        // Copy circuitDigest from calldata to memory for absorbFieldVec
+        uint256[] memory digestMem = new uint256[](circuitDigest.length);
+        for (uint256 i = 0; i < circuitDigest.length; i++) {
+            digestMem[i] = circuitDigest[i];
+        }
+        TranscriptLib.absorbFieldVec(t, digestMem);
+
+        return TranscriptLib.squeezeChallenge(t);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -203,8 +278,10 @@ contract MleVerifier {
         for (uint256 i = 0; i < 4; i++) {
             require(proof.circuitDigest[i] < P, "circuitDigest >= P");
         }
-        require(proof.evalValue < P, "evalValue >= P");
-        require(proof.batchR < P, "batchR >= P");
+        require(proof.preprocessedEvalValue < P, "preprocessedEvalValue >= P");
+        require(proof.preprocessedBatchR < P, "preprocessedBatchR >= P");
+        require(proof.witnessEvalValue < P, "witnessEvalValue >= P");
+        require(proof.witnessBatchR < P, "witnessBatchR >= P");
         require(proof.alpha < P, "alpha >= P");
         require(proof.beta < P, "beta >= P");
         require(proof.gamma < P, "gamma >= P");
@@ -215,8 +292,11 @@ contract MleVerifier {
         for (uint256 i = 0; i < proof.publicInputs.length; i++) {
             require(proof.publicInputs[i] < P, "publicInput >= P");
         }
-        for (uint256 i = 0; i < proof.individualEvals.length; i++) {
-            require(proof.individualEvals[i] < P, "individualEval >= P");
+        for (uint256 i = 0; i < proof.preprocessedIndividualEvals.length; i++) {
+            require(proof.preprocessedIndividualEvals[i] < P, "preprocessedIndividualEval >= P");
+        }
+        for (uint256 i = 0; i < proof.witnessIndividualEvals.length; i++) {
+            require(proof.witnessIndividualEvals[i] < P, "witnessIndividualEval >= P");
         }
         for (uint256 i = 0; i < proof.tau.length; i++) {
             require(proof.tau[i] < P, "tau >= P");
@@ -254,6 +334,14 @@ contract MleVerifier {
                 result := addmod(result, mulmod(rPow, v, p), p)
                 rPow := mulmod(rPow, batchR, p)
             }
+        }
+    }
+
+    /// @dev Extract the first 32 bytes from a calldata bytes array into memory.
+    function _extractFirst32(bytes calldata data) private pure returns (bytes memory result) {
+        result = new bytes(32);
+        for (uint256 i = 0; i < 32; i++) {
+            result[i] = data[i];
         }
     }
 

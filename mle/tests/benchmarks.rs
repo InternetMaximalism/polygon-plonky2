@@ -10,7 +10,7 @@ use plonky2::plonk::config::PoseidonGoldilocksConfig;
 use plonky2::util::timing::TimingTree;
 use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::Field;
-use plonky2_mle::prover::mle_prove;
+use plonky2_mle::prover::{mle_prove, mle_setup};
 use plonky2_mle::verifier::mle_verify;
 
 type F = GoldilocksField;
@@ -50,17 +50,18 @@ fn bench_circuit(
     let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Proof size
-    let whir_proof_bytes = proof.eval_proof.narg_string.len() + proof.eval_proof.hints.len();
+    let whir_proof_bytes = proof.witness_eval_proof.narg_string.len() + proof.witness_eval_proof.hints.len();
     let sumcheck_bytes: usize = proof.constraint_proof.round_polys.iter()
         .chain(proof.permutation_proof.sumcheck_proof.round_polys.iter())
         .map(|rp| rp.evaluations.len() * 8)
         .sum();
-    let individual_evals_bytes = proof.individual_evals.len() * 8;
+    let individual_evals_bytes = (proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len()) * 8;
     let proof_bytes = whir_proof_bytes + sumcheck_bytes + individual_evals_bytes;
 
     // Verify
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let start = Instant::now();
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     let verify_ms = start.elapsed().as_secs_f64() * 1000.0;
     assert!(result.is_ok(), "{name}: verify failed: {:?}", result.err());
 
@@ -258,8 +259,9 @@ fn benchmark_recursive_only() {
     ).unwrap();
     println!("  [4] mle_prove:            {:?}", t3.elapsed());
 
+    let vk = mle_setup::<F, C, D>(&outer_data.prover_only, &outer_data.common);
     let t4 = Instant::now();
-    let result = mle_verify::<F, D>(&outer_data.common, &proof);
+    let result = mle_verify::<F, D>(&outer_data.common, &vk, &proof);
     println!("  [5] mle_verify:           {:?}", t4.elapsed());
     assert!(result.is_ok(), "verify failed: {:?}", result.err());
 

@@ -18,7 +18,7 @@ use plonky2::hash::poseidon::PoseidonHash;
 use plonky2_mle::config::WhirConfig;
 use plonky2_mle::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use plonky2_mle::permutation::logup::{compute_identity_values, compute_permutation_numerator};
-use plonky2_mle::prover::mle_prove;
+use plonky2_mle::prover::{mle_prove, mle_setup};
 use plonky2_mle::verifier::mle_verify;
 
 type F = GoldilocksField;
@@ -259,7 +259,8 @@ fn test_poseidon_circuit_prove_verify() {
     )
     .unwrap();
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(result.is_ok(), "Poseidon circuit verify failed: {:?}", result.err());
 }
 
@@ -304,7 +305,8 @@ fn test_large_circuit_chain() {
     // x^201 mod p for x=2
     assert!(!proof.public_inputs.is_empty());
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(result.is_ok(), "Large circuit verify failed: {:?}", result.err());
 }
 
@@ -354,7 +356,8 @@ fn test_randomized_arithmetic_circuits() {
         )
         .unwrap();
 
-        let result = mle_verify::<F, D>(&circuit.common, &proof);
+        let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+        let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
         assert!(
             result.is_ok(),
             "Trial {trial} failed: {:?}",
@@ -394,7 +397,8 @@ fn test_tampered_public_inputs_rejected() {
     // Tamper: change public input from 21 to 22
     proof.public_inputs[0] = F::from_canonical_u64(22);
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(
         result.is_err(),
         "Should reject tampered public inputs"
@@ -426,9 +430,10 @@ fn test_tampered_eval_value_rejected() {
     .unwrap();
 
     // Tamper with the evaluation value
-    proof.eval_value = proof.eval_value + F::ONE;
+    proof.witness_eval_value = proof.witness_eval_value + F::ONE;
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(
         result.is_err(),
         "Should reject tampered evaluation value"
@@ -485,7 +490,8 @@ fn test_tampered_constraint_round_poly_rejected() {
             proof.constraint_proof.round_polys[0].evaluations[0] + F::ONE;
     }
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(result.is_err(), "Should reject tampered constraint round poly");
 }
 
@@ -514,7 +520,8 @@ fn test_tampered_permutation_round_poly_rejected() {
             proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] + F::ONE;
     }
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(result.is_err(), "Should reject tampered permutation round poly");
 }
 
@@ -540,9 +547,10 @@ fn test_swapped_commitment_rejected() {
     ).unwrap();
 
     // Tamper with the commitment root (simulates a different committed polynomial)
-    proof.commitment.proof_bytes[0] ^= 0xFF;
+    proof.witness_commitment.proof_bytes[0] ^= 0xFF;
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(result.is_err(), "Should reject tampered commitment");
 }
 
@@ -576,7 +584,8 @@ fn test_fibonacci_circuit_prove_verify() {
     // fib(19) = 6765
     assert_eq!(proof.public_inputs[0], F::from_canonical_u64(6765));
 
-    let result = mle_verify::<F, D>(&circuit.common, &proof);
+    let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+    let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
     assert!(result.is_ok(), "Fibonacci verify failed: {:?}", result.err());
 }
 
@@ -759,7 +768,8 @@ fn test_recursive_circuit_constraints_zero() {
 
     assert_eq!(mle_proof.public_inputs[0], F::from_canonical_u64(21));
 
-    let verify_result = mle_verify::<F, D>(&outer_data.common, &mle_proof);
+    let vk = mle_setup::<F, C, D>(&outer_data.prover_only, &outer_data.common);
+    let verify_result = mle_verify::<F, D>(&outer_data.common, &vk, &mle_proof);
     assert!(
         verify_result.is_ok(),
         "Recursive circuit MLE verify failed: {:?}",

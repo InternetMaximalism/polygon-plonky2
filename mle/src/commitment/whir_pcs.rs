@@ -16,12 +16,19 @@ use whir::algebra::linear_form::{Evaluate, LinearForm, MultilinearExtension};
 use whir::parameters::ProtocolParameters;
 use whir::protocols::whir::Config as WhirConfig;
 use whir::transcript::{DomainSeparator, Proof as WhirProofData, ProverState, VerifierState};
+#[cfg(debug_assertions)]
+use whir::transcript::Interaction;
 use whir::transcript::codecs::Empty;
 
 use crate::dense_mle::DenseMultilinearExtension;
 
-/// WHIR session name used for domain separation in Fiat-Shamir.
+/// WHIR session name used for domain separation in Fiat-Shamir (legacy/default).
 pub const WHIR_SESSION_NAME: &str = "plonky2-mle-whir";
+/// WHIR session name for the preprocessed polynomial commitment.
+/// SECURITY: Must differ from witness session name to prevent cross-protocol confusion.
+pub const WHIR_SESSION_PREPROCESSED: &str = "plonky2-mle-whir-preprocessed";
+/// WHIR session name for the witness polynomial commitment.
+pub const WHIR_SESSION_WITNESS: &str = "plonky2-mle-whir-witness";
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Field conversion
@@ -82,6 +89,10 @@ pub struct WhirEvalProof {
     /// Serialized WHIR proof bytes (narg_string + hints).
     pub narg_string: Vec<u8>,
     pub hints: Vec<u8>,
+    /// Transcript interaction pattern (debug mode only).
+    /// Required for WHIR verifier transcript validation in debug builds.
+    #[cfg(debug_assertions)]
+    pub pattern: Vec<Interaction>,
 }
 
 impl WhirPCS {
@@ -137,13 +148,26 @@ impl WhirPCS {
         eval_point: Option<&[GoldilocksField]>,
         _eval_value: Option<GoldilocksField>,
     ) -> (WhirCommitment, WhirEvalProof, Field64_3) {
+        self.prove_at_point_with_session(poly, eval_point, WHIR_SESSION_NAME)
+    }
+
+    /// Generate a WHIR proof with a custom session name for domain separation.
+    ///
+    /// SECURITY: Different sub-protocols (preprocessed vs witness) MUST use
+    /// different session names to prevent cross-protocol proof swapping.
+    pub fn prove_at_point_with_session(
+        &self,
+        poly: &DenseMultilinearExtension<GoldilocksField>,
+        eval_point: Option<&[GoldilocksField]>,
+        session_name: &str,
+    ) -> (WhirCommitment, WhirEvalProof, Field64_3) {
         let num_vars = poly.num_vars;
         let size = 1 << num_vars;
         let ark_evals = plonky2_vec_to_ark(&poly.evaluations);
 
         let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
         let ds = DomainSeparator::protocol(&config)
-            .session(&WHIR_SESSION_NAME.to_string())
+            .session(&session_name.to_string())
             .instance(&Empty);
 
         let mut prover_state = ProverState::new_std(&ds);
@@ -179,9 +203,32 @@ impl WhirPCS {
             WhirEvalProof {
                 narg_string: proof.narg_string,
                 hints: proof.hints,
+                #[cfg(debug_assertions)]
+                pattern: proof.pattern,
             },
             eval_ext3,
         )
+    }
+
+    /// Compute only the WHIR commitment root for a polynomial.
+    ///
+    /// Used during circuit setup to build the verification key.
+    /// The root is the first 32 bytes of the WHIR proof, which is deterministic
+    /// for a given polynomial + WHIR parameters.
+    ///
+    /// SECURITY: The commitment root binds the prover to a specific polynomial.
+    /// Changing any evaluation changes the Merkle root.
+    /// Compute the WHIR commitment root for a preprocessed polynomial.
+    ///
+    /// Uses WHIR_SESSION_PREPROCESSED for domain separation to match the
+    /// prover's preprocessed commitment.
+    pub fn commit_root(
+        &self,
+        poly: &DenseMultilinearExtension<GoldilocksField>,
+    ) -> Vec<u8> {
+        let (commitment, _, _) =
+            self.prove_at_point_with_session(poly, None, WHIR_SESSION_PREPROCESSED);
+        commitment.proof_bytes[..32.min(commitment.proof_bytes.len())].to_vec()
     }
 
     /// Generate a WHIR proof with canonical evaluation point (legacy API).
@@ -206,18 +253,34 @@ impl WhirPCS {
         eval_point: Option<&[GoldilocksField]>,
         eval_value_ext3: Option<Field64_3>,
     ) -> Result<(), String> {
+        self.verify_with_session(num_vars, proof, eval_point, eval_value_ext3, WHIR_SESSION_NAME)
+    }
+
+    /// Verify a WHIR proof with a custom session name.
+    ///
+    /// SECURITY: The session name must match the one used during proving.
+    /// Different sub-protocols use different session names to prevent
+    /// cross-protocol proof confusion.
+    pub fn verify_with_session(
+        &self,
+        num_vars: usize,
+        proof: &WhirEvalProof,
+        eval_point: Option<&[GoldilocksField]>,
+        eval_value_ext3: Option<Field64_3>,
+        session_name: &str,
+    ) -> Result<(), String> {
         let size = 1 << num_vars;
 
         let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
         let ds = DomainSeparator::protocol(&config)
-            .session(&WHIR_SESSION_NAME.to_string())
+            .session(&session_name.to_string())
             .instance(&Empty);
 
         let proof_data = WhirProofData {
             narg_string: proof.narg_string.clone(),
             hints: proof.hints.clone(),
             #[cfg(debug_assertions)]
-            pattern: vec![],
+            pattern: proof.pattern.clone(),
         };
 
         let mut verifier_state = VerifierState::new_std(&ds, &proof_data);
@@ -226,28 +289,40 @@ impl WhirPCS {
             .receive_commitment(&mut verifier_state)
             .map_err(|e| format!("WHIR commitment verification failed: {:?}", e))?;
 
-        // Build evaluations and linear forms matching what the prover passed
-        let (evaluations, verify_lf): (Vec<Field64_3>, Vec<Box<dyn LinearForm<Field64_3>>>) =
-            if let (Some(point), Some(val)) = (eval_point, eval_value_ext3) {
-                let point_ext3: Vec<Field64_3> = point
-                    .iter()
-                    .map(|f| Field64_3::from(f.to_canonical_u64()))
-                    .collect();
-                (
-                    vec![val],
-                    vec![Box::new(MultilinearExtension::new(point_ext3))
-                        as Box<dyn LinearForm<Field64_3>>],
-                )
-            } else {
-                (vec![], vec![])
-            };
+        // Build evaluation point — must match prover's prove_at_point_with_session.
+        // The prover always includes an evaluation at some point (canonical if None).
+        // The verifier must match this exactly for transcript consistency.
+        let point_ext3: Vec<Field64_3> = if let Some(pt) = eval_point {
+            pt.iter().map(|f| Field64_3::from(f.to_canonical_u64())).collect()
+        } else {
+            // Canonical evaluation point (1, 2, 3, ..., n) — must match prover
+            (0..num_vars).map(|i| Field64_3::from((i + 1) as u64)).collect()
+        };
+
+        let has_eval_binding = eval_value_ext3.is_some();
+        let evaluations: Vec<Field64_3> = if let Some(val) = eval_value_ext3 {
+            vec![val]
+        } else {
+            // No expected value provided. We still must pass the evaluation
+            // structure to match the prover's transcript (the prover always
+            // includes an evaluation). We use a placeholder — the FinalClaim
+            // linear form check will be skipped below.
+            vec![Field64_3::from(0u64)]
+        };
+
+        let verify_lf: Vec<Box<dyn LinearForm<Field64_3>>> =
+            vec![Box::new(MultilinearExtension::new(point_ext3))
+                as Box<dyn LinearForm<Field64_3>>];
 
         let final_claim = config
             .verify(&mut verifier_state, &[&commitment], &evaluations)
             .map_err(|e| format!("WHIR verification failed: {:?}", e))?;
 
-        // Verify the linear form (evaluation at the claimed point)
-        if !verify_lf.is_empty() {
+        // Verify the linear form (evaluation at the claimed point).
+        // Only check when the caller provided an expected eval value.
+        // The proximity test (WHIR commitment binding) is always verified
+        // by config.verify() above regardless.
+        if has_eval_binding {
             final_claim
                 .verify(verify_lf.iter().map(|l| l.as_ref() as &dyn LinearForm<Field64_3>))
                 .map_err(|e| format!("WHIR evaluation verification failed: {:?}", e))?;

@@ -9,7 +9,7 @@ use plonky2::util::timing::TimingTree;
 use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::{Field, PrimeField64};
 use plonky2_mle::fixture::{proof_to_json, parse_field_string};
-use plonky2_mle::prover::mle_prove;
+use plonky2_mle::prover::{mle_prove, mle_setup};
 use plonky2_mle::verifier::mle_verify;
 
 type F = GoldilocksField;
@@ -134,14 +134,15 @@ fn generate_and_verify_all_fixtures() {
 
         println!("  prove_time={:?}", prove_time);
         println!("  public_inputs={:?}", proof.public_inputs.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
-        println!("  num_polys={}", proof.num_polys);
+        println!("  num_polys={}", proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len());
         println!("  perm_rounds={}", proof.permutation_proof.sumcheck_proof.round_polys.len());
         println!("  constraint_rounds={}", proof.constraint_proof.round_polys.len());
-        println!("  whir_proof_bytes={}", proof.eval_proof.narg_string.len() + proof.eval_proof.hints.len());
+        println!("  whir_proof_bytes={}", proof.witness_eval_proof.narg_string.len() + proof.witness_eval_proof.hints.len());
 
         // Verify in Rust
+        let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
         let start = std::time::Instant::now();
-        let result = mle_verify::<F, D>(&circuit.common, &proof);
+        let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
         let verify_time = start.elapsed();
         assert!(result.is_ok(), "{name}: Rust verify failed: {:?}", result.err());
         println!("  rust_verify={:?} ✓", verify_time);
@@ -151,7 +152,7 @@ fn generate_and_verify_all_fixtures() {
 
         // Verify fixture roundtrip
         let fixture = plonky2_mle::fixture::fixture_from_json(&json);
-        assert_eq!(parse_field_string(&fixture.batch_r), proof.batch_r.to_canonical_u64());
+        assert_eq!(parse_field_string(&fixture.witness_batch_r), proof.witness_batch_r.to_canonical_u64());
         assert_eq!(fixture.degree_bits, degree_bits);
 
         // Check all field elements survived serialization

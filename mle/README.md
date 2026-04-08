@@ -8,7 +8,7 @@ proof engine with a multilinear-native pipeline:
 - **Zero-check sumcheck** for gate constraint verification
 - **Log-derivative permutation argument** (replaces univariate grand product)
 - **Log-derivative lookup argument** (replaces Sum/RE/LDC)
-- **Merkle-based PCS** (fallback; WHIR integration via `MultilinearPCS` trait)
+- **Two-commitment WHIR PCS**: separate preprocessed (constants+sigmas) and witness (wires) commitments with VK binding
 - **Keccak256 Fiat-Shamir** (single transcript, no dual-system ambiguity)
 - **Solidity on-chain verifier** with Yul-optimized field arithmetic
 
@@ -34,9 +34,9 @@ mle/
 │   ├── eq_poly.rs                # eq(τ,b) tensor-product evaluation
 │   ├── transcript.rs             # Keccak256 Fiat-Shamir transcript
 │   ├── constraint_eval.rs        # Plonky2 gate → MLE evaluation bridge
-│   ├── prover.rs                 # Integrated MLE prover
-│   ├── verifier.rs               # Integrated MLE verifier
-│   ├── proof.rs                  # MleProof<F> structure
+│   ├── prover.rs                 # Integrated MLE prover + mle_setup()
+│   ├── verifier.rs               # Integrated MLE verifier (VK-aware)
+│   ├── proof.rs                  # MleProof<F> + MleVerificationKey<F>
 │   ├── sumcheck/
 │   │   ├── prover.rs             # Sumcheck prover (product & plain)
 │   │   ├── verifier.rs           # Sumcheck verifier
@@ -44,11 +44,15 @@ mle/
 │   ├── permutation/
 │   │   ├── logup.rs              # Log-derivative permutation argument
 │   │   └── lookup.rs             # Log-derivative lookup argument
+│   ├── fixture.rs                # JSON fixture generation for Solidity tests
 │   └── commitment/
 │       ├── traits.rs             # MultilinearPCS trait
+│       ├── whir_pcs.rs           # WHIR PCS wrapper (commit/open/verify)
 │       └── merkle_pcs.rs         # Merkle-tree-based PCS (fallback)
 ├── tests/
-│   ├── integration_tests.rs      # 15 integration + soundness tests
+│   ├── integration_tests.rs      # 16 integration + soundness tests
+│   ├── generate_fixtures.rs      # JSON fixture generation for all circuits
+│   ├── benchmarks.rs             # Prover/verifier benchmarks
 │   └── transcript_compat.rs      # Rust↔Solidity transcript compatibility
 └── contracts/
     ├── foundry.toml              # Foundry configuration
@@ -61,6 +65,7 @@ mle/
     │   └── MleVerifier.sol       # Integrated on-chain verifier
     └── test/
         ├── MleVerifierTest.sol   # Field/sumcheck/gas benchmark tests
+        ├── MleE2ETest.t.sol      # End-to-end verification tests (6 circuits)
         ├── GasBenchmark.t.sol    # Foundry gas measurement harness
         └── TranscriptCompat.t.sol # Cross-language transcript vectors
 ```
@@ -84,17 +89,18 @@ forge build
 
 ## Running Tests
 
-### Rust — Unit Tests (38 tests)
+### Rust — Unit Tests (51 tests)
 
 ```bash
 cargo test -p plonky2_mle --lib
 ```
 
 Covers: MLE evaluation, eq polynomial, transcript, sumcheck prover/verifier,
-Lagrange interpolation, permutation logUp, lookup logUp, Merkle PCS, config,
-integrated prover, integrated verifier.
+Lagrange interpolation, permutation logUp, lookup logUp, WHIR PCS, config,
+integrated prover, integrated verifier, VK setup determinism, security tests
+(tampered preprocessed root, cross-circuit rejection).
 
-### Rust — Integration Tests (15 tests)
+### Rust — Integration Tests (16 tests)
 
 ```bash
 cargo test -p plonky2_mle --test integration_tests
@@ -109,6 +115,7 @@ Covers:
 - **Soundness (negative)**: tampered public inputs, eval value, commitment,
   constraint round poly, permutation round poly — all rejected
 - **Lookup**: standalone logUp prove/verify with multiplicity tracking
+- **Recursive circuit**: inner proof verified in outer circuit (2048+ gates)
 
 ### Rust — Transcript Compatibility Vectors (8 tests)
 
@@ -180,24 +187,180 @@ Vector 2 (absorb 42): 5382117256048105213
 Copy the numeric values into `contracts/test/TranscriptCompat.t.sol` constants
 (`V1_EMPTY_SQUEEZE`, etc.) and re-run `forge test` to confirm Solidity matches.
 
-## WHIR Configuration
+## Two-Commitment Architecture
 
-The system targets WHIR with the following parameters (defined in `src/config.rs`):
+The proof system uses two separate WHIR polynomial commitments:
+
+1. **Preprocessed commitment** (constants + sigmas): computed during circuit setup,
+   commitment root stored in the Verification Key (VK). The Solidity verifier receives
+   this as a deploy-time constant (`preprocessedCommitmentRoot`).
+
+2. **Witness commitment** (wires): generated per-proof. Commitment root absorbed
+   into the Fiat-Shamir transcript to bind all subsequent challenges.
+
+This separation prevents an attacker from substituting fabricated gate selectors
+or permutation routing that trivially satisfy constraints. The VK binding ensures
+the prover used the correct preprocessed polynomials for the target circuit.
+
+Each commitment uses a distinct WHIR session name for domain separation:
+- Preprocessed: `"plonky2-mle-whir-preprocessed"`
+- Witness: `"plonky2-mle-whir-witness"`
+
+### API
+
+```rust
+// Setup (once per circuit)
+let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+// Prove (per witness)
+let proof = mle_prove::<F, C, D>(&prover_data, &common_data, witness, &mut timing)?;
+
+// Verify
+mle_verify::<F, D>(&common_data, &vk, &proof)?;
+```
+
+### Verification Key (VK)
+
+The `MleVerificationKey<F>` is a per-circuit artifact computed once during setup.
+It binds the verifier to the circuit's preprocessed data (gate selectors, constant
+values, permutation routing). Without it, an attacker can substitute fabricated
+constants/sigmas that trivially satisfy all constraints.
+
+#### Structure
+
+```rust
+pub struct MleVerificationKey<F: Field> {
+    pub circuit_digest: Vec<F>,                // 4 Goldilocks field elements (Plonky2 VK hash)
+    pub preprocessed_commitment_root: Vec<u8>, // 32 bytes (WHIR Merkle root)
+    pub num_constants: usize,                  // Number of constant polynomial columns
+    pub num_routed_wires: usize,               // Number of sigma permutation columns
+}
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `circuit_digest` | 32 bytes (4 × u64) | Plonky2 verifying key hash. Identifies the circuit topology (gates, wiring, public input positions). |
+| `preprocessed_commitment_root` | 32 bytes | WHIR Merkle root over the batched preprocessed polynomial. This is the critical binding: changing any constant or sigma value changes this root. |
+| `num_constants` | 8 bytes | Number of constant columns (selectors + gate constants). Used by the verifier for individual_evals decomposition. |
+| `num_routed_wires` | 8 bytes | Number of routed wire columns (sigma permutations). Used by the verifier for individual_evals decomposition. |
+
+#### Generation (`mle_setup`)
+
+```rust
+let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
+```
+
+Steps:
+
+1. **Extract `circuit_digest`** from `prover_data.circuit_digest` (Plonky2's VK hash,
+   4 Goldilocks field elements).
+
+2. **Build preprocessed MLEs** from the circuit's constant and sigma tables:
+   - `const_mles`: one MLE per constant column (from `prover_data.constant_evals`,
+     row-major `[row][col]`). Includes gate selectors, lookup selectors, and
+     per-gate constants.
+   - `sigma_mles`: one MLE per routed wire (from `prover_data.sigmas`,
+     row-major `[row][col]`). Encodes copy-constraint routing as
+     `k_is[target_col] * subgroup[target_row]`.
+
+3. **Derive deterministic batch scalar** `batch_r_pre` from `circuit_digest`:
+   ```
+   t = Transcript::new()         // includes "plonky2-mle-v0" separator
+   t.domain_separate("preprocessed-batch-r")
+   t.absorb_field_vec(circuit_digest)
+   batch_r_pre = t.squeeze_challenge()
+   ```
+   This value is public and deterministic — security comes from the WHIR
+   commitment binding, not from batch_r secrecy.
+
+4. **Batch preprocessed polynomials** into a single MLE:
+   ```
+   P_pre(x) = Σ_i batch_r_pre^i · poly_i(x)
+   ```
+   where `poly_i` are ordered as `[const_0, ..., const_C, sigma_0, ..., sigma_R]`.
+
+5. **Compute WHIR commitment root**: call `WhirPCS::commit_root(&P_pre)` which
+   runs the WHIR prove protocol with session name `"plonky2-mle-whir-preprocessed"`
+   and returns the first 32 bytes (Merkle root) of the proof.
+
+#### Determinism Guarantee
+
+`mle_setup()` is a **pure function** of the circuit: same circuit code always
+produces the same VK. This is guaranteed because:
+- `circuit_digest` is deterministic (Plonky2 circuit build is deterministic)
+- `batch_r_pre` is a deterministic Keccak256 derivation from `circuit_digest`
+- Constant and sigma tables are fixed at circuit build time
+- WHIR commitment uses deterministic Fiat-Shamir (no external randomness)
+
+You can call `mle_setup()` multiple times or in different processes and always
+get identical results.
+
+#### On-Chain Usage (Solidity)
+
+The Solidity verifier receives the VK as a `bytes32` parameter:
+
+```solidity
+function verify(
+    MleProof calldata proof,
+    uint256 degreeBits,
+    bytes32 preprocessedCommitmentRoot,  // ← VK (deploy-time constant)
+    ...
+) external pure returns (bool)
+```
+
+The verifier performs two checks:
+1. **`_derivePreprocessedBatchR(proof.circuitDigest)`** — recomputes the
+   deterministic batch scalar from the proof's circuit_digest and verifies
+   it matches `proof.preprocessedBatchR`.
+2. **Root comparison** — extracts the first 32 bytes of
+   `proof.preprocessedWhirTranscript` and verifies they equal
+   `preprocessedCommitmentRoot`. If they differ, the prover used
+   different constants/sigmas, and verification fails immediately.
+
+In production, `preprocessedCommitmentRoot` would be set as an immutable
+contract parameter at deployment time (one VK per circuit).
+
+### Fiat-Shamir Transcript Order
+
+```
+[domain] "circuit"
+[absorb] circuit_digest (4 field elements)
+[absorb] public_inputs
+[absorb] preprocessed_commitment_root (32 bytes)    ← VK binding
+[domain] "batch-commit-witness"
+[squeeze] witness_batch_r
+[absorb] witness_commitment_root (32 bytes)
+[domain] "challenges"
+[squeeze] beta, gamma, alpha, tau, tau_perm
+[domain] "permutation"
+         ... permutation sumcheck ...
+[domain] "extension-combine"
+[squeeze] ext_challenge
+[domain] "zero-check"
+         ... constraint sumcheck ...
+[domain] "pcs-eval"
+```
+
+Note: `preprocessed_batch_r` is derived from a separate deterministic
+mini-transcript seeded with `circuit_digest` only.
+
+## WHIR Configuration
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
 | `rate_bits` | 4 | Code rate = 1/2^4 = 1/16 |
 | `inv_rate` | 16 | Codeword is 16x the message length |
-| `num_queries` | 28 | Query rounds for 90-bit security |
 | `security_bits` | 90 | Target security level |
 | `pow_bits` | 0 | Proof-of-work disabled |
 | `folding_factor` | 4 | Fold 2^4 = 16 per WHIR round |
 
-The current PCS is a Merkle-tree fallback (`merkle_pcs.rs`) with O(2^n) proof
-size. Replacing it with WHIR via the `MultilinearPCS` trait reduces proof size
-to polylog(2^n) without changing any prover/verifier logic.
+Both preprocessed and witness commitments use the same WHIR parameters (same
+`degree_bits` determines polynomial size). The protocol ID is shared; only
+session IDs differ.
 
 ## Gas Estimates (Solidity Verifier)
+
+### Primitive Operations
 
 Measured on Foundry with `--via-ir` and optimizer (200 runs):
 
@@ -212,18 +375,44 @@ Measured on Foundry with `--via-ir` and optimizer (200 runs):
 | Sumcheck verify 12 rounds | 353,209 |
 | Sumcheck verify 16 rounds | 478,558 |
 
-Estimated total verification gas (current Merkle PCS):
+### End-to-End Verification Gas (Two-Commitment WHIR PCS)
 
-| Circuit Size | Estimated Gas |
-|---|---|
-| n=8 (256 gates) | ~107K |
-| n=12 (4K gates) | ~339K |
-| n=16 (64K gates) | ~3.6M |
+Measured from Solidity E2E tests (`MleE2ETest.t.sol`):
 
-With WHIR PCS the Merkle/MLE terms become polylogarithmic, bringing n=16
-verification to an estimated ~500K gas.
+| Circuit | degree_bits | Gates | verify() Gas |
+|---------|-------------|-------|-------------|
+| small_mul (5 chain muls) | 2 | 4 | **1,466,740** |
+| medium_mul (50 chain muls) | 3 | 8 | **1,835,029** |
+| large_mul (200 chain muls) | 4 | 16 | **2,196,676** |
+| poseidon_hash (4 inputs) | 2 | 4 | **1,456,558** |
+| recursive_verify (inner proof) | 11 | 2048 | **6,500,263** |
+| huge_mul (100K chain muls) | 13 | 8192 | **9,762,697** |
+
+Gas is dominated by two WHIR PCS verifications (one preprocessed, one witness).
+Sumcheck and transcript operations are comparatively cheap.
 
 ## Security Audit Status
+
+### Two-Commitment Architecture (latest)
+
+An adversarial subagent audit of the two-commitment migration identified
+10 findings (3 HIGH, 3 MEDIUM, 2 LOW, 2 INFO). Addressed items:
+
+- **[HIGH] Shared WHIR session name** — Fixed: distinct session names
+  (`plonky2-mle-whir-preprocessed` / `plonky2-mle-whir-witness`) prevent
+  cross-protocol proof swapping
+- **[HIGH] WHIR canonical evaluation point** — Documented as known limitation.
+  Soundness relies on WHIR proximity testing (commitment binding for all evals).
+  Phase 2: move WHIR evaluation to sumcheck output point for stronger binding.
+- **[HIGH] Verifier does not recompute C(r)** — By design (oracle approach).
+  Soundness argument: committed polynomials are binding, Schwartz-Zippel over
+  batch_r ensures individual evals are correct, sumcheck proves constraint = 0.
+- **[MEDIUM] Public preprocessed batch_r** — Safe: VK binding makes polynomial
+  forgery impossible regardless of batch_r knowledge.
+- **[MEDIUM] Preprocessed WHIR proof is static** — By design: VK binding makes
+  replayability safe.
+
+### Original Solidity Verifier Audit
 
 An adversarial subagent audit identified 20 findings (3 CRITICAL, 5 HIGH,
 5 MEDIUM, 2 LOW). All have been addressed:
@@ -233,7 +422,6 @@ An adversarial subagent audit identified 20 findings (3 CRITICAL, 5 HIGH,
   and `h(r)` from PCS-bound values
 - **Input validation** — `require(< P)` on all calldata field elements
 - **Field arithmetic safety** — `inv(0)` reverts, `sub`/`neg` reduce inputs
-- **Merkle tree** — power-of-two length enforced, scratch space for hashing
 - **Bit ordering** — LSB convention documented and verified against Rust
 
-See the commit history for the full audit report and corresponding fixes.
+See the commit history for the full audit reports and corresponding fixes.

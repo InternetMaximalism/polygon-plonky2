@@ -1,5 +1,20 @@
 # MleVerifier.sol — Soundness Report
 
+## Architecture: Two-Commitment WHIR PCS
+
+The verifier uses two separate WHIR polynomial commitments:
+- **Preprocessed** (constants + sigmas): commitment root fixed in VK (`preprocessedCommitmentRoot` parameter)
+- **Witness** (wires): commitment root per-proof, absorbed into Fiat-Shamir transcript
+
+The VK binding check (`proofPreRoot == preprocessedCommitmentRoot`) prevents an attacker from
+substituting fabricated constants/sigmas. Two distinct WHIR session names
+(`plonky2-mle-whir-preprocessed` / `plonky2-mle-whir-witness`) prevent cross-protocol proof swapping.
+
+`_derivePreprocessedBatchR()` uses a separate mini-transcript to deterministically derive the
+preprocessed batching scalar from `circuitDigest`. This matches Rust's `derive_preprocessed_batch_r()`.
+
+---
+
 ~~## 1. Permutation final evaluation (permFinalEval) is not verified against recomputed h(r)~~
 > Fixed in round 1: Added `require(permFinalEval == proof.pcsPermNumeratorEval)` check. h(r_perm) is now a PCS-bound oracle value.
 

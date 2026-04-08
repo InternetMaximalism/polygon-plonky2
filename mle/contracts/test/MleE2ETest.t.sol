@@ -8,13 +8,14 @@ import {SpongefishWhirVerify} from "../src/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "../src/spongefish/GoldilocksExt3.sol";
 
 /// @title MleE2ETest
-/// @notice Full end-to-end test: MleVerifier.verify() with sumcheck + WHIR.
+/// @notice Full end-to-end test: MleVerifier.verify() with two-commitment WHIR PCS.
 ///         Exercises the complete verification pipeline including:
 ///         - Fiat-Shamir transcript reconstruction
+///         - VK binding (preprocessed commitment root check)
 ///         - Permutation sumcheck verification
 ///         - Constraint zero-check sumcheck verification
-///         - Batched evaluation consistency
-///         - WHIR PCS polynomial commitment verification
+///         - Two batch evaluation consistency checks
+///         - Two WHIR PCS polynomial commitment verifications
 contract MleE2ETest is Test {
     MleVerifier verifier;
 
@@ -46,47 +47,96 @@ contract MleE2ETest is Test {
         _runE2E("test/fixtures/huge_mul.json");
     }
 
-    /// @notice Negative test: tampered eval_value should fail batched eval check.
+    /// @notice Negative test: tampered witness eval value should fail batched eval check.
     function test_e2e_tampered_eval_fails() public {
         string memory json = vm.readFile("test/fixtures/small_mul.json");
-        MleVerifier.MleProof memory proof = _parseProof(json);
-        uint256 degreeBits = vm.parseJsonUint(json, ".degreeBits");
-        SpongefishWhirVerify.WhirParams memory whirParams = _parseWhirParams(json);
-        bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory sessionId = vm.parseJsonBytes(json, ".whirSessionId");
-        GoldilocksExt3.Ext3[] memory whirEvals = _parseWhirEvals(json);
+        (
+            MleVerifier.MleProof memory proof,
+            uint256 degreeBits,
+            bytes32 preCommitRoot,
+            SpongefishWhirVerify.WhirParams memory whirParams,
+            bytes memory protocolId,
+            bytes memory preSessionId,
+            bytes memory witSessionId,
+            GoldilocksExt3.Ext3[] memory preWhirEvals,
+            GoldilocksExt3.Ext3[] memory witWhirEvals
+        ) = _parseAll(json);
 
-        // Tamper with evalValue
-        proof.evalValue = (proof.evalValue + 1) % 0xFFFFFFFF00000001;
+        // Tamper with witness eval value
+        proof.witnessEvalValue = (proof.witnessEvalValue + 1) % 0xFFFFFFFF00000001;
 
         bool success;
-        try verifier.verify(proof, degreeBits, whirParams, protocolId, sessionId, whirEvals) returns (bool) {
+        try verifier.verify(
+            proof, degreeBits, preCommitRoot, whirParams,
+            protocolId, preSessionId, witSessionId,
+            preWhirEvals, witWhirEvals
+        ) returns (bool) {
             success = true;
         } catch {
             success = false;
         }
-        assertFalse(success, "Tampered evalValue should fail");
+        assertFalse(success, "Tampered witnessEvalValue should fail");
     }
 
     /// @notice Negative test: tampered pcsConstraintEval should fail constraint check.
     function test_e2e_tampered_constraint_eval_fails() public {
         string memory json = vm.readFile("test/fixtures/small_mul.json");
-        MleVerifier.MleProof memory proof = _parseProof(json);
-        uint256 degreeBits = vm.parseJsonUint(json, ".degreeBits");
-        SpongefishWhirVerify.WhirParams memory whirParams = _parseWhirParams(json);
-        bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory sessionId = vm.parseJsonBytes(json, ".whirSessionId");
-        GoldilocksExt3.Ext3[] memory whirEvals = _parseWhirEvals(json);
+        (
+            MleVerifier.MleProof memory proof,
+            uint256 degreeBits,
+            bytes32 preCommitRoot,
+            SpongefishWhirVerify.WhirParams memory whirParams,
+            bytes memory protocolId,
+            bytes memory preSessionId,
+            bytes memory witSessionId,
+            GoldilocksExt3.Ext3[] memory preWhirEvals,
+            GoldilocksExt3.Ext3[] memory witWhirEvals
+        ) = _parseAll(json);
 
         proof.pcsConstraintEval = (proof.pcsConstraintEval + 1) % 0xFFFFFFFF00000001;
 
         bool success;
-        try verifier.verify(proof, degreeBits, whirParams, protocolId, sessionId, whirEvals) returns (bool) {
+        try verifier.verify(
+            proof, degreeBits, preCommitRoot, whirParams,
+            protocolId, preSessionId, witSessionId,
+            preWhirEvals, witWhirEvals
+        ) returns (bool) {
             success = true;
         } catch {
             success = false;
         }
         assertFalse(success, "Tampered pcsConstraintEval should fail");
+    }
+
+    /// @notice Negative test: tampered preprocessed commitment root should fail VK binding.
+    function test_e2e_tampered_preprocessed_root_fails() public {
+        string memory json = vm.readFile("test/fixtures/small_mul.json");
+        (
+            MleVerifier.MleProof memory proof,
+            uint256 degreeBits,
+            bytes32 preCommitRoot,
+            SpongefishWhirVerify.WhirParams memory whirParams,
+            bytes memory protocolId,
+            bytes memory preSessionId,
+            bytes memory witSessionId,
+            GoldilocksExt3.Ext3[] memory preWhirEvals,
+            GoldilocksExt3.Ext3[] memory witWhirEvals
+        ) = _parseAll(json);
+
+        // Tamper with VK (preprocessed commitment root)
+        preCommitRoot = bytes32(uint256(preCommitRoot) ^ 0xFF);
+
+        bool success;
+        try verifier.verify(
+            proof, degreeBits, preCommitRoot, whirParams,
+            protocolId, preSessionId, witSessionId,
+            preWhirEvals, witWhirEvals
+        ) returns (bool) {
+            success = true;
+        } catch {
+            success = false;
+        }
+        assertFalse(success, "Tampered preprocessed commitment root should fail VK binding");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -96,20 +146,30 @@ contract MleE2ETest is Test {
     function _runE2E(string memory fixturePath) internal view {
         string memory json = vm.readFile(fixturePath);
 
-        MleVerifier.MleProof memory proof = _parseProof(json);
-        uint256 degreeBits = vm.parseJsonUint(json, ".degreeBits");
-        SpongefishWhirVerify.WhirParams memory whirParams = _parseWhirParams(json);
-        bytes memory protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        bytes memory sessionId = vm.parseJsonBytes(json, ".whirSessionId");
-        GoldilocksExt3.Ext3[] memory whirEvals = _parseWhirEvals(json);
+        (
+            MleVerifier.MleProof memory proof,
+            uint256 degreeBits,
+            bytes32 preCommitRoot,
+            SpongefishWhirVerify.WhirParams memory whirParams,
+            bytes memory protocolId,
+            bytes memory preSessionId,
+            bytes memory witSessionId,
+            GoldilocksExt3.Ext3[] memory preWhirEvals,
+            GoldilocksExt3.Ext3[] memory witWhirEvals
+        ) = _parseAll(json);
 
         console.log("=== E2E:", fixturePath);
         console.log("  degreeBits:", degreeBits);
         console.log("  publicInputs count:", proof.publicInputs.length);
-        console.log("  individualEvals count:", proof.individualEvals.length);
+        console.log("  preprocessedEvals count:", proof.preprocessedIndividualEvals.length);
+        console.log("  witnessEvals count:", proof.witnessIndividualEvals.length);
 
         uint256 gasBefore = gasleft();
-        bool valid = verifier.verify(proof, degreeBits, whirParams, protocolId, sessionId, whirEvals);
+        bool valid = verifier.verify(
+            proof, degreeBits, preCommitRoot, whirParams,
+            protocolId, preSessionId, witSessionId,
+            preWhirEvals, witWhirEvals
+        );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("  TOTAL verify gas:", gasUsed);
 
@@ -120,10 +180,46 @@ contract MleE2ETest is Test {
     //  Fixture parsing
     // ═══════════════════════════════════════════════════════════════════════
 
+    function _parseAll(string memory json) internal pure returns (
+        MleVerifier.MleProof memory proof,
+        uint256 degreeBits,
+        bytes32 preCommitRoot,
+        SpongefishWhirVerify.WhirParams memory whirParams,
+        bytes memory protocolId,
+        bytes memory preSessionId,
+        bytes memory witSessionId,
+        GoldilocksExt3.Ext3[] memory preWhirEvals,
+        GoldilocksExt3.Ext3[] memory witWhirEvals
+    ) {
+        proof = _parseProof(json);
+        degreeBits = vm.parseJsonUint(json, ".degreeBits");
+        whirParams = _parseWhirParams(json);
+        protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
+        preSessionId = vm.parseJsonBytes(json, ".whirPreprocessedSessionId");
+        witSessionId = vm.parseJsonBytes(json, ".whirWitnessSessionId");
+        preWhirEvals = _parseWhirExt3(json, ".preprocessedWhirEval");
+        witWhirEvals = _parseWhirExt3(json, ".witnessWhirEval");
+
+        // Extract preprocessed commitment root (VK value)
+        preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
+    }
+
     function _parseProof(string memory json) internal pure returns (MleVerifier.MleProof memory proof) {
         proof.circuitDigest = _parseUintArray(json, ".circuitDigest");
-        proof.whirTranscript = vm.parseJsonBytes(json, ".whirTranscript");
-        proof.whirHints = vm.parseJsonBytes(json, ".whirHints");
+
+        // Preprocessed PCS
+        proof.preprocessedWhirTranscript = vm.parseJsonBytes(json, ".preprocessedWhirTranscript");
+        proof.preprocessedWhirHints = vm.parseJsonBytes(json, ".preprocessedWhirHints");
+        proof.preprocessedEvalValue = vm.parseUint(vm.parseJsonString(json, ".preprocessedEvalValue"));
+        proof.preprocessedBatchR = vm.parseUint(vm.parseJsonString(json, ".preprocessedBatchR"));
+        proof.preprocessedIndividualEvals = _parseUintArray(json, ".preprocessedIndividualEvals");
+
+        // Witness PCS
+        proof.witnessWhirTranscript = vm.parseJsonBytes(json, ".witnessWhirTranscript");
+        proof.witnessWhirHints = vm.parseJsonBytes(json, ".witnessWhirHints");
+        proof.witnessEvalValue = vm.parseUint(vm.parseJsonString(json, ".witnessEvalValue"));
+        proof.witnessBatchR = vm.parseUint(vm.parseJsonString(json, ".witnessBatchR"));
+        proof.witnessIndividualEvals = _parseUintArray(json, ".witnessIndividualEvals");
 
         // Sumcheck proofs (numRounds = degreeBits)
         uint256 degreeBits = vm.parseJsonUint(json, ".degreeBits");
@@ -131,17 +227,13 @@ contract MleE2ETest is Test {
         proof.permClaimedSum = vm.parseUint(vm.parseJsonString(json, ".permClaimedSum"));
         proof.constraintProof = _parseSumcheckProof(json, ".constraintProof", degreeBits);
 
-        // Scalars (stored as decimal strings in JSON for IEEE 754 safety)
-        proof.evalValue = vm.parseUint(vm.parseJsonString(json, ".evalValue"));
-        proof.batchR = vm.parseUint(vm.parseJsonString(json, ".batchR"));
-        proof.numPolys = vm.parseJsonUint(json, ".numPolys");
+        // Challenges
         proof.alpha = vm.parseUint(vm.parseJsonString(json, ".alpha"));
         proof.beta = vm.parseUint(vm.parseJsonString(json, ".beta"));
         proof.gamma = vm.parseUint(vm.parseJsonString(json, ".gamma"));
 
         // Arrays
         proof.publicInputs = _parseUintArray(json, ".publicInputs");
-        proof.individualEvals = _parseUintArray(json, ".individualEvals");
         proof.tau = _parseUintArray(json, ".tau");
         proof.tauPerm = _parseUintArray(json, ".tauPerm");
 
@@ -173,8 +265,6 @@ contract MleE2ETest is Test {
     function _parseUintArray(string memory json, string memory path)
         internal pure returns (uint256[] memory)
     {
-        // Field elements are serialized as decimal strings in JSON to prevent
-        // IEEE 754 precision loss. Parse string array → uint256 array.
         string[] memory strs = vm.parseJsonStringArray(json, path);
         uint256[] memory result = new uint256[](strs.length);
         for (uint256 i = 0; i < strs.length; i++) {
@@ -183,10 +273,12 @@ contract MleE2ETest is Test {
         return result;
     }
 
-    function _parseWhirEvals(string memory json) internal pure returns (GoldilocksExt3.Ext3[] memory) {
-        uint64 c0 = uint64(vm.parseUint(vm.parseJsonString(json, ".whirEval.c0")));
-        uint64 c1 = uint64(vm.parseUint(vm.parseJsonString(json, ".whirEval.c1")));
-        uint64 c2 = uint64(vm.parseUint(vm.parseJsonString(json, ".whirEval.c2")));
+    function _parseWhirExt3(string memory json, string memory prefix)
+        internal pure returns (GoldilocksExt3.Ext3[] memory)
+    {
+        uint64 c0 = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(prefix, ".c0"))));
+        uint64 c1 = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(prefix, ".c1"))));
+        uint64 c2 = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(prefix, ".c2"))));
 
         GoldilocksExt3.Ext3[] memory evals = new GoldilocksExt3.Ext3[](1);
         evals[0] = GoldilocksExt3.Ext3(c0, c1, c2);

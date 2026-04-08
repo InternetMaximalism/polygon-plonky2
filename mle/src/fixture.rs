@@ -17,7 +17,7 @@ use whir::algebra::embedding::Basefield;
 use whir::algebra::fields::{Field64_3, Field64 as ArkGoldilocks};
 use whir::protocols::whir::Config as WhirConfig;
 
-use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_NAME};
+use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_PREPROCESSED, WHIR_SESSION_WITNESS};
 use crate::proof::MleProof;
 use crate::sumcheck::types::SumcheckProof;
 
@@ -34,24 +34,48 @@ pub struct ProofFixture {
     /// Circuit digest (verifying key hash) — 4 Goldilocks field elements as decimal strings.
     /// SECURITY: Binds the proof to a specific Plonky2 circuit.
     pub circuit_digest: Vec<String>,
-    /// Merkle commitment root (hex with 0x prefix).
-    pub commitment_root: String,
-    /// Sumcheck proofs.
+
+    // ── Preprocessed PCS (constants + sigmas) ────────────────────────────
+    /// WHIR commitment root for preprocessed polynomial (hex, 0x-prefixed).
+    /// SECURITY: This is the VK binding value. The Solidity verifier checks
+    /// this matches a deploy-time constant.
+    pub preprocessed_commitment_root: String,
+    /// WHIR transcript bytes for preprocessed proof (hex, 0x-prefixed).
+    pub preprocessed_whir_transcript: String,
+    /// WHIR hints for preprocessed proof (hex, 0x-prefixed).
+    pub preprocessed_whir_hints: String,
+    /// Batched evaluation for preprocessed polynomial.
+    pub preprocessed_eval_value: String,
+    /// Deterministic batch scalar for preprocessed (from circuit_digest).
+    pub preprocessed_batch_r: String,
+    /// Individual evaluations: [const_0..const_C, sigma_0..sigma_R].
+    pub preprocessed_individual_evals: Vec<String>,
+    /// WHIR evaluation in Ext3 for preprocessed.
+    pub preprocessed_whir_eval: Ext3Fixture,
+
+    // ── Witness PCS (wires) ──────────────────────────────────────────────
+    /// WHIR commitment root for witness polynomial (hex, 0x-prefixed).
+    pub witness_commitment_root: String,
+    /// WHIR transcript bytes for witness proof (hex, 0x-prefixed).
+    pub witness_whir_transcript: String,
+    /// WHIR hints for witness proof (hex, 0x-prefixed).
+    pub witness_whir_hints: String,
+    /// Batched evaluation for witness polynomial.
+    pub witness_eval_value: String,
+    /// Fiat-Shamir derived batch scalar for witness.
+    pub witness_batch_r: String,
+    /// Individual evaluations: [wire_0..wire_W].
+    pub witness_individual_evals: Vec<String>,
+    /// WHIR evaluation in Ext3 for witness.
+    pub witness_whir_eval: Ext3Fixture,
+
+    // ── Sumcheck proofs ──────────────────────────────────────────────────
     pub perm_proof: SumcheckFixture,
     pub perm_claimed_sum: String,
     pub constraint_proof: SumcheckFixture,
-    /// PCS evaluations (full table for Merkle verification).
-    pub pcs_evaluations: Vec<String>,
-    /// Batched evaluation at sumcheck point.
-    pub eval_value: String,
-    /// Public inputs.
+
+    // ── Public data ──────────────────────────────────────────────────────
     pub public_inputs: Vec<String>,
-    /// Batch random scalar.
-    pub batch_r: String,
-    /// Number of batched polynomials.
-    pub num_polys: usize,
-    /// Individual MLE evaluations at sumcheck point.
-    pub individual_evals: Vec<String>,
     /// Fiat-Shamir challenges.
     pub alpha: String,
     pub beta: String,
@@ -67,16 +91,14 @@ pub struct ProofFixture {
     pub num_constants: usize,
     /// Circuit degree (log2).
     pub degree_bits: usize,
-    /// WHIR transcript bytes (hex with 0x prefix).
-    pub whir_transcript: String,
-    /// WHIR hints bytes (hex with 0x prefix).
-    pub whir_hints: String,
-    /// WHIR protocol ID (hex with 0x prefix, 64 bytes).
+
+    // ── WHIR config (shared between preprocessed and witness) ────────────
+    /// WHIR protocol ID (hex, 0x-prefixed, 64 bytes). Same for both commitments.
     pub whir_protocol_id: String,
-    /// WHIR session ID (hex with 0x prefix, 32 bytes).
-    pub whir_session_id: String,
-    /// WHIR evaluation value in Ext3 {c0, c1, c2}.
-    pub whir_eval: Ext3Fixture,
+    /// WHIR session ID for preprocessed commitment (hex, 0x-prefixed, 32 bytes).
+    pub whir_preprocessed_session_id: String,
+    /// WHIR session ID for witness commitment (hex, 0x-prefixed, 32 bytes).
+    pub whir_witness_session_id: String,
     /// WHIR protocol parameters for on-chain verification.
     pub whir_params: WhirParamsFixture,
 }
@@ -185,8 +207,19 @@ fn gl_root_of_unity(size: usize) -> u64 {
     gen.into_bigint().0[0]
 }
 
+/// Compute WHIR session_id from a session name string.
+fn compute_whir_session_id(session_name: &str) -> Vec<u8> {
+    let mut session_bytes = Vec::new();
+    ciborium::into_writer(&session_name, &mut session_bytes)
+        .expect("CBOR serialization failed");
+    let mut h = Keccak256::new();
+    h.update(&session_bytes);
+    h.finalize().to_vec()
+}
+
 /// Extract WHIR protocol parameters from config for Solidity verifier.
-fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u8>) {
+/// Returns (params, protocol_id, preprocessed_session_id, witness_session_id).
+fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u8>, Vec<u8>) {
     let pcs = WhirPCS::for_num_vars(degree_bits);
     let size = 1 << degree_bits;
     let config = WhirConfig::<Basefield<Field64_3>>::new(size, &pcs.params);
@@ -291,46 +324,67 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
         result
     };
 
-    // Compute session_id: keccak256(cbor(session_name))
-    let session_id = {
-        let mut session_bytes = Vec::new();
-        ciborium::into_writer(&WHIR_SESSION_NAME, &mut session_bytes)
-            .expect("CBOR serialization failed");
-        let mut h = Keccak256::new();
-        h.update(&session_bytes);
-        h.finalize().to_vec()
-    };
+    // Compute session_ids for both commitments
+    // SECURITY: Different session names prevent cross-protocol proof swapping.
+    let preprocessed_session_id = compute_whir_session_id(WHIR_SESSION_PREPROCESSED);
+    let witness_session_id = compute_whir_session_id(WHIR_SESSION_WITNESS);
 
-    (params_fixture, protocol_id, session_id)
+    (params_fixture, protocol_id, preprocessed_session_id, witness_session_id)
 }
 
 /// Convert an MleProof to a ProofFixture for JSON serialization.
+///
+/// Generates the two-commitment fixture format with separate preprocessed
+/// and witness WHIR proof data.
 pub fn proof_to_fixture<F: PrimeField64>(
     proof: &MleProof<F>,
     degree_bits: usize,
 ) -> ProofFixture {
-    let root_hex: String = proof
-        .commitment
+    let (whir_params, protocol_id, pre_session_id, wit_session_id) =
+        extract_whir_params(degree_bits);
+
+    // Preprocessed commitment root (first 32 bytes)
+    let pre_root_hex: String = proof
+        .preprocessed_commitment
         .proof_bytes
         .iter()
         .take(32)
         .map(|b| format!("{:02x}", b))
         .collect();
 
-    let (whir_params, protocol_id, session_id) = extract_whir_params(degree_bits);
+    // Witness commitment root (first 32 bytes)
+    let wit_root_hex: String = proof
+        .witness_commitment
+        .proof_bytes
+        .iter()
+        .take(32)
+        .map(|b| format!("{:02x}", b))
+        .collect();
 
     ProofFixture {
         circuit_digest: field_vec_to_strings(&proof.circuit_digest),
-        commitment_root: format!("0x{root_hex}"),
+        // Preprocessed PCS
+        preprocessed_commitment_root: format!("0x{pre_root_hex}"),
+        preprocessed_whir_transcript: hex_encode(&proof.preprocessed_eval_proof.narg_string),
+        preprocessed_whir_hints: hex_encode(&proof.preprocessed_eval_proof.hints),
+        preprocessed_eval_value: field_to_string(proof.preprocessed_eval_value),
+        preprocessed_batch_r: field_to_string(proof.preprocessed_batch_r),
+        preprocessed_individual_evals: field_vec_to_strings(&proof.preprocessed_individual_evals),
+        preprocessed_whir_eval: ext3_to_fixture(&proof.preprocessed_whir_eval_ext3),
+        // Witness PCS
+        witness_commitment_root: format!("0x{wit_root_hex}"),
+        witness_whir_transcript: hex_encode(&proof.witness_eval_proof.narg_string),
+        witness_whir_hints: hex_encode(&proof.witness_eval_proof.hints),
+        witness_eval_value: field_to_string(proof.witness_eval_value),
+        witness_batch_r: field_to_string(proof.witness_batch_r),
+        witness_individual_evals: field_vec_to_strings(&proof.witness_individual_evals),
+        witness_whir_eval: ext3_to_fixture(&proof.witness_whir_eval_ext3),
+        // Sumcheck proofs
         perm_proof: sumcheck_to_fixture(&proof.permutation_proof.sumcheck_proof),
         perm_claimed_sum: field_to_string(proof.permutation_proof.claimed_sum),
         constraint_proof: sumcheck_to_fixture(&proof.constraint_proof),
-        pcs_evaluations: vec![],
-        eval_value: field_to_string(proof.eval_value),
+        // Public data
         public_inputs: field_vec_to_strings(&proof.public_inputs),
-        batch_r: field_to_string(proof.batch_r),
-        num_polys: proof.num_polys,
-        individual_evals: field_vec_to_strings(&proof.individual_evals),
         alpha: field_to_string(proof.alpha),
         beta: field_to_string(proof.beta),
         gamma: field_to_string(proof.gamma),
@@ -342,11 +396,10 @@ pub fn proof_to_fixture<F: PrimeField64>(
         num_routed_wires: proof.num_routed_wires,
         num_constants: proof.num_constants,
         degree_bits,
-        whir_transcript: hex_encode(&proof.eval_proof.narg_string),
-        whir_hints: hex_encode(&proof.eval_proof.hints),
+        // WHIR config (shared)
         whir_protocol_id: hex_encode(&protocol_id),
-        whir_session_id: hex_encode(&session_id),
-        whir_eval: ext3_to_fixture(&proof.whir_eval_ext3),
+        whir_preprocessed_session_id: hex_encode(&pre_session_id),
+        whir_witness_session_id: hex_encode(&wit_session_id),
         whir_params,
     }
 }
@@ -434,19 +487,20 @@ mod tests {
         let json = proof_to_json(&proof, circuit.common.degree_bits());
 
         // Verify all field elements are strings (not bare numbers > 9 digits)
-        // The JSON should never have a bare number that could be a field element
-        assert!(json.contains("\"batchR\": \""), "batchR should be a string");
+        assert!(json.contains("\"witnessBatchR\": \""), "witnessBatchR should be a string");
+        assert!(json.contains("\"preprocessedBatchR\": \""), "preprocessedBatchR should be a string");
         assert!(json.contains("\"alpha\": \""), "alpha should be a string");
         assert!(json.contains("\"roundPolys\""), "should have roundPolys");
 
         // Parse back
         let fixture = fixture_from_json(&json);
-        assert_eq!(fixture.num_polys, proof.num_polys);
         assert_eq!(fixture.degree_bits, circuit.common.degree_bits());
 
-        // Verify field element roundtrip
-        let batch_r_parsed = parse_field_string(&fixture.batch_r);
-        assert_eq!(batch_r_parsed, proof.batch_r.to_canonical_u64());
+        // Verify field element roundtrips
+        let wit_batch_r_parsed = parse_field_string(&fixture.witness_batch_r);
+        assert_eq!(wit_batch_r_parsed, proof.witness_batch_r.to_canonical_u64());
+        let pre_batch_r_parsed = parse_field_string(&fixture.preprocessed_batch_r);
+        assert_eq!(pre_batch_r_parsed, proof.preprocessed_batch_r.to_canonical_u64());
 
         // Verify perm round polys roundtrip
         for (i, rp) in fixture.perm_proof.round_polys.iter().enumerate() {
