@@ -97,17 +97,20 @@ pub fn compute_identity_values<F: Field>(
 
 /// Run the permutation check as a sumcheck proving Σ_b h(b) = 0.
 ///
-/// Uses a standard sumcheck (without eq multiplier): the sumcheck proves
-/// `Σ_{b ∈ {0,1}^n} h(b) = claimed_sum`.
-/// For a valid permutation, `claimed_sum = 0`.
+/// SECURITY: Soundness relies on Schwartz-Zippel over β and γ (the Fiat-Shamir
+/// challenges derived BEFORE the prover commits to h). For a wrong permutation,
+/// Σ h(b) ≠ 0 as a formal polynomial in β, γ with overwhelming probability.
+/// The logUp identity telescopes only when the multisets {(w, id)} and {(w, σ)}
+/// are equal, which is equivalent to the permutation being correct.
 ///
-/// We use `eq(τ_perm, b)` as a randomized "selector" to make the sumcheck
-/// non-trivial (otherwise the round polynomials would be constant).
-/// The actual check is: `Σ_b eq(τ_perm, b) · h(b) = 0` iff `h ≡ 0`.
+/// Note: `tau_perm` is used by the Fiat-Shamir transcript to derive subsequent
+/// challenges but is NOT used as an eq-randomizer in this sumcheck. Unlike the
+/// constraint zero-check (which needs eq(τ, b) because the constraint polynomial
+/// is not zero on the padding region), h(b) sums to exactly 0 over {0,1}^n
+/// when the permutation is valid — the Schwartz-Zippel guarantee comes from
+/// β, γ being random, not from an eq-weighting.
 ///
-/// SECURITY: If h is not identically zero but Σ h(b) = 0, then
-/// Σ eq(τ,b)·h(b) ≠ 0 with probability ≥ 1 - n/|F| by Schwartz-Zippel.
-/// This is strictly stronger than checking Σ h(b) = 0.
+/// Round polynomial degree is 1 (h is multilinear).
 ///
 /// # Returns
 /// `(proof, challenges, claimed_sum)` where `claimed_sum` should be 0.
@@ -147,7 +150,7 @@ pub fn prove_permutation_check<F: Field + plonky2_field::types::PrimeField64>(
 
     let mut h_mle = DenseMultilinearExtension::new(h_padded);
 
-    // Use plain sumcheck: prove Σ_b h(b) = claimed_sum.
+    // Plain sumcheck: prove Σ_b h(b) = claimed_sum.
     // Round polynomial degree is 1 (h is multilinear).
     let (proof, challenges) = prove_sumcheck_plain(&mut h_mle, transcript);
 

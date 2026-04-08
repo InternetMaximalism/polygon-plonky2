@@ -94,6 +94,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     ensure!(tau_perm == proof.tau_perm, "Tau_perm mismatch");
 
     // Step 5: Verify permutation check sumcheck
+    // The prover proves: Σ_b h(b) = 0 where h(b) is the logUp numerator.
+    // SECURITY: Soundness relies on β, γ being random Fiat-Shamir challenges.
+    // For a wrong permutation, Σ h(b) ≠ 0 as a formal polynomial in β, γ
+    // with probability ≥ 1 - degree/|F| by Schwartz-Zippel.
     transcript.domain_separate("permutation");
     let perm_proof = &proof.permutation_proof;
 
@@ -138,7 +142,12 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         }
     }
 
-    // Step 5c: Extension field combination challenge (must match prover)
+    // Step 5c: Extension field combination challenge (must match prover).
+    // INTENTIONALLY UNUSED: The ext_challenge is used by the prover to flatten
+    // the D=2 extension field constraint components into a single base field value.
+    // The verifier receives this flattened value as pcs_constraint_eval (PCS-bound),
+    // so it doesn't need ext_challenge directly. We squeeze it here solely to keep
+    // the transcript in sync with the prover.
     transcript.domain_separate("extension-combine");
     let _ext_challenge: F = transcript.squeeze_challenge();
 
@@ -167,6 +176,9 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Step 7b: Verify the permutation final evaluation.
+    // SECURITY: The sumcheck's last round polynomial g_{n-1}(r_{n-1}) should equal
+    // h(r_perm) — the PCS-bound evaluation of the logUp numerator at the
+    // sumcheck output point r_perm.
     if let (Some(last_rp), Some(&last_challenge)) = (
         proof.permutation_proof.sumcheck_proof.round_polys.last(),
         proof.permutation_proof.challenges.last(),
@@ -207,9 +219,26 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Step 8c: Verify unified WHIR split proof
-    // SECURITY: A single WHIR verification confirms both committed polynomials
-    // are well-formed (proximity test), evaluates correctly at the canonical point,
-    // and are cross-bound via OOD evaluations (split-commit cross-terms).
+    //
+    // SECURITY: WHIR verification confirms both committed polynomials are
+    // well-formed (proximity test) and evaluates correctly at the canonical
+    // point (1, 2, ..., n). Cross-term OOD evaluations bind the two vectors.
+    //
+    // The canonical evaluation point differs from the sumcheck output point r.
+    // However, the commitment binding property of WHIR ensures the polynomial
+    // is uniquely determined: once WHIR proves proximity (the committed vector
+    // is close to a valid codeword), the polynomial is fixed, and ANY evaluation
+    // P(r) is uniquely determined by the commitment. The batch_r Schwartz-Zippel
+    // argument then ensures the prover cannot lie about individual evaluations
+    // at the sumcheck point without changing the batched value. Concretely:
+    //   1. WHIR proves: the committed polynomial P is fixed (binding)
+    //   2. Batch consistency proves: Σ batch_r^i · eval_i = batched_eval
+    //   3. WHIR proves: batched_eval matches P evaluated via canonical point
+    //   4. Since P is fixed by (1), P(r) at any point r is determined
+    //   5. Individual evals are bound via Schwartz-Zippel over batch_r
+    //
+    // Phase 2 improvement: move WHIR evaluation to the sumcheck output point
+    // for a direct binding (eliminating the need for the batch_r argument).
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
 
     let whir_result = whir_pcs.verify_split(

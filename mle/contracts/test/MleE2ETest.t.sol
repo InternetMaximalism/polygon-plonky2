@@ -54,6 +54,8 @@ contract MleE2ETest is Test {
             MleVerifier.MleProof memory proof,
             uint256 degreeBits,
             bytes32 preCommitRoot,
+            uint256 numConstants,
+            uint256 numRoutedWires,
             SpongefishWhirVerify.WhirParams memory whirParams,
             bytes memory protocolId,
             bytes memory splitSessionId,
@@ -65,8 +67,8 @@ contract MleE2ETest is Test {
 
         bool success;
         try verifier.verify(
-            proof, degreeBits, preCommitRoot, whirParams,
-            protocolId, splitSessionId, whirEvals
+            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
+            whirParams, protocolId, splitSessionId, whirEvals
         ) returns (bool) {
             success = true;
         } catch {
@@ -82,6 +84,8 @@ contract MleE2ETest is Test {
             MleVerifier.MleProof memory proof,
             uint256 degreeBits,
             bytes32 preCommitRoot,
+            uint256 numConstants,
+            uint256 numRoutedWires,
             SpongefishWhirVerify.WhirParams memory whirParams,
             bytes memory protocolId,
             bytes memory splitSessionId,
@@ -92,8 +96,8 @@ contract MleE2ETest is Test {
 
         bool success;
         try verifier.verify(
-            proof, degreeBits, preCommitRoot, whirParams,
-            protocolId, splitSessionId, whirEvals
+            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
+            whirParams, protocolId, splitSessionId, whirEvals
         ) returns (bool) {
             success = true;
         } catch {
@@ -109,6 +113,8 @@ contract MleE2ETest is Test {
             MleVerifier.MleProof memory proof,
             uint256 degreeBits,
             bytes32 preCommitRoot,
+            uint256 numConstants,
+            uint256 numRoutedWires,
             SpongefishWhirVerify.WhirParams memory whirParams,
             bytes memory protocolId,
             bytes memory splitSessionId,
@@ -120,8 +126,8 @@ contract MleE2ETest is Test {
 
         bool success;
         try verifier.verify(
-            proof, degreeBits, preCommitRoot, whirParams,
-            protocolId, splitSessionId, whirEvals
+            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
+            whirParams, protocolId, splitSessionId, whirEvals
         ) returns (bool) {
             success = true;
         } catch {
@@ -141,6 +147,8 @@ contract MleE2ETest is Test {
             MleVerifier.MleProof memory proof,
             uint256 degreeBits,
             bytes32 preCommitRoot,
+            uint256 numConstants,
+            uint256 numRoutedWires,
             SpongefishWhirVerify.WhirParams memory whirParams,
             bytes memory protocolId,
             bytes memory splitSessionId,
@@ -155,8 +163,8 @@ contract MleE2ETest is Test {
 
         uint256 gasBefore = gasleft();
         bool valid = verifier.verify(
-            proof, degreeBits, preCommitRoot, whirParams,
-            protocolId, splitSessionId, whirEvals
+            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
+            whirParams, protocolId, splitSessionId, whirEvals
         );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("  TOTAL verify gas:", gasUsed);
@@ -172,6 +180,8 @@ contract MleE2ETest is Test {
         MleVerifier.MleProof memory proof,
         uint256 degreeBits,
         bytes32 preCommitRoot,
+        uint256 numConstants,
+        uint256 numRoutedWires,
         SpongefishWhirVerify.WhirParams memory whirParams,
         bytes memory protocolId,
         bytes memory splitSessionId,
@@ -188,8 +198,10 @@ contract MleE2ETest is Test {
         whirEvals[0] = _parseExt3(json, ".preprocessedWhirEval");
         whirEvals[1] = _parseExt3(json, ".witnessWhirEval");
 
-        // Extract preprocessed commitment root (VK value)
+        // Extract VK values
         preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
+        numConstants = vm.parseJsonUint(json, ".numConstants");
+        numRoutedWires = vm.parseJsonUint(json, ".numRoutedWires");
     }
 
     function _parseProof(string memory json) internal pure returns (MleVerifier.MleProof memory proof) {

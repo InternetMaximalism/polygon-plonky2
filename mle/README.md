@@ -526,6 +526,8 @@ providing the following security properties:
 - **Domain separation**: Session name `"plonky2-mle-whir-split"` prevents
   cross-protocol confusion with any legacy proof format.
 
+  **LOOKUP TABLE NOT SUPPORTED NOW!!**
+
 ### Previous Audit Findings (all addressed)
 
 An adversarial subagent audit of the two-commitment migration identified

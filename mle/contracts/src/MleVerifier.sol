@@ -75,6 +75,8 @@ contract MleVerifier {
     /// @param proof The complete proof with single unified WHIR data.
     /// @param degreeBits log2 of the circuit degree (number of sumcheck rounds).
     /// @param preprocessedCommitmentRoot VK: expected WHIR Merkle root for preprocessed polynomial.
+    /// @param numConstants VK: number of constant columns (from circuit setup).
+    /// @param numRoutedWires VK: number of routed wire columns (from circuit setup).
     /// @param whirParams WHIR protocol parameters.
     /// @param protocolId WHIR protocol ID (64 bytes).
     /// @param splitSessionId WHIR session ID for split-commit mode (32 bytes).
@@ -83,6 +85,8 @@ contract MleVerifier {
         MleProof calldata proof,
         uint256 degreeBits,
         bytes32 preprocessedCommitmentRoot,
+        uint256 numConstants,
+        uint256 numRoutedWires,
         SpongefishWhirVerify.WhirParams memory whirParams,
         bytes memory protocolId,
         bytes memory splitSessionId,
@@ -94,6 +98,13 @@ contract MleVerifier {
     {
         // ── Step 0: Input validation ──
         _validateInputs(proof);
+
+        // ── Step 0b: Dimension authentication ──
+        // SECURITY: numConstants and numRoutedWires are VK parameters (set at deploy time).
+        // Without this check, the prover could lie about dimensions to bypass
+        // the individual_evals array length checks.
+        require(proof.numConstants == numConstants, "numConstants mismatch with VK");
+        require(proof.numRoutedWires == numRoutedWires, "numRoutedWires mismatch with VK");
 
         // ── Step 1: Verify preprocessed batch_r is correctly derived ──
         // SECURITY: preprocessedBatchR must be deterministic from circuitDigest.
@@ -136,11 +147,16 @@ contract MleVerifier {
         uint256 gamma = TranscriptLib.squeezeChallenge(transcript);
         uint256 alpha = TranscriptLib.squeezeChallenge(transcript);
         uint256[] memory tau = TranscriptLib.squeezeChallenges(transcript, degreeBits);
-        TranscriptLib.squeezeChallenges(transcript, degreeBits); // tauPerm consumed
+        uint256[] memory tauPerm = TranscriptLib.squeezeChallenges(transcript, degreeBits);
 
         require(beta == proof.beta, "Beta mismatch");
         require(gamma == proof.gamma, "Gamma mismatch");
         require(alpha == proof.alpha, "Alpha mismatch");
+        // SECURITY: Validate tau_perm matches the transcript-derived value.
+        // Without this check, a prover could supply arbitrary tau_perm values.
+        for (uint256 i = 0; i < degreeBits; i++) {
+            require(tauPerm[i] == proof.tauPerm[i], "TauPerm mismatch");
+        }
 
         // ── Step 6: Verify permutation sumcheck ──
         TranscriptLib.domainSeparate(transcript, "permutation");
