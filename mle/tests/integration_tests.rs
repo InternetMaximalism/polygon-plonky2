@@ -546,8 +546,8 @@ fn test_swapped_commitment_rejected() {
         &circuit.prover_only, &circuit.common, pw, &mut timing,
     ).unwrap();
 
-    // Tamper with the commitment root (simulates a different committed polynomial)
-    proof.witness_commitment.proof_bytes[0] ^= 0xFF;
+    // Tamper with the witness root (simulates a different committed polynomial)
+    proof.witness_root[0] ^= 0xFF;
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);

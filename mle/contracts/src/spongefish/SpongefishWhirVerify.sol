@@ -33,6 +33,9 @@ library SpongefishWhirVerify {
         uint256 numVariables;
         uint256 foldingFactor;
         uint256 numVectors;
+        /// Number of separate split-commit calls (1 = standard, 2 = split-commit).
+        /// Total effective vectors = numCommitments * numVectors.
+        uint256 numCommitments;
         uint256 outDomainSamples;
         uint256 inDomainSamples;
         uint256 initialSumcheckRounds;
@@ -72,6 +75,10 @@ library SpongefishWhirVerify {
         uint256 foldIdx;
         uint256 totalFoldingLen;
         bytes32 prevRoot;
+        // Split-commit: per-commitment roots for round-0 Merkle verification
+        bytes32[] initialRoots;
+        // Vector RLC coefficients (from initial phase, needed for split in-domain eval)
+        GoldilocksExt3.Ext3[] vectorRlc;
         // Initial phase
         GoldilocksExt3.Ext3[] initialConstraintRlc;
         uint256 numLinearForms;
@@ -127,6 +134,8 @@ library SpongefishWhirVerify {
 
     // =====================================================================
     // Phase 1: Initial commitment + OOD + RLC + sum
+    // Supports split-commit mode: numCommitments separate Merkle roots,
+    // each with their own OOD cycle, followed by cross-term evaluations.
     // =====================================================================
     function _phaseInitial(
         SpongefishWhir.TranscriptState memory ts,
@@ -135,45 +144,92 @@ library SpongefishWhirVerify {
         WhirParams memory params,
         VerifyState memory vs
     ) private pure {
-        vs.prevRoot = SpongefishWhir.proverMessageHash(ts, transcript);
+        uint256 totalVectors = params.numCommitments * params.numVectors;
+        uint256 K = params.outDomainSamples;
+        uint256 totalOodPoints = params.numCommitments * K;
 
-        // OOD challenge points
-        GoldilocksExt3.Ext3[] memory oodPoints = new GoldilocksExt3.Ext3[](params.outDomainSamples);
-        for (uint256 i = 0; i < params.outDomainSamples; i++) {
-            (uint64 c0, uint64 c1, uint64 c2) = SpongefishWhir.verifierMessageField64x3(ts);
-            oodPoints[i] = GoldilocksExt3.Ext3(c0, c1, c2);
-        }
+        // Phase 1a: Receive per-commitment roots and OOD data
+        GoldilocksExt3.Ext3[] memory allOodPoints = new GoldilocksExt3.Ext3[](totalOodPoints);
+        GoldilocksExt3.Ext3[] memory oodMatrix;
+        (oodMatrix, allOodPoints) = _receiveCommitmentsAndOod(ts, transcript, params, vs);
 
-        // OOD answer matrix
-        GoldilocksExt3.Ext3[] memory oodMatrix = new GoldilocksExt3.Ext3[](
-            params.outDomainSamples * params.numVectors
-        );
-        for (uint256 i = 0; i < oodMatrix.length; i++) {
-            (uint64 c0, uint64 c1, uint64 c2) = SpongefishWhir.proverMessageField64x3(ts, transcript);
-            oodMatrix[i] = GoldilocksExt3.Ext3(c0, c1, c2);
-        }
-
-        // RLC
-        GoldilocksExt3.Ext3[] memory vectorRlc = SpongefishWhir.geometricChallenge(ts, params.numVectors);
-        vs.numLinearForms = evaluations.length / params.numVectors;
-        uint256 totalConstraints = params.outDomainSamples + vs.numLinearForms;
-        vs.initialConstraintRlc = SpongefishWhir.geometricChallenge(ts, totalConstraints);
+        // Phase 1b: RLC and sum computation
+        GoldilocksExt3.Ext3[] memory vectorRlc = SpongefishWhir.geometricChallenge(ts, totalVectors);
+        vs.vectorRlc = vectorRlc;
+        vs.numLinearForms = evaluations.length / totalVectors;
+        vs.initialConstraintRlc = SpongefishWhir.geometricChallenge(ts, totalOodPoints + vs.numLinearForms);
 
         // Store initial OOD round_constraints entry (entry 0)
-        GoldilocksExt3.Ext3[] memory oodRlcCoeffs = new GoldilocksExt3.Ext3[](params.outDomainSamples);
-        for (uint256 i = 0; i < params.outDomainSamples; i++) {
+        GoldilocksExt3.Ext3[] memory oodRlcCoeffs = new GoldilocksExt3.Ext3[](totalOodPoints);
+        for (uint256 i = 0; i < totalOodPoints; i++) {
             oodRlcCoeffs[i] = vs.initialConstraintRlc[vs.numLinearForms + i];
         }
         vs.roundConstraints[0] = RoundConstraintEntry({
             rlcCoeffs: oodRlcCoeffs,
-            univariatePoints: oodPoints,
+            univariatePoints: allOodPoints,
             numVariables: params.initialNumVariables
         });
 
-        // Compute "the sum" — inline assembly to avoid intermediate Ext3 allocs
+        // Compute "the sum"
         vs.theSum = GoldilocksExt3.zero();
-        _accumulateTheSum(vs.theSum, evaluations, vectorRlc, vs.initialConstraintRlc, 0, vs.numLinearForms, params.numVectors);
-        _accumulateTheSum(vs.theSum, oodMatrix, vectorRlc, vs.initialConstraintRlc, vs.numLinearForms, params.outDomainSamples, params.numVectors);
+        _accumulateTheSum(vs.theSum, evaluations, vectorRlc, vs.initialConstraintRlc, 0, vs.numLinearForms, totalVectors);
+        _accumulateTheSum(vs.theSum, oodMatrix, vectorRlc, vs.initialConstraintRlc, vs.numLinearForms, totalOodPoints, totalVectors);
+    }
+
+    /// @dev Receive commitment roots and OOD data for split-commit mode.
+    /// Returns (oodMatrix, allOodPoints) for the RLC computation.
+    function _receiveCommitmentsAndOod(
+        SpongefishWhir.TranscriptState memory ts,
+        bytes memory transcript,
+        WhirParams memory params,
+        VerifyState memory vs
+    ) private pure returns (
+        GoldilocksExt3.Ext3[] memory oodMatrix,
+        GoldilocksExt3.Ext3[] memory allOodPoints
+    ) {
+        uint256 nc = params.numCommitments;
+        uint256 nv = params.numVectors;
+        uint256 K = params.outDomainSamples;
+        uint256 totalVectors = nc * nv;
+        uint256 totalOodPoints = nc * K;
+
+        vs.initialRoots = new bytes32[](nc);
+        allOodPoints = new GoldilocksExt3.Ext3[](totalOodPoints);
+
+        // Per-commitment OOD answers (temporary storage)
+        GoldilocksExt3.Ext3[][] memory perCommitOod = new GoldilocksExt3.Ext3[][](nc);
+
+        for (uint256 c = 0; c < nc; c++) {
+            vs.initialRoots[c] = SpongefishWhir.proverMessageHash(ts, transcript);
+            for (uint256 i = 0; i < K; i++) {
+                (uint64 c0, uint64 c1, uint64 c2) = SpongefishWhir.verifierMessageField64x3(ts);
+                allOodPoints[c * K + i] = GoldilocksExt3.Ext3(c0, c1, c2);
+            }
+            perCommitOod[c] = new GoldilocksExt3.Ext3[](K * nv);
+            for (uint256 i = 0; i < K * nv; i++) {
+                (uint64 a0, uint64 a1, uint64 a2) = SpongefishWhir.proverMessageField64x3(ts, transcript);
+                perCommitOod[c][i] = GoldilocksExt3.Ext3(a0, a1, a2);
+            }
+        }
+
+        vs.prevRoot = vs.initialRoots[0];
+
+        // Build full OOD matrix with cross-terms
+        oodMatrix = new GoldilocksExt3.Ext3[](totalOodPoints * totalVectors);
+        for (uint256 c = 0; c < nc; c++) {
+            uint256 vOff = c * nv;
+            for (uint256 oodIdx = 0; oodIdx < K; oodIdx++) {
+                uint256 row = c * K + oodIdx;
+                for (uint256 j = 0; j < totalVectors; j++) {
+                    if (j >= vOff && j < vOff + nv) {
+                        oodMatrix[row * totalVectors + j] = perCommitOod[c][oodIdx * nv + (j - vOff)];
+                    } else {
+                        (uint64 x0, uint64 x1, uint64 x2) = SpongefishWhir.proverMessageField64x3(ts, transcript);
+                        oodMatrix[row * totalVectors + j] = GoldilocksExt3.Ext3(x0, x1, x2);
+                    }
+                }
+            }
+        }
     }
 
     // =====================================================================
@@ -303,11 +359,14 @@ library SpongefishWhirVerify {
         uint256 finalMD;
         uint256 finalRowBytes;
         uint256 finalInDomainSamples;
+        bool isSplitInitial = false;
         if (params.numRounds == 0) {
             finalCL = params.initialCodewordLength;
             finalMD = params.initialMerkleDepth;
+            // Per-commitment row bytes (numVectors per commit, typically 1)
             finalRowBytes = params.initialInterleavingDepth * params.numVectors * 8;
             finalInDomainSamples = params.inDomainSamples;
+            isSplitInitial = params.numCommitments > 1;
         } else {
             RoundParams memory lastRound = params.rounds[params.numRounds - 1];
             finalCL = lastRound.codewordLength;
@@ -317,19 +376,44 @@ library SpongefishWhirVerify {
         }
         uint256[] memory rawFinalIndices = _challengeIndicesUnsorted(ts, finalCL, finalInDomainSamples);
 
-        ts.hintPos += 8; // skip Vec<T> length prefix (zero-copy)
-        bytes32[] memory rawFinalHashes = new bytes32[](rawFinalIndices.length);
-        for (uint256 i = 0; i < rawFinalIndices.length; i++) {
-            rawFinalHashes[i] = _keccak256At(hints, ts.hintPos, finalRowBytes);
-            ts.hintPos += finalRowBytes;
+        if (isSplitInitial) {
+            // Split-commit mode: verify each commitment's Merkle tree separately
+            for (uint256 c = 0; c < params.numCommitments; c++) {
+                ts.hintPos += 8; // skip Vec<T> length prefix per commitment
+
+                bytes32[] memory rawFinalHashes = new bytes32[](rawFinalIndices.length);
+                for (uint256 i = 0; i < rawFinalIndices.length; i++) {
+                    rawFinalHashes[i] = _keccak256At(hints, ts.hintPos, finalRowBytes);
+                    ts.hintPos += finalRowBytes;
+                }
+
+                uint256[] memory idxCopy = new uint256[](rawFinalIndices.length);
+                for (uint256 i = 0; i < rawFinalIndices.length; i++) {
+                    idxCopy[i] = rawFinalIndices[i];
+                }
+                (uint256[] memory sortedIndices, bytes32[] memory sortedHashes) =
+                    _sortAndDedupWithHashes(idxCopy, rawFinalHashes);
+
+                ts.hintPos = SpongefishMerkle.verify(
+                    vs.initialRoots[c], finalMD, sortedIndices, sortedHashes, hints, ts.hintPos
+                );
+            }
+        } else {
+            // Standard mode
+            ts.hintPos += 8; // skip Vec<T> length prefix (zero-copy)
+            bytes32[] memory rawFinalHashes = new bytes32[](rawFinalIndices.length);
+            for (uint256 i = 0; i < rawFinalIndices.length; i++) {
+                rawFinalHashes[i] = _keccak256At(hints, ts.hintPos, finalRowBytes);
+                ts.hintPos += finalRowBytes;
+            }
+
+            (uint256[] memory sortedFinalIndices, bytes32[] memory sortedFinalHashes) =
+                _sortAndDedupWithHashes(rawFinalIndices, rawFinalHashes);
+
+            ts.hintPos = SpongefishMerkle.verify(
+                vs.prevRoot, finalMD, sortedFinalIndices, sortedFinalHashes, hints, ts.hintPos
+            );
         }
-
-        (uint256[] memory sortedFinalIndices, bytes32[] memory sortedFinalHashes) =
-            _sortAndDedupWithHashes(rawFinalIndices, rawFinalHashes);
-
-        ts.hintPos = SpongefishMerkle.verify(
-            vs.prevRoot, finalMD, sortedFinalIndices, sortedFinalHashes, hints, ts.hintPos
-        );
     }
 
     // =====================================================================
@@ -664,6 +748,9 @@ library SpongefishWhirVerify {
         if (round == 0) {
             o.cl = params.initialCodewordLength;
             o.md = params.initialMerkleDepth;
+            // SECURITY: In split-commit mode, each commitment has its own Merkle tree
+            // with interleaving_depth × numVectors columns (numVectors=1 per commit).
+            // Row bytes per commitment = interleaving_depth × numVectors × 8.
             o.rowBytes = params.initialInterleavingDepth * params.numVectors * 8;
             o.domainGen = params.initialDomainGenerator;
             o.numCosets = params.initialNumCosets;
@@ -700,31 +787,167 @@ library SpongefishWhirVerify {
         uint256[] memory rawIndices = _challengeIndicesUnsorted(ts, o.cl, o.inDomainSamples);
         uint256 rawCount = rawIndices.length;
 
-        ts.hintPos += 8; // skip Vec<T> length prefix (zero-copy)
+        if (round == 0 && params.numCommitments > 1) {
+            _openSplitCommitments(ts, hints, params, vs, o, rawIndices, rawCount, roundOodAnswers, roundOodPoints);
+        } else {
+            // Standard mode (single commitment or round > 0)
+            ts.hintPos += 8; // skip Vec<T> length prefix (zero-copy)
 
-        bytes32[] memory rawLeafHashes = new bytes32[](rawCount);
-        uint256[] memory rowOffsets = new uint256[](rawCount);
+            bytes32[] memory rawLeafHashes = new bytes32[](rawCount);
+            uint256[] memory rowOffsets = new uint256[](rawCount);
 
-        for (uint256 i = 0; i < rawCount; i++) {
-            uint256 rowOff = ts.hintPos;
-            rowOffsets[i] = rowOff;
-            rawLeafHashes[i] = _keccak256At(hints, rowOff, o.rowBytes);
-            ts.hintPos += o.rowBytes;
+            for (uint256 i = 0; i < rawCount; i++) {
+                uint256 rowOff = ts.hintPos;
+                rowOffsets[i] = rowOff;
+                rawLeafHashes[i] = _keccak256At(hints, rowOff, o.rowBytes);
+                ts.hintPos += o.rowBytes;
+            }
+
+            GoldilocksExt3.Ext3[] memory inDomainEvalPoints = _computeEvalPoints(
+                rawIndices, rawCount, o.domainGen, o.numCosets, o.cosetSize
+            );
+
+            (uint256[] memory sortedIndices, bytes32[] memory sortedHashes) =
+                _sortAndDedupWithHashes(rawIndices, rawLeafHashes);
+
+            ts.hintPos = SpongefishMerkle.verify(
+                vs.prevRoot, o.md, sortedIndices, sortedHashes, hints, ts.hintPos
+            );
+
+            _addConstraintValues(ts, hints, params, vs, round, rawCount, roundOodAnswers,
+                roundOodPoints, rowOffsets, inDomainEvalPoints, o.numCols, o.isBaseField);
+        }
+    }
+
+    /// @dev Open split-committed vectors at round 0: verify each commitment's
+    ///      Merkle tree separately, then compute in-domain constraint values
+    ///      using per-commitment rows combined with vector RLC.
+    function _openSplitCommitments(
+        SpongefishWhir.TranscriptState memory ts,
+        bytes memory hints,
+        WhirParams memory params,
+        VerifyState memory vs,
+        OpenParams memory o,
+        uint256[] memory rawIndices,
+        uint256 rawCount,
+        GoldilocksExt3.Ext3[] memory roundOodAnswers,
+        GoldilocksExt3.Ext3[] memory roundOodPoints
+    ) private pure {
+        // Store per-commitment row offsets [commitment][sample]
+        uint256[][] memory perCommitRowOffsets = new uint256[][](params.numCommitments);
+
+        for (uint256 c = 0; c < params.numCommitments; c++) {
+            ts.hintPos += 8; // skip Vec<T> length prefix per commitment
+
+            perCommitRowOffsets[c] = new uint256[](rawCount);
+            bytes32[] memory rawLeafHashes = new bytes32[](rawCount);
+            for (uint256 i = 0; i < rawCount; i++) {
+                perCommitRowOffsets[c][i] = ts.hintPos;
+                rawLeafHashes[i] = _keccak256At(hints, ts.hintPos, o.rowBytes);
+                ts.hintPos += o.rowBytes;
+            }
+
+            // Copy indices for Merkle verification (sort mutates the array)
+            uint256[] memory idxCopy = new uint256[](rawCount);
+            for (uint256 i = 0; i < rawCount; i++) idxCopy[i] = rawIndices[i];
+
+            (uint256[] memory sortedIndices, bytes32[] memory sortedHashes) =
+                _sortAndDedupWithHashes(idxCopy, rawLeafHashes);
+
+            ts.hintPos = SpongefishMerkle.verify(
+                vs.initialRoots[c], o.md, sortedIndices, sortedHashes, hints, ts.hintPos
+            );
         }
 
         GoldilocksExt3.Ext3[] memory inDomainEvalPoints = _computeEvalPoints(
             rawIndices, rawCount, o.domainGen, o.numCosets, o.cosetSize
         );
 
-        (uint256[] memory sortedIndices, bytes32[] memory sortedHashes) =
-            _sortAndDedupWithHashes(rawIndices, rawLeafHashes);
+        // Compute constraint values using per-commitment rows + vector RLC.
+        // The in-domain evaluation for each sample is:
+        //   value = Σ_c vectorRlc[c] * dot(eqWeights, commitment_c_row)
+        // This matches the Rust behavior: tensor_product(vectorRlc, eqWeights) applied
+        // to the concatenated row [commit0_row | commit1_row | ...].
+        _addSplitConstraintValues(ts, params, vs, rawCount,
+            roundOodAnswers, roundOodPoints, perCommitRowOffsets,
+            inDomainEvalPoints, hints, o.numCols, o.isBaseField);
+    }
 
-        ts.hintPos = SpongefishMerkle.verify(
-            vs.prevRoot, o.md, sortedIndices, sortedHashes, hints, ts.hintPos
-        );
+    /// @dev Add constraint values for split-commit round 0.
+    function _addSplitConstraintValues(
+        SpongefishWhir.TranscriptState memory ts,
+        WhirParams memory params,
+        VerifyState memory vs,
+        uint256 rawCount,
+        GoldilocksExt3.Ext3[] memory roundOodAnswers,
+        GoldilocksExt3.Ext3[] memory roundOodPoints,
+        uint256[][] memory perCommitRowOffsets,
+        GoldilocksExt3.Ext3[] memory inDomainEvalPoints,
+        bytes memory hints,
+        uint256 numColsPerCommit,
+        bool isBaseField
+    ) private pure {
+        RoundParams memory rp = params.rounds[0];
+        uint256 ff = params.initialSumcheckRounds;
+        uint256 eqBase = vs.foldIdx - ff;
+        GoldilocksExt3.Ext3[] memory eqW = WhirLinearAlgebra.eqWeightsFrom(vs.allFoldingRandomness, eqBase, ff);
 
-        _addConstraintValues(ts, hints, params, vs, round, rawCount, roundOodAnswers,
-            roundOodPoints, rowOffsets, inDomainEvalPoints, o.numCols, o.isBaseField);
+        uint256 constraintCount = rp.outDomainSamples + rawCount;
+        GoldilocksExt3.Ext3[] memory roundRlc = SpongefishWhir.geometricChallenge(ts, constraintCount);
+
+        // OOD values
+        for (uint256 i = 0; i < rp.outDomainSamples; i++) {
+            _mulAddToSum(vs.theSum, roundOodAnswers[i], roundRlc[i]);
+        }
+
+        // In-domain values: combine per-commitment rows with vector RLC
+        for (uint256 i = 0; i < rawCount; i++) {
+            // Compute Σ_c vectorRlc[c] * dot(eqW, row_c[i])
+            GoldilocksExt3.Ext3 memory combined = GoldilocksExt3.zero();
+            for (uint256 c = 0; c < params.numCommitments; c++) {
+                GoldilocksExt3.Ext3 memory perCommitDot = _dotEqWithRow(
+                    eqW, hints, perCommitRowOffsets[c][i], numColsPerCommit, isBaseField
+                );
+                // combined += vectorRlc[c] * perCommitDot
+                _mulAddToExt3(combined, vs.vectorRlc[c], perCommitDot);
+            }
+            _mulAddToSum(vs.theSum, combined, roundRlc[rp.outDomainSamples + i]);
+        }
+
+        // Store round constraints for FinalClaim
+        GoldilocksExt3.Ext3[] memory allEvalPoints = new GoldilocksExt3.Ext3[](constraintCount);
+        for (uint256 i = 0; i < rp.outDomainSamples; i++) {
+            allEvalPoints[i] = roundOodPoints[i];
+        }
+        for (uint256 i = 0; i < rawCount; i++) {
+            allEvalPoints[rp.outDomainSamples + i] = inDomainEvalPoints[i];
+        }
+        vs.roundConstraints[1] = RoundConstraintEntry({
+            rlcCoeffs: roundRlc,
+            univariatePoints: allEvalPoints,
+            numVariables: rp.numVariables
+        });
+    }
+
+    /// @dev a += b * c (Ext3 multiply and add in-place)
+    function _mulAddToExt3(
+        GoldilocksExt3.Ext3 memory a,
+        GoldilocksExt3.Ext3 memory b,
+        GoldilocksExt3.Ext3 memory c
+    ) private pure {
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let b0 := mload(b)
+            let b1 := mload(add(b, 0x20))
+            let b2 := mload(add(b, 0x40))
+            let c0 := mload(c)
+            let c1 := mload(add(c, 0x20))
+            let c2 := mload(add(c, 0x40))
+            let t := addmod(mulmod(b1, c2, p), mulmod(b2, c1, p), p)
+            mstore(a, addmod(mload(a), addmod(mulmod(b0, c0, p), mulmod(2, t, p), p), p))
+            mstore(add(a, 0x20), addmod(mload(add(a, 0x20)), addmod(addmod(mulmod(b0, c1, p), mulmod(b1, c0, p), p), mulmod(2, mulmod(b2, c2, p), p), p), p))
+            mstore(add(a, 0x40), addmod(mload(add(a, 0x40)), addmod(addmod(mulmod(b0, c2, p), mulmod(b1, c1, p), p), mulmod(b2, c0, p), p), p))
+        }
     }
 
     function _computeEvalPoints(

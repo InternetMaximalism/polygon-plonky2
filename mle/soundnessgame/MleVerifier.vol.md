@@ -1,14 +1,17 @@
 # MleVerifier.sol — Soundness Report
 
-## Architecture: Two-Commitment WHIR PCS
+## Architecture: Unified Split-Commit WHIR PCS
 
-The verifier uses two separate WHIR polynomial commitments:
+The verifier uses a single unified WHIR proof covering both preprocessed and witness
+polynomials via the split-commit API:
 - **Preprocessed** (constants + sigmas): commitment root fixed in VK (`preprocessedCommitmentRoot` parameter)
 - **Witness** (wires): commitment root per-proof, absorbed into Fiat-Shamir transcript
+- **Cross-term binding**: the unified proof includes cross-OOD evaluations binding both vectors
 
-The VK binding check (`proofPreRoot == preprocessedCommitmentRoot`) prevents an attacker from
-substituting fabricated constants/sigmas. Two distinct WHIR session names
-(`plonky2-mle-whir-preprocessed` / `plonky2-mle-whir-witness`) prevent cross-protocol proof swapping.
+The VK binding check (`proof.preprocessedRoot == preprocessedCommitmentRoot`) prevents an attacker from
+substituting fabricated constants/sigmas. A single WHIR session name
+(`plonky2-mle-whir-split`) is used for domain separation. The split-commit API
+produces per-vector Merkle roots while generating one combined proof.
 
 `_derivePreprocessedBatchR()` uses a separate mini-transcript to deterministically derive the
 preprocessed batching scalar from `circuitDigest`. This matches Rust's `derive_preprocessed_batch_r()`.

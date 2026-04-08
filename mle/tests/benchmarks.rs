@@ -50,7 +50,7 @@ fn bench_circuit(
     let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Proof size
-    let whir_proof_bytes = proof.witness_eval_proof.narg_string.len() + proof.witness_eval_proof.hints.len();
+    let whir_proof_bytes = proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len();
     let sumcheck_bytes: usize = proof.constraint_proof.round_polys.iter()
         .chain(proof.permutation_proof.sumcheck_proof.round_polys.iter())
         .map(|rp| rp.evaluations.len() * 8)

@@ -2,7 +2,7 @@
 use plonky2_field::types::Field;
 use whir::algebra::fields::Field64_3;
 
-use crate::commitment::whir_pcs::{WhirCommitment, WhirEvalProof};
+use crate::commitment::whir_pcs::WhirEvalProof;
 use crate::permutation::logup::PermutationProof;
 use crate::permutation::lookup::LookupProof;
 use crate::sumcheck::types::SumcheckProof;
@@ -21,8 +21,8 @@ pub struct MleVerificationKey<F: Field> {
     /// Circuit digest (verifying key hash) — 4 Goldilocks field elements.
     pub circuit_digest: Vec<F>,
     /// WHIR commitment root for the batched preprocessed polynomial.
-    /// This is the first 32 bytes of the WHIR proof for the constants+sigmas
-    /// polynomial, and is deterministic for a given circuit.
+    /// This is the first 32 bytes of the split-commit Merkle root for the
+    /// preprocessed vector, and is deterministic for a given circuit.
     pub preprocessed_commitment_root: Vec<u8>,
     /// Number of constant columns in the circuit.
     pub num_constants: usize,
@@ -31,6 +31,9 @@ pub struct MleVerificationKey<F: Field> {
 }
 
 /// A complete MLE proof for a Plonky2 circuit.
+///
+/// Uses a single unified WHIR proof covering both preprocessed (constants + sigmas)
+/// and witness (wires) polynomials via the split-commit API.
 #[derive(Clone, Debug)]
 pub struct MleProof<F: Field> {
     /// Circuit digest (verifying key hash) — 4 Goldilocks field elements.
@@ -39,12 +42,16 @@ pub struct MleProof<F: Field> {
     /// as valid for the target circuit.
     pub circuit_digest: Vec<F>,
 
-    // ── Preprocessed PCS (constants + sigmas) ────────────────────────────
-    /// WHIR commitment to the batched preprocessed polynomial.
-    /// SECURITY: The first 32 bytes (commitment root) must match the VK.
-    pub preprocessed_commitment: WhirCommitment,
-    /// WHIR evaluation proof for the preprocessed polynomial.
-    pub preprocessed_eval_proof: WhirEvalProof,
+    // ── Unified WHIR PCS (preprocessed + witness) ───────────────────────
+    /// Single WHIR evaluation proof covering both vectors.
+    pub whir_eval_proof: WhirEvalProof,
+    /// Preprocessed commitment root (32 bytes, for VK binding check).
+    /// SECURITY: Must match the VK's preprocessed_commitment_root.
+    pub preprocessed_root: Vec<u8>,
+    /// Witness commitment root (32 bytes).
+    pub witness_root: Vec<u8>,
+
+    // ── Preprocessed batch evaluation ───────────────────────────────────
     /// Batched evaluation value for the preprocessed polynomial.
     pub preprocessed_eval_value: F,
     /// Batching scalar for preprocessed polys (deterministic, from circuit_digest).
@@ -54,11 +61,7 @@ pub struct MleProof<F: Field> {
     /// WHIR evaluation in Ext3 for preprocessed polynomial.
     pub preprocessed_whir_eval_ext3: Field64_3,
 
-    // ── Witness PCS (wires) ──────────────────────────────────────────────
-    /// WHIR commitment to the batched witness polynomial.
-    pub witness_commitment: WhirCommitment,
-    /// WHIR evaluation proof for the witness polynomial.
-    pub witness_eval_proof: WhirEvalProof,
+    // ── Witness batch evaluation ────────────────────────────────────────
     /// Batched evaluation value for the witness polynomial.
     pub witness_eval_value: F,
     /// Batching scalar for witness polys (Fiat-Shamir derived).

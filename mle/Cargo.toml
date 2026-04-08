@@ -20,9 +20,9 @@ serde_json = "1.0"
 keccak-hash = "0.8.0"
 
 # WHIR polynomial commitment scheme (arkworks-based)
-# Pinned to leohio/whir rev df0470f: Keccak256-chain transcript compatible
-# with the spongefish Solidity verifier contracts.
-whir = { git = "https://github.com/leohio/whir", rev = "df0470f", features = ["parallel"] }
+# Pinned to leohio/whir rev 872e72e: split-commit API for per-vector Merkle roots,
+# Keccak256-chain transcript compatible with the spongefish Solidity verifier contracts.
+whir = { git = "https://github.com/leohio/whir", rev = "872e72e", features = ["parallel"] }
 ark-ff = "0.5"
 ark-std = "0.5"
 ark-serialize = "0.5"

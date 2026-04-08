@@ -4,15 +4,14 @@
 /// 1. Reconstructing the Fiat-Shamir transcript
 /// 2. Verifying the zero-check sumcheck
 /// 3. Verifying the permutation check sumcheck
-/// 4. Verifying the PCS evaluation proof
+/// 4. Verifying the unified PCS evaluation proof (split-commit WHIR)
 /// 5. Checking the final sumcheck evaluation against opened values
 use anyhow::{ensure, Result};
 use plonky2::hash::hash_types::RichField;
 use plonky2::plonk::circuit_data::CommonCircuitData;
 use plonky2_field::extension::Extendable;
-use plonky2_field::types::Field;
 
-use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_PREPROCESSED, WHIR_SESSION_WITNESS};
+use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_SPLIT};
 use crate::eq_poly;
 use crate::proof::{MleProof, MleVerificationKey};
 use crate::prover::derive_preprocessed_batch_r;
@@ -51,14 +50,11 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Step 2: Verify preprocessed commitment root matches VK
-    // SECURITY: This is the critical circuit-binding check. The WHIR commitment
-    // root for the preprocessed polynomial must match the VK. An attacker who
-    // substitutes different constants/sigmas would produce a different Merkle
-    // root, failing this check.
-    let pre_root = &proof.preprocessed_commitment.proof_bytes
-        [..32.min(proof.preprocessed_commitment.proof_bytes.len())];
+    // SECURITY: This is the critical circuit-binding check. The preprocessed
+    // Merkle root must match the VK. An attacker who substitutes different
+    // constants/sigmas would produce a different root, failing this check.
     ensure!(
-        pre_root == vk.preprocessed_commitment_root.as_slice(),
+        proof.preprocessed_root == vk.preprocessed_commitment_root,
         "Preprocessed commitment root mismatch — circuit binding violated. \
          The prover used different constants/sigmas than the verification key expects."
     );
@@ -70,7 +66,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     transcript.absorb_field_vec(&proof.public_inputs);
 
     // Absorb preprocessed commitment root (binds preprocessed to transcript)
-    transcript.absorb_bytes(pre_root);
+    transcript.absorb_bytes(&proof.preprocessed_root);
 
     // Derive witness batch_r
     transcript.domain_separate("batch-commit-witness");
@@ -81,9 +77,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Absorb witness commitment root
-    let wit_root = &proof.witness_commitment.proof_bytes
-        [..32.min(proof.witness_commitment.proof_bytes.len())];
-    transcript.absorb_bytes(wit_root);
+    transcript.absorb_bytes(&proof.witness_root);
 
     // Step 4: Re-derive challenges
     transcript.domain_separate("challenges");
@@ -184,7 +178,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         );
     }
 
-    // Step 8: Verify PCS evaluation proofs
+    // Step 8: Verify unified WHIR PCS proof
     transcript.domain_separate("pcs-eval");
 
     // Step 8a: Preprocessed batch consistency
@@ -212,39 +206,22 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Witness batched evaluation mismatch"
     );
 
-    // Step 8c: Verify WHIR proofs
-    // SECURITY: WHIR verification confirms that the committed polynomials are
-    // well-formed (proximity test) and evaluate correctly at the canonical point.
-    // The commitment binding ensures all evaluations are determined, and the
-    // batch_r Schwartz-Zippel argument ensures individual_evals are correct.
+    // Step 8c: Verify unified WHIR split proof
+    // SECURITY: A single WHIR verification confirms both committed polynomials
+    // are well-formed (proximity test), evaluates correctly at the canonical point,
+    // and are cross-bound via OOD evaluations (split-commit cross-terms).
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
 
-    // SECURITY: Use distinct session names for preprocessed vs witness to prevent
-    // cross-protocol proof swapping (adversarial review Finding 1).
-    let pre_whir_result = whir_pcs.verify_with_session(
+    let whir_result = whir_pcs.verify_split(
         degree_bits,
-        &proof.preprocessed_eval_proof,
-        None,
-        Some(proof.preprocessed_whir_eval_ext3),
-        WHIR_SESSION_PREPROCESSED,
+        &proof.whir_eval_proof,
+        &[proof.preprocessed_whir_eval_ext3, proof.witness_whir_eval_ext3],
+        WHIR_SESSION_SPLIT,
     );
     ensure!(
-        pre_whir_result.is_ok(),
-        "Preprocessed WHIR PCS verification failed: {}",
-        pre_whir_result.err().unwrap_or_default()
-    );
-
-    let wit_whir_result = whir_pcs.verify_with_session(
-        degree_bits,
-        &proof.witness_eval_proof,
-        None,
-        Some(proof.witness_whir_eval_ext3),
-        WHIR_SESSION_WITNESS,
-    );
-    ensure!(
-        wit_whir_result.is_ok(),
-        "Witness WHIR PCS verification failed: {}",
-        wit_whir_result.err().unwrap_or_default()
+        whir_result.is_ok(),
+        "Unified WHIR PCS verification failed: {}",
+        whir_result.err().unwrap_or_default()
     );
 
     Ok(())
@@ -330,8 +307,8 @@ mod tests {
         .unwrap();
 
         // Tamper with the preprocessed commitment root
-        if !proof.preprocessed_commitment.proof_bytes.is_empty() {
-            proof.preprocessed_commitment.proof_bytes[0] ^= 0xFF;
+        if !proof.preprocessed_root.is_empty() {
+            proof.preprocessed_root[0] ^= 0xFF;
         }
 
         let result = mle_verify::<F, D>(&common_data, &vk, &proof);
@@ -375,8 +352,6 @@ mod tests {
         .unwrap();
 
         // Try to verify proof_a against vk_b — should fail
-        // Note: common_data might differ in degree, so this might fail at
-        // various points. The important thing is it DOES fail.
         let result = mle_verify::<F, D>(&common_data_a, &vk_b, &proof_a);
         assert!(result.is_err(), "Cross-circuit proof should be rejected");
     }

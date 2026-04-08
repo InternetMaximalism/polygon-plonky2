@@ -11,18 +11,15 @@ import {GoldilocksExt3} from "./spongefish/GoldilocksExt3.sol";
 
 /// @title MleVerifier
 /// @notice On-chain verifier for the Plonky2-MLE proof system with WHIR PCS.
-/// @dev Two-commitment architecture:
-///      - Preprocessed commitment (constants + sigmas): bound to VK
-///      - Witness commitment (wires): per-proof
+/// @dev Unified WHIR proof architecture:
+///      - Single split-commit WHIR proof covering both preprocessed and witness vectors
+///      - Preprocessed commitment root (first 32 bytes) bound to VK
+///      - Witness commitment root (next 32 bytes) per-proof
 ///
 ///      SECURITY: The preprocessedCommitmentRoot parameter is the VK.
 ///      It binds the verifier to a specific circuit's constants and
 ///      permutation routing. Without it, an attacker could substitute
 ///      fabricated constants/sigmas that trivially satisfy all constraints.
-///
-///      Two independent WHIR session names prevent cross-protocol confusion:
-///      - Preprocessed: "plonky2-mle-whir-preprocessed"
-///      - Witness: "plonky2-mle-whir-witness"
 ///
 ///      Goldilocks field: p = 2^64 - 2^32 + 1.
 contract MleVerifier {
@@ -35,16 +32,18 @@ contract MleVerifier {
         // SECURITY: Binds this proof to a specific Plonky2 circuit.
         uint256[] circuitDigest;    // 4 Goldilocks field elements
 
+        // ── Unified WHIR PCS (preprocessed + witness) ───────────────────
+        bytes whirTranscript;              // Single WHIR proof transcript
+        bytes whirHints;                   // Single WHIR hints
+        bytes32 preprocessedRoot;          // Preprocessed Merkle root (VK binding)
+        bytes32 witnessRoot;               // Witness Merkle root
+
         // ── Preprocessed PCS (constants + sigmas) ────────────────────────
-        bytes preprocessedWhirTranscript;   // WHIR proof for preprocessed polynomial
-        bytes preprocessedWhirHints;
         uint256 preprocessedEvalValue;      // Batched eval for preprocessed
         uint256 preprocessedBatchR;         // Deterministic from circuit_digest
         uint256[] preprocessedIndividualEvals; // [const_0..C, sigma_0..R]
 
         // ── Witness PCS (wires) ──────────────────────────────────────────
-        bytes witnessWhirTranscript;        // WHIR proof for witness polynomial
-        bytes witnessWhirHints;
         uint256 witnessEvalValue;           // Batched eval for witness
         uint256 witnessBatchR;              // Fiat-Shamir derived
         uint256[] witnessIndividualEvals;   // [wire_0..W]
@@ -72,26 +71,22 @@ contract MleVerifier {
         uint256 pcsPermNumeratorEval;
     }
 
-    /// @notice Verify an MLE proof with two-commitment WHIR PCS.
-    /// @param proof The complete proof with preprocessed and witness WHIR data.
+    /// @notice Verify an MLE proof with unified WHIR PCS (split-commit).
+    /// @param proof The complete proof with single unified WHIR data.
     /// @param degreeBits log2 of the circuit degree (number of sumcheck rounds).
     /// @param preprocessedCommitmentRoot VK: expected WHIR Merkle root for preprocessed polynomial.
-    /// @param whirParams WHIR protocol parameters (shared between both commitments).
-    /// @param protocolId WHIR protocol ID (64 bytes, shared).
-    /// @param preprocessedSessionId WHIR session ID for preprocessed (32 bytes).
-    /// @param witnessSessionId WHIR session ID for witness (32 bytes).
-    /// @param preprocessedWhirEvals WHIR Ext3 evaluations for preprocessed.
-    /// @param witnessWhirEvals WHIR Ext3 evaluations for witness.
+    /// @param whirParams WHIR protocol parameters.
+    /// @param protocolId WHIR protocol ID (64 bytes).
+    /// @param splitSessionId WHIR session ID for split-commit mode (32 bytes).
+    /// @param whirEvals WHIR Ext3 evaluations [preprocessed, witness].
     function verify(
         MleProof calldata proof,
         uint256 degreeBits,
         bytes32 preprocessedCommitmentRoot,
         SpongefishWhirVerify.WhirParams memory whirParams,
         bytes memory protocolId,
-        bytes memory preprocessedSessionId,
-        bytes memory witnessSessionId,
-        GoldilocksExt3.Ext3[] memory preprocessedWhirEvals,
-        GoldilocksExt3.Ext3[] memory witnessWhirEvals
+        bytes memory splitSessionId,
+        GoldilocksExt3.Ext3[] memory whirEvals
     )
         external
         pure
@@ -107,17 +102,9 @@ contract MleVerifier {
         require(expectedPreBatchR == proof.preprocessedBatchR, "Preprocessed batch_r mismatch");
 
         // ── Step 2: VK binding check ──
-        // SECURITY: The first 32 bytes of the preprocessed WHIR transcript are
-        // the commitment root. This must match the VK parameter to ensure the
-        // prover used the correct constants and sigma permutation values.
-        require(proof.preprocessedWhirTranscript.length >= 32, "Preprocessed WHIR transcript too short");
-        bytes memory preRootBytes = _extractFirst32(proof.preprocessedWhirTranscript);
-        bytes32 proofPreRoot;
-        assembly {
-            proofPreRoot := mload(add(preRootBytes, 0x20))
-        }
+        // SECURITY: The preprocessed root in the proof must match the VK.
         require(
-            proofPreRoot == preprocessedCommitmentRoot,
+            proof.preprocessedRoot == preprocessedCommitmentRoot,
             "VK binding violated: preprocessed commitment root mismatch"
         );
 
@@ -131,6 +118,7 @@ contract MleVerifier {
 
         // Absorb preprocessed commitment root into transcript
         // SECURITY: This binds subsequent challenges to the preprocessed polynomial.
+        bytes memory preRootBytes = abi.encodePacked(proof.preprocessedRoot);
         TranscriptLib.absorbBytes(transcript, preRootBytes);
 
         // ── Step 4: Derive witness batch_r ──
@@ -139,8 +127,7 @@ contract MleVerifier {
         require(witnessBatchR == proof.witnessBatchR, "Witness batch_r mismatch");
 
         // Absorb witness commitment root
-        require(proof.witnessWhirTranscript.length >= 32, "Witness WHIR transcript too short");
-        bytes memory witRootBytes = _extractFirst32(proof.witnessWhirTranscript);
+        bytes memory witRootBytes = abi.encodePacked(proof.witnessRoot);
         TranscriptLib.absorbBytes(transcript, witRootBytes);
 
         // ── Step 5: Derive challenges ──
@@ -215,30 +202,19 @@ contract MleVerifier {
             "witnessIndividualEvals length mismatch"
         );
 
-        // ── Step 11: Verify WHIR polynomial commitment proofs ──
-        // SECURITY: Two separate WHIR verifications with different session names
-        // prevent cross-protocol proof swapping.
-        bool preWhirValid = SpongefishWhirVerify.verifyWhirProof(
+        // ── Step 11: Verify unified WHIR split-commit proof ──
+        // SECURITY: Single WHIR verification covers both committed polynomials
+        // with cross-term binding via OOD evaluations.
+        bool whirValid = SpongefishWhirVerify.verifyWhirProof(
             protocolId,
-            preprocessedSessionId,
+            splitSessionId,
             "" /* instance: empty */,
-            proof.preprocessedWhirTranscript,
-            proof.preprocessedWhirHints,
-            preprocessedWhirEvals,
+            proof.whirTranscript,
+            proof.whirHints,
+            whirEvals,
             whirParams
         );
-        require(preWhirValid, "Preprocessed WHIR PCS verification failed");
-
-        bool witWhirValid = SpongefishWhirVerify.verifyWhirProof(
-            protocolId,
-            witnessSessionId,
-            "" /* instance: empty */,
-            proof.witnessWhirTranscript,
-            proof.witnessWhirHints,
-            witnessWhirEvals,
-            whirParams
-        );
-        require(witWhirValid, "Witness WHIR PCS verification failed");
+        require(whirValid, "Unified WHIR PCS verification failed");
 
         return true;
     }
@@ -347,11 +323,12 @@ contract MleVerifier {
         }
     }
 
-    /// @dev Extract the first 32 bytes from a calldata bytes array into memory.
-    function _extractFirst32(bytes calldata data) private pure returns (bytes memory result) {
+    /// @dev Extract 32 bytes from a calldata bytes array at a given offset.
+    function _extractBytes32At(bytes calldata data, uint256 offset) private pure returns (bytes memory result) {
+        require(data.length >= offset + 32, "Insufficient data for extraction");
         result = new bytes(32);
         assembly {
-            calldatacopy(add(result, 0x20), data.offset, 32)
+            calldatacopy(add(result, 0x20), add(data.offset, offset), 32)
         }
     }
 

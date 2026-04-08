@@ -137,7 +137,7 @@ fn generate_and_verify_all_fixtures() {
         println!("  num_polys={}", proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len());
         println!("  perm_rounds={}", proof.permutation_proof.sumcheck_proof.round_polys.len());
         println!("  constraint_rounds={}", proof.constraint_proof.round_polys.len());
-        println!("  whir_proof_bytes={}", proof.witness_eval_proof.narg_string.len() + proof.witness_eval_proof.hints.len());
+        println!("  whir_proof_bytes={}", proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len());
 
         // Verify in Rust
         let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);

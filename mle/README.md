@@ -8,7 +8,7 @@ proof engine with a multilinear-native pipeline:
 - **Zero-check sumcheck** for gate constraint verification
 - **Log-derivative permutation argument** (replaces univariate grand product)
 - **Log-derivative lookup argument** (replaces Sum/RE/LDC)
-- **Two-commitment WHIR PCS**: separate preprocessed (constants+sigmas) and witness (wires) commitments with VK binding
+- **Unified split-commit WHIR PCS**: single proof covering both preprocessed (constants+sigmas) and witness (wires) with per-vector Merkle roots for VK binding
 - **Keccak256 Fiat-Shamir** (single transcript, no dual-system ambiguity)
 - **Solidity on-chain verifier** with Yul-optimized field arithmetic
 
@@ -47,7 +47,7 @@ mle/
 │   ├── fixture.rs                # JSON fixture generation for Solidity tests
 │   └── commitment/
 │       ├── traits.rs             # MultilinearPCS trait
-│       ├── whir_pcs.rs           # WHIR PCS wrapper (commit/open/verify)
+│       ├── whir_pcs.rs           # WHIR PCS wrapper (split-commit/prove/verify)
 │       └── merkle_pcs.rs         # Merkle-tree-based PCS (fallback)
 ├── tests/
 │   ├── integration_tests.rs      # 16 integration + soundness tests
@@ -89,16 +89,17 @@ forge build
 
 ## Running Tests
 
-### Rust — Unit Tests (51 tests)
+### Rust — Unit Tests (53 tests)
 
 ```bash
 cargo test -p plonky2_mle --lib
 ```
 
 Covers: MLE evaluation, eq polynomial, transcript, sumcheck prover/verifier,
-Lagrange interpolation, permutation logUp, lookup logUp, WHIR PCS, config,
-integrated prover, integrated verifier, VK setup determinism, security tests
-(tampered preprocessed root, cross-circuit rejection).
+Lagrange interpolation, permutation logUp, lookup logUp, WHIR PCS (legacy +
+split-commit), config, integrated prover, integrated verifier, VK setup
+determinism, security tests (tampered preprocessed root, cross-circuit rejection,
+split commit root consistency).
 
 ### Rust — Integration Tests (16 tests)
 
@@ -126,7 +127,7 @@ cargo test -p plonky2_mle --test transcript_compat -- --nocapture
 Generates reference challenge values that must be reproduced by the Solidity
 transcript. Run with `--nocapture` to see the numeric values.
 
-### Solidity — All Tests (26 tests)
+### Solidity — All Tests (66 tests)
 
 ```bash
 cd mle/contracts
@@ -187,24 +188,29 @@ Vector 2 (absorb 42): 5382117256048105213
 Copy the numeric values into `contracts/test/TranscriptCompat.t.sol` constants
 (`V1_EMPTY_SQUEEZE`, etc.) and re-run `forge test` to confirm Solidity matches.
 
-## Two-Commitment Architecture
+## Unified Split-Commit WHIR PCS Architecture
 
-The proof system uses two separate WHIR polynomial commitments:
+The proof system uses a **single WHIR proof** covering both preprocessed and
+witness polynomials via the split-commit API. Each vector is committed
+individually (yielding per-vector Merkle roots), but the proof is unified:
 
-1. **Preprocessed commitment** (constants + sigmas): computed during circuit setup,
-   commitment root stored in the Verification Key (VK). The Solidity verifier receives
-   this as a deploy-time constant (`preprocessedCommitmentRoot`).
+1. **Preprocessed vector** (constants + sigmas): committed during setup,
+   Merkle root stored in the Verification Key (VK). The Solidity verifier
+   receives this as a deploy-time constant (`preprocessedCommitmentRoot`).
 
-2. **Witness commitment** (wires): generated per-proof. Commitment root absorbed
+2. **Witness vector** (wires): committed per-proof. Merkle root absorbed
    into the Fiat-Shamir transcript to bind all subsequent challenges.
 
-This separation prevents an attacker from substituting fabricated gate selectors
+3. **Cross-term binding**: the unified WHIR proof includes cross-OOD
+   evaluations (each vector evaluated at the other's OOD points), providing
+   cryptographic binding between preprocessed and witness polynomials.
+
+This design prevents an attacker from substituting fabricated gate selectors
 or permutation routing that trivially satisfy constraints. The VK binding ensures
 the prover used the correct preprocessed polynomials for the target circuit.
 
-Each commitment uses a distinct WHIR session name for domain separation:
-- Preprocessed: `"plonky2-mle-whir-preprocessed"`
-- Witness: `"plonky2-mle-whir-witness"`
+A single WHIR session name is used for domain separation:
+- Split-commit: `"plonky2-mle-whir-split"`
 
 ### API
 
@@ -217,6 +223,44 @@ let proof = mle_prove::<F, C, D>(&prover_data, &common_data, witness, &mut timin
 
 // Verify
 mle_verify::<F, D>(&common_data, &vk, &proof)?;
+```
+
+### Proof Structure
+
+```rust
+pub struct MleProof<F: Field> {
+    pub circuit_digest: Vec<F>,              // 4 Goldilocks elements (circuit identity)
+
+    // ── Unified WHIR PCS ────────────────────────────────────────────────
+    pub whir_eval_proof: WhirEvalProof,      // Single proof (transcript + hints)
+    pub preprocessed_root: Vec<u8>,          // 32 bytes (VK binding)
+    pub witness_root: Vec<u8>,               // 32 bytes
+
+    // ── Preprocessed batch evaluation ───────────────────────────────────
+    pub preprocessed_eval_value: F,          // Batched eval
+    pub preprocessed_batch_r: F,             // Deterministic from circuit_digest
+    pub preprocessed_individual_evals: Vec<F>, // [const_0..C, sigma_0..R]
+    pub preprocessed_whir_eval_ext3: Field64_3,
+
+    // ── Witness batch evaluation ────────────────────────────────────────
+    pub witness_eval_value: F,               // Batched eval
+    pub witness_batch_r: F,                  // Fiat-Shamir derived
+    pub witness_individual_evals: Vec<F>,    // [wire_0..W]
+    pub witness_whir_eval_ext3: Field64_3,
+
+    // ── Sub-protocol proofs ─────────────────────────────────────────────
+    pub constraint_proof: SumcheckProof<F>,
+    pub permutation_proof: PermutationProof<F>,
+    pub lookup_proofs: Vec<LookupProof<F>>,
+
+    // ── Public data + challenges ────────────────────────────────────────
+    pub public_inputs: Vec<F>,
+    pub alpha: F, pub beta: F, pub gamma: F,
+    pub tau: Vec<F>, pub tau_perm: Vec<F>,
+    pub pcs_constraint_eval: F,
+    pub pcs_perm_numerator_eval: F,
+    pub num_wires: usize, pub num_routed_wires: usize, pub num_constants: usize,
+}
 ```
 
 ### Verification Key (VK)
@@ -239,7 +283,7 @@ pub struct MleVerificationKey<F: Field> {
 
 | Field | Size | Description |
 |-------|------|-------------|
-| `circuit_digest` | 32 bytes (4 × u64) | Plonky2 verifying key hash. Identifies the circuit topology (gates, wiring, public input positions). |
+| `circuit_digest` | 32 bytes (4 x u64) | Plonky2 verifying key hash. Identifies the circuit topology (gates, wiring, public input positions). |
 | `preprocessed_commitment_root` | 32 bytes | WHIR Merkle root over the batched preprocessed polynomial. This is the critical binding: changing any constant or sigma value changes this root. |
 | `num_constants` | 8 bytes | Number of constant columns (selectors + gate constants). Used by the verifier for individual_evals decomposition. |
 | `num_routed_wires` | 8 bytes | Number of routed wire columns (sigma permutations). Used by the verifier for individual_evals decomposition. |
@@ -280,8 +324,8 @@ Steps:
    where `poly_i` are ordered as `[const_0, ..., const_C, sigma_0, ..., sigma_R]`.
 
 5. **Compute WHIR commitment root**: call `WhirPCS::commit_root(&P_pre)` which
-   runs the WHIR prove protocol with session name `"plonky2-mle-whir-preprocessed"`
-   and returns the first 32 bytes (Merkle root) of the proof.
+   runs a single-vector WHIR commit with session name `"plonky2-mle-whir-split"`
+   and returns the first 32 bytes (Merkle root).
 
 #### Determinism Guarantee
 
@@ -304,18 +348,50 @@ function verify(
     MleProof calldata proof,
     uint256 degreeBits,
     bytes32 preprocessedCommitmentRoot,  // ← VK (deploy-time constant)
-    ...
+    SpongefishWhirVerify.WhirParams memory whirParams,
+    bytes memory protocolId,
+    bytes memory splitSessionId,         // ← single session ID
+    GoldilocksExt3.Ext3[] memory whirEvals  // ← [preprocessed, witness] evaluations
 ) external pure returns (bool)
 ```
 
-The verifier performs two checks:
+The `MleProof` struct contains a single unified WHIR proof:
+
+```solidity
+struct MleProof {
+    uint256[] circuitDigest;
+    // ── Unified WHIR PCS ──────────────────────────
+    bytes whirTranscript;       // Single WHIR proof transcript
+    bytes whirHints;            // Single WHIR hints
+    bytes32 preprocessedRoot;   // From split-commit (VK binding)
+    bytes32 witnessRoot;        // From split-commit
+    // ── Batch evaluations ─────────────────────────
+    uint256 preprocessedEvalValue;
+    uint256 preprocessedBatchR;
+    uint256[] preprocessedIndividualEvals;
+    uint256 witnessEvalValue;
+    uint256 witnessBatchR;
+    uint256[] witnessIndividualEvals;
+    // ── Sumcheck + public data ────────────────────
+    SumcheckVerifier.SumcheckProof permProof;
+    uint256 permClaimedSum;
+    SumcheckVerifier.SumcheckProof constraintProof;
+    uint256[] publicInputs;
+    uint256 alpha; uint256 beta; uint256 gamma;
+    uint256[] tau; uint256[] tauPerm;
+    uint256 numWires; uint256 numRoutedWires; uint256 numConstants;
+    uint256 pcsConstraintEval;
+    uint256 pcsPermNumeratorEval;
+}
+```
+
+The verifier performs:
 1. **`_derivePreprocessedBatchR(proof.circuitDigest)`** — recomputes the
    deterministic batch scalar from the proof's circuit_digest and verifies
    it matches `proof.preprocessedBatchR`.
-2. **Root comparison** — extracts the first 32 bytes of
-   `proof.preprocessedWhirTranscript` and verifies they equal
-   `preprocessedCommitmentRoot`. If they differ, the prover used
-   different constants/sigmas, and verification fails immediately.
+2. **VK binding** — checks `proof.preprocessedRoot == preprocessedCommitmentRoot`.
+3. **Single WHIR verification** — one call to `SpongefishWhirVerify.verifyWhirProof()`
+   with combined evaluations `[preprocessedEval, witnessEval]`.
 
 In production, `preprocessedCommitmentRoot` would be set as an immutable
 contract parameter at deployment time (one VK per circuit).
@@ -344,6 +420,49 @@ contract parameter at deployment time (one VK per circuit).
 Note: `preprocessed_batch_r` is derived from a separate deterministic
 mini-transcript seeded with `circuit_digest` only.
 
+### WHIR Internal Transcript (Split-Commit)
+
+Within the unified WHIR proof, the split-commit transcript has the following
+structure for 2 commitments (preprocessed + witness), each with `numVectors=1`:
+
+```
+[prover_hash]  preprocessed Merkle root
+[verifier]     K OOD challenge points (Ext3)
+[prover]       K OOD answers for preprocessed vector
+[prover_hash]  witness Merkle root
+[verifier]     K OOD challenge points (Ext3)
+[prover]       K OOD answers for witness vector
+[prover]       K cross-term evaluations (witness at preprocessed OOD points)
+[prover]       K cross-term evaluations (preprocessed at witness OOD points)
+[verifier]     2 vector RLC coefficients
+[verifier]     (1 + 2K) constraint RLC coefficients
+               ... initial sumcheck ...
+               ... intermediate rounds (if any) ...
+               ... final vector + Merkle ...
+               ... final sumcheck ...
+```
+
+### WhirParams (Solidity)
+
+The `WhirParams` struct passed to the Solidity verifier includes:
+
+```solidity
+struct WhirParams {
+    uint256 numVariables;
+    uint256 foldingFactor;
+    uint256 numVectors;        // Per-commitment vector count (typically 1)
+    uint256 numCommitments;    // Number of split-commit calls (2 for preprocessed + witness)
+    uint256 outDomainSamples;
+    uint256 inDomainSamples;
+    uint256 initialSumcheckRounds;
+    uint256 numRounds;
+    uint256 finalSumcheckRounds;
+    uint256 finalSize;
+    // ... additional fields for Merkle/domain/FinalClaim parameters
+    RoundParams[] rounds;
+}
+```
+
 ## WHIR Configuration
 
 | Parameter | Value | Meaning |
@@ -354,9 +473,9 @@ mini-transcript seeded with `circuit_digest` only.
 | `pow_bits` | 0 | Proof-of-work disabled |
 | `folding_factor` | 4 | Fold 2^4 = 16 per WHIR round |
 
-Both preprocessed and witness commitments use the same WHIR parameters (same
-`degree_bits` determines polynomial size). The protocol ID is shared; only
-session IDs differ.
+Both preprocessed and witness vectors share the same WHIR parameters (same
+`degree_bits` determines polynomial size). A single protocol ID and session ID
+are used for the unified proof.
 
 ## Gas Estimates (Solidity Verifier)
 
@@ -375,32 +494,45 @@ Measured on Foundry with `--via-ir` and optimizer (200 runs):
 | Sumcheck verify 12 rounds | 353,209 |
 | Sumcheck verify 16 rounds | 478,558 |
 
-### End-to-End Verification Gas (Two-Commitment WHIR PCS)
+### End-to-End Verification Gas (Unified Split-Commit WHIR PCS)
 
 Measured from Solidity E2E tests (`MleE2ETest.t.sol`):
 
 | Circuit | degree_bits | Gates | verify() Gas |
 |---------|-------------|-------|-------------|
-| small_mul (5 chain muls) | 2 | 4 | **1,466,740** |
-| medium_mul (50 chain muls) | 3 | 8 | **1,835,029** |
-| large_mul (200 chain muls) | 4 | 16 | **2,196,676** |
-| poseidon_hash (4 inputs) | 2 | 4 | **1,456,558** |
-| recursive_verify (inner proof) | 11 | 2048 | **6,500,263** |
-| huge_mul (100K chain muls) | 13 | 8192 | **9,762,697** |
+| small_mul (5 chain muls) | 2 | 4 | **1,158,773** |
+| medium_mul (50 chain muls) | 3 | 8 | **1,444,884** |
+| large_mul (200 chain muls) | 4 | 16 | **1,698,640** |
+| poseidon_hash (4 inputs) | 2 | 4 | **1,157,939** |
+| recursive_verify (inner proof) | 11 | 2048 | **4,449,082** |
+| huge_mul (100K chain muls) | 13 | 8192 | **6,306,932** |
 
-Gas is dominated by two WHIR PCS verifications (one preprocessed, one witness).
-Sumcheck and transcript operations are comparatively cheap.
+The unified split-commit WHIR PCS reduces gas by 13-33% compared to the
+previous two-separate-proof architecture, with larger circuits benefiting most.
 
 ## Security Audit Status
 
-### Two-Commitment Architecture (latest)
+### Unified Split-Commit Architecture (latest)
+
+The split-commit migration consolidates two separate WHIR proofs into one,
+providing the following security properties:
+
+- **VK binding**: Preprocessed Merkle root from split-commit is deterministic
+  and checked against the VK. Changing any constant or sigma value changes
+  the root, failing verification.
+- **Cross-term binding**: The unified WHIR proof includes cross-OOD evaluations
+  (each vector evaluated at the other's OOD points), cryptographically binding
+  preprocessed and witness polynomials within a single Fiat-Shamir chain.
+- **Domain separation**: Session name `"plonky2-mle-whir-split"` prevents
+  cross-protocol confusion with any legacy proof format.
+
+### Previous Audit Findings (all addressed)
 
 An adversarial subagent audit of the two-commitment migration identified
 10 findings (3 HIGH, 3 MEDIUM, 2 LOW, 2 INFO). Addressed items:
 
-- **[HIGH] Shared WHIR session name** — Fixed: distinct session names
-  (`plonky2-mle-whir-preprocessed` / `plonky2-mle-whir-witness`) prevent
-  cross-protocol proof swapping
+- **[HIGH] Shared WHIR session name** — Fixed: split-commit uses a single
+  session `"plonky2-mle-whir-split"` with unified proof
 - **[HIGH] WHIR canonical evaluation point** — Documented as known limitation.
   Soundness relies on WHIR proximity testing (commitment binding for all evals).
   Phase 2: move WHIR evaluation to sumcheck output point for stronger binding.

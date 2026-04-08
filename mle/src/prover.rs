@@ -2,11 +2,11 @@
 ///
 /// Takes a Plonky2 circuit + witness and produces an MLE proof using:
 /// 1. MLE construction from raw evaluation tables
-/// 2. Merkle PCS commitment (batched)
+/// 2. Split-commit WHIR PCS (preprocessed + witness in one proof)
 /// 3. Fiat-Shamir (Keccak) for all challenges
 /// 4. Zero-check sumcheck for gate constraints
 /// 5. Log-derivative permutation check
-/// 6. PCS evaluation proof
+/// 6. Unified PCS evaluation proof
 use anyhow::Result;
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::witness::PartialWitness;
@@ -15,14 +15,13 @@ use plonky2::plonk::config::{GenericConfig, Hasher};
 use plonky2::plonk::prover::extract_evaluation_tables;
 use plonky2::util::timing::TimingTree;
 use plonky2_field::extension::Extendable;
-use plonky2_field::types::{Field as PlonkyField, PrimeField64};
+use plonky2_field::types::Field as PlonkyField;
 
-use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_PREPROCESSED, WHIR_SESSION_WITNESS};
+use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_SPLIT, plonky2_vec_to_ark};
 use crate::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtension};
 use crate::eq_poly;
 use crate::permutation::logup::PermutationProof;
-use crate::permutation::lookup::{self, LookupProof};
 use crate::proof::{MleProof, MleVerificationKey};
 use crate::sumcheck::prover::{compute_claimed_sum, prove_sumcheck_product};
 use crate::transcript::Transcript;
@@ -164,13 +163,8 @@ where
     // SECURITY: Extract circuit_digest (verifying key hash) to bind the proof
     // to a specific Plonky2 circuit. This is the first thing absorbed into the
     // Fiat-Shamir transcript, matching the standard Plonky2 verifier.
-    // HashOut<F> has 4 field elements accessible via .elements.
-    // circuit_digest is <<C as GenericConfig<D>>::Hasher as Hasher<F>>::Hash
-    // which is HashOut<F> for PoseidonGoldilocksConfig. We serialize it to
-    // bytes and parse back as field elements for transcript absorption.
     let digest_bytes = serde_json::to_vec(&prover_data.circuit_digest)
         .expect("circuit_digest serialization");
-    // Parse the JSON array [elem0, elem1, elem2, elem3] back to F elements
     let circuit_digest: Vec<F> = {
         let hash_out: plonky2::hash::hash_types::HashOut<F> =
             serde_json::from_slice(&digest_bytes).expect("circuit_digest deserialization");
@@ -216,40 +210,43 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
 
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
 
-    // Step 4a: Preprocessed batch (constants + sigmas) + WHIR commitment
-    // SECURITY: The preprocessed polynomial is committed with a deterministic batch_r
-    // derived from circuit_digest. The commitment root must match the VK, preventing
-    // an attacker from substituting fabricated constants/sigmas.
+    // Step 4: Unified WHIR split commit + prove
+    //
+    // SECURITY: The split-commit API commits each vector individually (getting
+    // per-vector Merkle roots) but produces a single proof with cross-term binding.
+    // This binds preprocessed and witness polynomials cryptographically.
+
+    // 4a: Build and commit preprocessed polynomial
     let _t = std::time::Instant::now();
     let batch_r_pre: F = derive_preprocessed_batch_r(circuit_digest);
     let (preprocessed_batched, preprocessed_mles) = build_preprocessed_batch(
         &const_mles, &sigma_mles, batch_r_pre, degree_bits,
     );
 
-    // Convert to Goldilocks and WHIR prove
+    // Convert preprocessed to arkworks field
     let pre_goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
         preprocessed_batched.evaluations.iter()
             .map(|&f| plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
                 f.to_canonical_u64(),
             ))
             .collect();
+    let pre_ark_evals = plonky2_vec_to_ark(&pre_goldilocks_evals);
+
+    // Compute pre_root deterministically (throwaway commit).
+    // This is needed because batch_r_wit depends on pre_root being absorbed
+    // into the main transcript, but commit_split needs both vectors upfront.
     let pre_goldilocks_mle = DenseMultilinearExtension::new(pre_goldilocks_evals);
-    let (pre_commitment, pre_eval_proof, pre_eval_ext3) =
-        whir_pcs.prove_at_point_with_session(
-            &pre_goldilocks_mle, None, WHIR_SESSION_PREPROCESSED,
-        );
-    eprintln!("[prover] step4a preprocessed WHIR: {:?}", _t.elapsed());
+    let pre_root = whir_pcs.commit_root(&pre_goldilocks_mle);
+    eprintln!("[prover] step4a preprocessed commit_root: {:?}", _t.elapsed());
 
-    // Absorb preprocessed commitment root into transcript
-    let pre_root = &pre_commitment.proof_bytes[..32.min(pre_commitment.proof_bytes.len())];
-    transcript.absorb_bytes(pre_root);
+    // 4b: Absorb pre_root into main transcript, derive batch_r_wit
+    transcript.absorb_bytes(&pre_root);
 
-    // Step 4b: Witness batch (wires) + WHIR commitment
-    let _t = std::time::Instant::now();
     transcript.domain_separate("batch-commit-witness");
     let batch_r_wit: F = transcript.squeeze_challenge();
 
-    // Build batched witness polynomial: P_wit(x) = Σ_i batch_r_wit^i · wire_i(x)
+    // 4c: Build batched witness polynomial using batch_r_wit
+    let _t = std::time::Instant::now();
     let mut wit_batched_evals = vec![F::ZERO; 1 << degree_bits];
     let mut r_pow = F::ONE;
     for mle in &wire_mles {
@@ -262,23 +259,40 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     }
     let wit_batched_mle = DenseMultilinearExtension::new(wit_batched_evals);
 
-    // Convert to Goldilocks and WHIR prove
+    // Convert witness to arkworks field
     let wit_goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
         wit_batched_mle.evaluations.iter()
             .map(|&f| plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
                 f.to_canonical_u64(),
             ))
             .collect();
-    let wit_goldilocks_mle = DenseMultilinearExtension::new(wit_goldilocks_evals);
-    let (wit_commitment, wit_eval_proof, wit_eval_ext3) =
-        whir_pcs.prove_at_point_with_session(
-            &wit_goldilocks_mle, None, WHIR_SESSION_WITNESS,
-        );
-    eprintln!("[prover] step4b witness WHIR: {:?}", _t.elapsed());
+    let wit_ark_evals = plonky2_vec_to_ark(&wit_goldilocks_evals);
 
-    // Absorb witness commitment root into transcript
-    let wit_root = &wit_commitment.proof_bytes[..32.min(wit_commitment.proof_bytes.len())];
-    transcript.absorb_bytes(wit_root);
+    // 4d: Split commit both vectors
+    let commit_data = whir_pcs.commit_split(
+        &[&pre_ark_evals, &wit_ark_evals],
+        WHIR_SESSION_SPLIT,
+    );
+
+    // SECURITY: Verify that the deterministic pre_root matches the split commit root.
+    // This is a sanity check — both use the same polynomial + params + session.
+    assert_eq!(
+        pre_root, commit_data.roots[0],
+        "SECURITY: Deterministic preprocessed root mismatch between \
+         commit_root() and commit_split(). This indicates a configuration error."
+    );
+    let witness_root = commit_data.roots[1].clone();
+    eprintln!("[prover] step4d split commit: {:?}", _t.elapsed());
+
+    // 4e: Absorb witness root into main transcript
+    transcript.absorb_bytes(&witness_root);
+
+    // 4f: Single WHIR prove
+    let _t = std::time::Instant::now();
+    let (whir_eval_proof, whir_eval_ext3s) = whir_pcs.prove_split_with_eval(commit_data);
+    let pre_eval_ext3 = whir_eval_ext3s[0];
+    let wit_eval_ext3 = whir_eval_ext3s[1];
+    eprintln!("[prover] step4f split prove: {:?}", _t.elapsed());
 
     // Step 5: Derive challenges
     transcript.domain_separate("challenges");
@@ -311,14 +325,9 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let has_lookup = !common_data.luts.is_empty();
     let lookup_proofs = if has_lookup {
         transcript.domain_separate("lookup");
-        let delta_lookup: F = transcript.squeeze_challenge();
-        let beta_lookup: F = transcript.squeeze_challenge();
+        let _delta_lookup: F = transcript.squeeze_challenge();
+        let _beta_lookup: F = transcript.squeeze_challenge();
 
-        // For the prototype, extract lookup data from wire values.
-        // A full implementation would use the LookupGate/LookupTableGate wire layout.
-        // Currently we support circuits without lookups in the E2E path;
-        // the lookup extraction from raw wire values needs gate-row mapping
-        // which requires CommonCircuitData.gates access.
         // TODO: Implement full lookup data extraction from evaluation tables.
         Vec::new()
     } else {
@@ -381,13 +390,6 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     }
 
     // Step 9b: Compute PCS-bound oracle values for the Solidity verifier.
-    //
-    // pcs_constraint_eval: the flattened constraint polynomial C(r) at the
-    // sumcheck output point r. The Solidity verifier checks:
-    //   constraintFinalEval == eq(τ, r) · pcs_constraint_eval
-    //
-    // This is computed from the (already flattened) constraint MLE evaluated at r.
-    // We use the original padded_constraints (before sumcheck consumed it).
     let constraint_mle_for_eval = DenseMultilinearExtension::new(
         flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge)
             .into_iter()
@@ -397,7 +399,6 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     );
     let pcs_constraint_eval = constraint_mle_for_eval.evaluate(&sumcheck_challenges);
 
-    // pcs_perm_numerator_eval: h(r_perm) at the permutation sumcheck output point.
     let id_values = crate::permutation::logup::compute_identity_values(
         &tables.k_is,
         &tables.subgroup,
@@ -435,21 +436,21 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
 
     eprintln!("[prover] step9 individual evals + pcs: {:?}", _t.elapsed());
 
-    // Step 10: WHIR evaluation proofs are already generated in steps 4a/4b.
+    // Step 10: Proof assembly (WHIR proof already generated in step 4f)
     transcript.domain_separate("pcs-eval");
 
     Ok(MleProof {
         circuit_digest: circuit_digest.to_vec(),
-        // Preprocessed PCS
-        preprocessed_commitment: pre_commitment,
-        preprocessed_eval_proof: pre_eval_proof,
+        // Unified WHIR PCS
+        whir_eval_proof,
+        preprocessed_root: pre_root,
+        witness_root,
+        // Preprocessed batch
         preprocessed_eval_value,
         preprocessed_batch_r: batch_r_pre,
         preprocessed_individual_evals,
         preprocessed_whir_eval_ext3: pre_eval_ext3,
-        // Witness PCS
-        witness_commitment: wit_commitment,
-        witness_eval_proof: wit_eval_proof,
+        // Witness batch
         witness_eval_value,
         witness_batch_r: batch_r_wit,
         witness_individual_evals,
