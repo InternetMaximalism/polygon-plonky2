@@ -31,6 +31,9 @@ use crate::sumcheck::types::SumcheckProof;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProofFixture {
+    /// Circuit digest (verifying key hash) — 4 Goldilocks field elements as decimal strings.
+    /// SECURITY: Binds the proof to a specific Plonky2 circuit.
+    pub circuit_digest: Vec<String>,
     /// Merkle commitment root (hex with 0x prefix).
     pub commitment_root: String,
     /// Sumcheck proofs.
@@ -317,6 +320,7 @@ pub fn proof_to_fixture<F: PrimeField64>(
     let (whir_params, protocol_id, session_id) = extract_whir_params(degree_bits);
 
     ProofFixture {
+        circuit_digest: field_vec_to_strings(&proof.circuit_digest),
         commitment_root: format!("0x{root_hex}"),
         perm_proof: sumcheck_to_fixture(&proof.permutation_proof.sumcheck_proof),
         perm_claimed_sum: field_to_string(proof.permutation_proof.claimed_sum),

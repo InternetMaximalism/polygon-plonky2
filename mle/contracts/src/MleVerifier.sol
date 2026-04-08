@@ -33,7 +33,10 @@ contract MleVerifier {
     uint256 constant P = 0xFFFFFFFF00000001;
 
     struct MleProof {
-        // WHIR PCS proof data (replaces old commitmentRoot + pcsEvaluations)
+        // Circuit binding (verifying key hash)
+        // SECURITY: Binds this proof to a specific Plonky2 circuit.
+        uint256[] circuitDigest;    // 4 Goldilocks field elements
+        // WHIR PCS proof data
         bytes whirTranscript;       // Serialized WHIR spongefish transcript
         bytes whirHints;            // WHIR verification hints (Merkle paths etc.)
         // Sumcheck proofs
@@ -91,6 +94,8 @@ contract MleVerifier {
         TranscriptLib.init(transcript);
 
         TranscriptLib.domainSeparate(transcript, "circuit");
+        // SECURITY: Absorb circuit_digest first to bind to verifying key.
+        TranscriptLib.absorbFieldVec(transcript, proof.circuitDigest);
         TranscriptLib.absorbFieldVec(transcript, proof.publicInputs);
 
         // ── Step 2: Derive batch_r ──
@@ -194,6 +199,10 @@ contract MleVerifier {
     // ═══════════════════════════════════════════════════════════════════════
 
     function _validateInputs(MleProof calldata proof) private pure {
+        require(proof.circuitDigest.length == 4, "circuitDigest must be 4 elements");
+        for (uint256 i = 0; i < 4; i++) {
+            require(proof.circuitDigest[i] < P, "circuitDigest >= P");
+        }
         require(proof.evalValue < P, "evalValue >= P");
         require(proof.batchR < P, "batchR >= P");
         require(proof.alpha < P, "alpha >= P");

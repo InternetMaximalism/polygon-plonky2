@@ -47,7 +47,23 @@ where
     // Step 1: Extract raw evaluation tables from Plonky2
     let tables = extract_evaluation_tables::<F, C, D>(prover_data, common_data, inputs, timing)?;
 
-    mle_prove_from_tables::<F, D>(common_data, &tables)
+    // SECURITY: Extract circuit_digest (verifying key hash) to bind the proof
+    // to a specific Plonky2 circuit. This is the first thing absorbed into the
+    // Fiat-Shamir transcript, matching the standard Plonky2 verifier.
+    // HashOut<F> has 4 field elements accessible via .elements.
+    // circuit_digest is <<C as GenericConfig<D>>::Hasher as Hasher<F>>::Hash
+    // which is HashOut<F> for PoseidonGoldilocksConfig. We serialize it to
+    // bytes and parse back as field elements for transcript absorption.
+    let digest_bytes = serde_json::to_vec(&prover_data.circuit_digest)
+        .expect("circuit_digest serialization");
+    // Parse the JSON array [elem0, elem1, elem2, elem3] back to F elements
+    let circuit_digest: Vec<F> = {
+        let hash_out: plonky2::hash::hash_types::HashOut<F> =
+            serde_json::from_slice(&digest_bytes).expect("circuit_digest deserialization");
+        hash_out.elements.to_vec()
+    };
+
+    mle_prove_from_tables::<F, D>(common_data, &tables, &circuit_digest)
 }
 
 /// Generate an MLE proof from pre-extracted evaluation tables.
@@ -57,6 +73,7 @@ where
 pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     common_data: &CommonCircuitData<F, D>,
     tables: &EvaluationTables<F>,
+    circuit_digest: &[F],
 ) -> Result<MleProof<F>> {
     let degree = tables.degree;
     let degree_bits = tables.degree_bits;
@@ -67,8 +84,12 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     eprintln!("[prover] degree_bits={degree_bits}, degree={degree}");
 
     // Step 2: Initialize transcript with circuit identity
+    // SECURITY: Absorb circuit_digest first to bind this proof to the specific
+    // Plonky2 circuit (verifying key). Without this, an attacker could forge a
+    // proof for a trivial circuit and claim it verifies the target circuit.
     let mut transcript = Transcript::new();
     transcript.domain_separate("circuit");
+    transcript.absorb_field_vec(circuit_digest);
     // Absorb public inputs into transcript
     transcript.absorb_field_vec(&tables.public_inputs);
 
@@ -288,6 +309,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     transcript.domain_separate("pcs-eval");
 
     Ok(MleProof {
+        circuit_digest: circuit_digest.to_vec(),
         commitment: whir_commitment,
         constraint_proof,
         permutation_proof: PermutationProof {

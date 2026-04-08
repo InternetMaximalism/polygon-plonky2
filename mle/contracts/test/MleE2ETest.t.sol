@@ -121,6 +121,7 @@ contract MleE2ETest is Test {
     // ═══════════════════════════════════════════════════════════════════════
 
     function _parseProof(string memory json) internal pure returns (MleVerifier.MleProof memory proof) {
+        proof.circuitDigest = _parseUintArray(json, ".circuitDigest");
         proof.whirTranscript = vm.parseJsonBytes(json, ".whirTranscript");
         proof.whirHints = vm.parseJsonBytes(json, ".whirHints");
 

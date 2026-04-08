@@ -10,6 +10,11 @@ use crate::sumcheck::types::SumcheckProof;
 /// A complete MLE proof for a Plonky2 circuit.
 #[derive(Clone, Debug)]
 pub struct MleProof<F: Field> {
+    /// Circuit digest (verifying key hash) — 4 Goldilocks field elements.
+    /// SECURITY: Binds this proof to a specific Plonky2 circuit. Without this,
+    /// an attacker could generate a proof for a trivial circuit and present it
+    /// as valid for the target circuit.
+    pub circuit_digest: Vec<F>,
     /// WHIR commitment to the batched MLE polynomial.
     pub commitment: WhirCommitment,
     /// Zero-check sumcheck proof for gate constraints.

@@ -28,8 +28,12 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Step 1: Reconstruct transcript (must match prover exactly)
+    // SECURITY: Absorb circuit_digest first to verify this proof is for the
+    // expected circuit. The circuit_digest is a hash of the verifying key
+    // (constants, sigmas, circuit topology).
     let mut transcript = Transcript::new();
     transcript.domain_separate("circuit");
+    transcript.absorb_field_vec(&proof.circuit_digest);
     transcript.absorb_field_vec(&proof.public_inputs);
 
     // Step 2: Derive batch_r
