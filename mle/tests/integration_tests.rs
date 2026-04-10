@@ -406,7 +406,7 @@ fn test_tampered_eval_value_rejected() {
         mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // Tamper with the evaluation value
-    proof.witness_eval_value = proof.witness_eval_value + F::ONE;
+    proof.witness_eval_value += F::ONE;
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
@@ -458,8 +458,7 @@ fn test_tampered_constraint_round_poly_rejected() {
 
     // Tamper with a constraint sumcheck round polynomial
     if !proof.constraint_proof.round_polys.is_empty() {
-        proof.constraint_proof.round_polys[0].evaluations[0] =
-            proof.constraint_proof.round_polys[0].evaluations[0] + F::ONE;
+        proof.constraint_proof.round_polys[0].evaluations[0] += F::ONE;
     }
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
@@ -495,8 +494,7 @@ fn test_tampered_permutation_round_poly_rejected() {
         .round_polys
         .is_empty()
     {
-        proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] =
-            proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] + F::ONE;
+        proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] += F::ONE;
     }
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
@@ -640,8 +638,6 @@ fn test_recursive_circuit_constraints_zero() {
     //
     // SECURITY: This is the critical test for validity proofs. Without this,
     // the library is only safe for non-recursive circuits.
-    use plonky2::plonk::circuit_data::VerifierCircuitTarget;
-    use plonky2::plonk::proof::ProofWithPublicInputs;
 
     // ── Inner circuit: x * y = z ──
     let inner_config = CircuitConfig::standard_recursion_config();

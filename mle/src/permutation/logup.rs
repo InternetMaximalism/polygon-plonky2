@@ -114,6 +114,7 @@ pub fn compute_identity_values<F: Field>(
 ///
 /// # Returns
 /// `(proof, challenges, claimed_sum)` where `claimed_sum` should be 0.
+#[allow(clippy::too_many_arguments)]
 pub fn prove_permutation_check<F: Field + plonky2_field::types::PrimeField64>(
     wire_values: &[Vec<F>],
     sigma_values: &[Vec<F>],

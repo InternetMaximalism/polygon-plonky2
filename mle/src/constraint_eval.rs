@@ -55,7 +55,7 @@ pub fn compute_combined_constraints<F: RichField + Extendable<D>, const D: usize
         let mut pow = F::Extension::ONE;
         for _ in 0..num_gate_constraints {
             powers.push(pow);
-            pow = pow * alpha_ext;
+            pow *= alpha_ext;
         }
         powers
     };
@@ -105,7 +105,7 @@ pub fn compute_combined_constraints<F: RichField + Extendable<D>, const D: usize
         let mut combined_ext = F::Extension::ZERO;
         for (j, &cv) in constraint_values.iter().enumerate() {
             if j < alpha_powers.len() {
-                combined_ext = combined_ext + alpha_powers[j] * cv;
+                combined_ext += alpha_powers[j] * cv;
             }
         }
 
@@ -135,8 +135,8 @@ pub fn flatten_extension_constraints<F: RichField + Extendable<D>, const D: usiz
             let mut result = F::ZERO;
             let mut pow = F::ONE;
             for &c in components.iter() {
-                result = result + pow * c;
-                pow = pow * extension_challenge;
+                result += pow * c;
+                pow *= extension_challenge;
             }
             result
         })

@@ -41,12 +41,12 @@ pub fn prove_sumcheck_product<F: Field + plonky2_field::types::PrimeField64>(
             let g_lo = g_mle.evaluations[2 * j];
             let g_hi = g_mle.evaluations[2 * j + 1];
 
-            for d in 0..=max_degree {
+            for (d, eval) in evals.iter_mut().enumerate() {
                 let t = F::from_canonical_usize(d);
                 let one_minus_t = F::ONE - t;
                 let f_t = one_minus_t * f_lo + t * f_hi;
                 let g_t = one_minus_t * g_lo + t * g_hi;
-                evals[d] = evals[d] + f_t * g_t;
+                *eval += f_t * g_t;
             }
         }
 
@@ -91,8 +91,8 @@ pub fn prove_sumcheck_plain<F: Field + plonky2_field::types::PrimeField64>(
         let mut g0 = F::ZERO;
         let mut g1 = F::ZERO;
         for j in 0..half {
-            g0 = g0 + f_mle.evaluations[2 * j];
-            g1 = g1 + f_mle.evaluations[2 * j + 1];
+            g0 += f_mle.evaluations[2 * j];
+            g1 += f_mle.evaluations[2 * j + 1];
         }
 
         // Degree 1 polynomial: evals at 0 and 1

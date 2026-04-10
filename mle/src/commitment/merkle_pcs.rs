@@ -55,7 +55,7 @@ pub struct MerkleEvalProof<F: Field> {
 
 fn hash_field_element<F: PrimeField64>(val: F) -> [u8; 32] {
     let bytes = val.to_canonical_u64().to_le_bytes();
-    let hash = keccak(&bytes);
+    let hash = keccak(bytes);
     let mut result = [0u8; 32];
     result.copy_from_slice(hash.as_ref());
     result
@@ -81,7 +81,7 @@ fn build_merkle_tree(leaf_hashes: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
 
     while layers.last().unwrap().len() > 1 {
         let current = layers.last().unwrap();
-        let mut next = Vec::with_capacity((current.len() + 1) / 2);
+        let mut next = Vec::with_capacity(current.len().div_ceil(2));
         for chunk in current.chunks(2) {
             if chunk.len() == 2 {
                 next.push(hash_pair(&chunk[0], &chunk[1]));
@@ -239,7 +239,7 @@ mod tests {
         let mut proof = pcs.open(&state, &mle, &point, value, &mut transcript);
 
         // Tamper with an evaluation
-        proof.evaluations[0] = proof.evaluations[0] + F::ONE;
+        proof.evaluations[0] += F::ONE;
 
         let mut transcript = Transcript::new();
         assert!(!pcs.verify(&commitment, &point, value, &proof, &mut transcript));

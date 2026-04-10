@@ -1,5 +1,5 @@
 /// Configuration for the MLE proving system.
-
+///
 /// WHIR PCS configuration parameters.
 #[derive(Clone, Debug)]
 pub struct WhirConfig {
@@ -47,7 +47,7 @@ impl WhirConfig {
     ///   O(num_queries * (rate_bits + n/folding_factor) * inv_rate)
     /// This is polylogarithmic in 2^n when folding_factor > 1.
     pub fn estimated_proof_field_elements(&self, num_vars: usize) -> usize {
-        let num_rounds = (num_vars + self.folding_factor - 1) / self.folding_factor;
+        let num_rounds = num_vars.div_ceil(self.folding_factor);
         // Each round: num_queries Merkle paths of depth ~(rate_bits + folding_factor)
         // Plus round messages
         self.num_queries * (self.rate_bits + self.folding_factor) * num_rounds
@@ -62,7 +62,7 @@ impl Default for WhirConfig {
 }
 
 /// Full MLE prover/verifier configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MleConfig {
     /// WHIR PCS parameters.
     pub whir: WhirConfig,
@@ -70,15 +70,6 @@ pub struct MleConfig {
     /// Maximum constraint degree per sumcheck variable.
     /// Automatically detected from gate set if None.
     pub max_constraint_degree: Option<usize>,
-}
-
-impl Default for MleConfig {
-    fn default() -> Self {
-        Self {
-            whir: WhirConfig::default(),
-            max_constraint_degree: None,
-        }
-    }
 }
 
 #[cfg(test)]

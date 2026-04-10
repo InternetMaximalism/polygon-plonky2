@@ -150,7 +150,7 @@ mod tests {
             prove_sumcheck_product(&mut eq_mle, &mut c_mle, 2, &mut prover_transcript);
 
         // Tamper with the first round polynomial
-        proof.round_polys[0].evaluations[0] = proof.round_polys[0].evaluations[0] + F::ONE;
+        proof.round_polys[0].evaluations[0] += F::ONE;
 
         let mut verifier_transcript = Transcript::new();
         let result = verify_sumcheck(&proof, claimed_sum, n, &mut verifier_transcript);

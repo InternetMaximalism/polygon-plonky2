@@ -24,14 +24,13 @@ pub fn eq_evals<F: Field>(tau: &[F]) -> Vec<F> {
     // eq(τ, b) = Π_j (τ_j · b_j + (1 - τ_j)(1 - b_j))
     // For b_j = 0: factor = (1 - τ_j)
     // For b_j = 1: factor = τ_j
-    for j in 0..n {
-        let t_j = tau[j];
+    for (j, &t_j) in tau.iter().enumerate() {
         let one_minus_t_j = F::ONE - t_j;
-        for i in 0..size {
+        for (i, entry) in table.iter_mut().enumerate() {
             if (i >> j) & 1 == 0 {
-                table[i] = table[i] * one_minus_t_j;
+                *entry *= one_minus_t_j;
             } else {
-                table[i] = table[i] * t_j;
+                *entry *= t_j;
             }
         }
     }
@@ -84,9 +83,9 @@ mod tests {
             // eq(b, b) = 1
             assert_eq!(table[b as usize], F::ONE);
             // All other entries should be 0
-            for i in 0..8 {
+            for (i, &entry) in table.iter().enumerate().take(8) {
                 if i != b as usize {
-                    assert_eq!(table[i], F::ZERO);
+                    assert_eq!(entry, F::ZERO);
                 }
             }
         }

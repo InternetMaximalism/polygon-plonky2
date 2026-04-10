@@ -55,13 +55,13 @@ fn lagrange_interpolate_over_integers<F: Field>(evals: &[F], point: F) -> F {
         let mut denom = F::ONE;
         for j in 0..d {
             if j != i {
-                denom = denom * (F::from_canonical_usize(i) - F::from_canonical_usize(j));
+                denom *= F::from_canonical_usize(i) - F::from_canonical_usize(j);
             }
         }
 
         // L_i(point) = full_product / (diffs[i] * denom)
         let li = full_product * (diffs[i] * denom).inverse();
-        result = result + evals[i] * li;
+        result += evals[i] * li;
     }
 
     result

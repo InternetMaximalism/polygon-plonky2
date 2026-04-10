@@ -54,9 +54,9 @@ const fn check_mds_matrix() -> bool {
 }
 const_assert!(check_mds_matrix());
 
-/// Ensure that the first WIDTH round constants are in canonical* form. This is required because
-/// the first constant layer does not handle double overflow.
-/// *: round_const == GoldilocksField::ORDER is safe.
+// Ensure that the first WIDTH round constants are in canonical* form. This is required because
+// the first constant layer does not handle double overflow.
+// *: round_const == GoldilocksField::ORDER is safe.
 /*
 #[allow(dead_code)]
 const fn check_round_const_bounds_init() -> bool {
@@ -151,8 +151,8 @@ unsafe fn multiply(x: u64, y: u64) -> u64 {
 
 // ==================================== STANDALONE CONST LAYER =====================================
 
-/// Standalone const layer. Run only once, at the start of round 1. Remaining const layers are fused
-/// with the preceding MDS matrix multiplication.
+// Standalone const layer. Run only once, at the start of round 1. Remaining const layers are fused
+// with the preceding MDS matrix multiplication.
 /*
 #[inline(always)]
 #[unroll_for_loops]

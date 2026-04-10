@@ -40,7 +40,7 @@ mod arrays {
         type Value = [T; N];
 
         fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-            formatter.write_str(&"an array of length N")
+            formatter.write_str("an array of length N")
         }
 
         #[inline]

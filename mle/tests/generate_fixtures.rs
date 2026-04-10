@@ -100,6 +100,7 @@ fn generate_and_verify_all_fixtures() {
         .join("fixtures");
     std::fs::create_dir_all(&fixture_dir).unwrap();
 
+    #[allow(clippy::type_complexity)]
     let circuits: Vec<(
         &str,
         Box<
@@ -112,8 +113,8 @@ fn generate_and_verify_all_fixtures() {
         ("small_mul", Box::new(|| build_mul_chain_circuit(5))),
         ("medium_mul", Box::new(|| build_mul_chain_circuit(50))),
         ("large_mul", Box::new(|| build_mul_chain_circuit(200))),
-        ("poseidon_hash", Box::new(|| build_hash_circuit())),
-        ("recursive_verify", Box::new(|| build_recursive_circuit())),
+        ("poseidon_hash", Box::new(build_hash_circuit)),
+        ("recursive_verify", Box::new(build_recursive_circuit)),
         ("huge_mul", Box::new(|| build_mul_chain_circuit(100000))),
     ];
 

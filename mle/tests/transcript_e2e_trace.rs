@@ -125,10 +125,10 @@ fn test_e2e_transcript_trace() {
     for mle in &all_mles {
         for (j, &eval) in mle.evaluations.iter().enumerate() {
             if j < batched_evals.len() {
-                batched_evals[j] = batched_evals[j] + r_pow * eval;
+                batched_evals[j] += r_pow * eval;
             }
         }
-        r_pow = r_pow * batch_r;
+        r_pow *= batch_r;
     }
     let batched_mle = DenseMultilinearExtension::new(batched_evals);
 

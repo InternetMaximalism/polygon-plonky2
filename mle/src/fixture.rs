@@ -254,7 +254,7 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
     let initial_mml = config.initial_committer.masked_message_length();
     let initial_coset_size = {
         let mut cs = initial_mml.next_power_of_two();
-        while initial_codeword_length % cs != 0 {
+        while !initial_codeword_length.is_multiple_of(cs) {
             cs *= 2;
         }
         cs
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn test_large_field_element_roundtrip() {
         // This value > 2^53 — would be corrupted by JSON number
-        let val = 18089690094123470162u64 % 0xFFFFFFFF00000001u64;
+        let val = 18089690094123470162u64;
         let s = val.to_string();
         let parsed = parse_field_string(&s);
         assert_eq!(val, parsed, "String roundtrip should be exact");

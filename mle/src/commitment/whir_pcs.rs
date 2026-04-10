@@ -7,7 +7,7 @@
 /// Field64 (Montgomery repr) via canonical u64 serialization.
 use std::borrow::Cow;
 
-use ark_ff::{Field as ArkField, PrimeField as ArkPrimeField};
+use ark_ff::PrimeField as ArkPrimeField;
 use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::{Field, PrimeField64};
 use whir::algebra::embedding::Basefield;
@@ -142,7 +142,7 @@ impl WhirPCS {
     /// Create a WHIR PCS with parameters adapted for a given polynomial size.
     /// Ensures folding_factor <= num_vars and PoW bits within WHIR limits.
     pub fn for_num_vars(num_vars: usize) -> Self {
-        let folding_factor = num_vars.min(4).max(1);
+        let folding_factor = num_vars.clamp(1, 4);
         // Rate 1/16 (starting_log_inv_rate=4).
         // Must leave room for folding: num_vars > starting_log_inv_rate + folding
         let starting_log_inv_rate = if num_vars <= 4 {
@@ -571,6 +571,8 @@ impl WhirPCS {
 
 #[cfg(test)]
 mod tests {
+    use ark_ff::Field as _;
+
     use super::*;
 
     #[test]

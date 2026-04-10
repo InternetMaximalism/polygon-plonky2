@@ -69,7 +69,7 @@ pub fn compute_lookup_numerator<F: Field>(data: &LookupData<F>, beta: F, delta: 
 ///
 /// Reads LookupTableGate and LookupGate wire values to produce
 /// the table entries, multiplicities, and looked-up values.
-pub fn extract_lookup_data<F: Field>(
+pub fn extract_lookup_data<F>(
     wire_values: &[Vec<F>],
     common_gates: &[plonky2::gates::gate::GateRef<F, 2>],
     gate_instances: usize,

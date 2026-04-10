@@ -196,8 +196,8 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     let mut expected_pre_batched = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &proof.preprocessed_individual_evals {
-        expected_pre_batched = expected_pre_batched + r_pow * eval;
-        r_pow = r_pow * batch_r_pre;
+        expected_pre_batched += r_pow * eval;
+        r_pow *= batch_r_pre;
     }
     ensure!(
         expected_pre_batched == proof.preprocessed_eval_value,
@@ -208,8 +208,8 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     let mut expected_wit_batched = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &proof.witness_individual_evals {
-        expected_wit_batched = expected_wit_batched + r_pow * eval;
-        r_pow = r_pow * batch_r_wit;
+        expected_wit_batched += r_pow * eval;
+        r_pow *= batch_r_wit;
     }
     ensure!(
         expected_wit_batched == proof.witness_eval_value,

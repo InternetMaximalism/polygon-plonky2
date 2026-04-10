@@ -69,10 +69,10 @@ fn build_preprocessed_batch<'a, F: RichField>(
     for mle in &preprocessed_mles {
         for (j, &eval) in mle.evaluations.iter().enumerate() {
             if j < batched_evals.len() {
-                batched_evals[j] = batched_evals[j] + r_pow * eval;
+                batched_evals[j] += r_pow * eval;
             }
         }
-        r_pow = r_pow * batch_r;
+        r_pow *= batch_r;
     }
 
     (
@@ -259,10 +259,10 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     for mle in &wire_mles {
         for (j, &eval) in mle.evaluations.iter().enumerate() {
             if j < wit_batched_evals.len() {
-                wit_batched_evals[j] = wit_batched_evals[j] + r_pow * eval;
+                wit_batched_evals[j] += r_pow * eval;
             }
         }
-        r_pow = r_pow * batch_r_wit;
+        r_pow *= batch_r_wit;
     }
     let wit_batched_mle = DenseMultilinearExtension::new(wit_batched_evals);
 
@@ -431,15 +431,15 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let mut preprocessed_eval_value = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &preprocessed_individual_evals {
-        preprocessed_eval_value = preprocessed_eval_value + r_pow * eval;
-        r_pow = r_pow * batch_r_pre;
+        preprocessed_eval_value += r_pow * eval;
+        r_pow *= batch_r_pre;
     }
 
     let mut witness_eval_value = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &witness_individual_evals {
-        witness_eval_value = witness_eval_value + r_pow * eval;
-        r_pow = r_pow * batch_r_wit;
+        witness_eval_value += r_pow * eval;
+        r_pow *= batch_r_wit;
     }
 
     eprintln!("[prover] step9 individual evals + pcs: {:?}", _t.elapsed());
