@@ -38,11 +38,7 @@ pub struct LookupData<F: Field> {
 /// - Remaining entries: 0 (padding)
 ///
 /// For a valid lookup, Σ h(b) = 0.
-pub fn compute_lookup_numerator<F: Field>(
-    data: &LookupData<F>,
-    beta: F,
-    delta: F,
-) -> Vec<F> {
+pub fn compute_lookup_numerator<F: Field>(data: &LookupData<F>, beta: F, delta: F) -> Vec<F> {
     let total = data.table_entries.len() + data.lookups.len();
     let size = total.next_power_of_two().max(1);
     let mut h = vec![F::ZERO; size];
@@ -103,9 +99,7 @@ where
                     let out_col = 3 * slot + 1;
                     let mult_col = 3 * slot + 2;
 
-                    if inp_col < wire_values.len()
-                        && row < wire_values[inp_col].len()
-                    {
+                    if inp_col < wire_values.len() && row < wire_values[inp_col].len() {
                         let inp = wire_values[inp_col][row];
                         let out = wire_values[out_col][row];
                         let mult = wire_values[mult_col][row];
@@ -123,9 +117,7 @@ where
                     let inp_col = 2 * slot;
                     let out_col = 2 * slot + 1;
 
-                    if inp_col < wire_values.len()
-                        && row < wire_values[inp_col].len()
-                    {
+                    if inp_col < wire_values.len() && row < wire_values[inp_col].len() {
                         let inp = wire_values[inp_col][row];
                         let out = wire_values[out_col][row];
                         // Only include non-padding lookups
@@ -176,8 +168,9 @@ pub struct LookupProof<F: Field> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
+
+    use super::*;
 
     type F = GoldilocksField;
 
@@ -223,10 +216,7 @@ mod tests {
                 (F::from_canonical_u64(0), F::from_canonical_u64(0)),
                 (F::from_canonical_u64(1), F::from_canonical_u64(1)),
             ],
-            multiplicities: vec![
-                F::from_canonical_u64(1),
-                F::from_canonical_u64(0),
-            ],
+            multiplicities: vec![F::from_canonical_u64(1), F::from_canonical_u64(0)],
             lookups: vec![
                 (F::from_canonical_u64(0), F::from_canonical_u64(0)),
                 (F::from_canonical_u64(2), F::from_canonical_u64(4)),
@@ -277,12 +267,7 @@ mod tests {
         let mut v_transcript = Transcript::new();
         v_transcript.domain_separate("test-lookup");
 
-        let result = verify_sumcheck(
-            &proof,
-            claimed_sum,
-            challenges.len(),
-            &mut v_transcript,
-        );
+        let result = verify_sumcheck(&proof, claimed_sum, challenges.len(), &mut v_transcript);
         assert!(result.is_ok(), "Lookup sumcheck verification failed");
     }
 }

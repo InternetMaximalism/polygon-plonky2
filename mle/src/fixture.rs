@@ -14,7 +14,7 @@ use plonky2_field::types::PrimeField64;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use whir::algebra::embedding::Basefield;
-use whir::algebra::fields::{Field64_3, Field64 as ArkGoldilocks};
+use whir::algebra::fields::{Field64 as ArkGoldilocks, Field64_3};
 use whir::protocols::whir::Config as WhirConfig;
 
 use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_SPLIT};
@@ -190,7 +190,13 @@ fn ext3_to_fixture(v: &Field64_3) -> Ext3Fixture {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    format!("0x{}", bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+    format!(
+        "0x{}",
+        bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    )
 }
 
 fn log2_of(n: usize) -> usize {
@@ -208,8 +214,7 @@ fn gl_root_of_unity(size: usize) -> u64 {
 /// Compute WHIR session_id from a session name string.
 fn compute_whir_session_id(session_name: &str) -> Vec<u8> {
     let mut session_bytes = Vec::new();
-    ciborium::into_writer(&session_name, &mut session_bytes)
-        .expect("CBOR serialization failed");
+    ciborium::into_writer(&session_name, &mut session_bytes).expect("CBOR serialization failed");
     let mut h = Keccak256::new();
     h.update(&session_bytes);
     h.finalize().to_vec()
@@ -224,8 +229,8 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
 
     let num_variables = degree_bits;
     let folding_factor = pcs.params.folding_factor;
-    let num_vectors = pcs.params.batch_size;  // 1 per commitment
-    let num_commitments = 2;  // preprocessed + witness
+    let num_vectors = pcs.params.batch_size; // 1 per commitment
+    let num_commitments = 2; // preprocessed + witness
     let out_domain_samples = config.initial_committer.out_domain_samples;
     let in_domain_samples = config.initial_committer.in_domain_samples;
     let initial_sumcheck_rounds = config.initial_sumcheck.num_rounds;
@@ -249,34 +254,42 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
     let initial_mml = config.initial_committer.masked_message_length();
     let initial_coset_size = {
         let mut cs = initial_mml.next_power_of_two();
-        while initial_codeword_length % cs != 0 { cs *= 2; }
+        while initial_codeword_length % cs != 0 {
+            cs *= 2;
+        }
         cs
     };
     let initial_num_cosets = initial_codeword_length / initial_coset_size;
 
     // Build per-round params using WHIR's own methods
-    let rounds: Vec<WhirRoundParamsFixture> = config.round_configs.iter().map(|rc| {
-        let cl = rc.irs_committer.codeword_length;
-        let mml = rc.irs_committer.masked_message_length();
-        let cs = {
-            let mut c = mml.next_power_of_two();
-            while cl % c != 0 { c *= 2; }
-            c
-        };
-        let rv = rc.initial_num_variables();
-        WhirRoundParamsFixture {
-            codeword_length: cl,
-            merkle_depth: log2_of(cl),
-            domain_generator: gl_root_of_unity(cl).to_string(),
-            in_domain_samples: rc.irs_committer.in_domain_samples,
-            out_domain_samples: rc.irs_committer.out_domain_samples,
-            sumcheck_rounds: rc.sumcheck.num_rounds,
-            interleaving_depth: rc.irs_committer.interleaving_depth,
-            coset_size: cs,
-            num_cosets: cl / cs,
-            num_variables: rv,
-        }
-    }).collect();
+    let rounds: Vec<WhirRoundParamsFixture> = config
+        .round_configs
+        .iter()
+        .map(|rc| {
+            let cl = rc.irs_committer.codeword_length;
+            let mml = rc.irs_committer.masked_message_length();
+            let cs = {
+                let mut c = mml.next_power_of_two();
+                while cl % c != 0 {
+                    c *= 2;
+                }
+                c
+            };
+            let rv = rc.initial_num_variables();
+            WhirRoundParamsFixture {
+                codeword_length: cl,
+                merkle_depth: log2_of(cl),
+                domain_generator: gl_root_of_unity(cl).to_string(),
+                in_domain_samples: rc.irs_committer.in_domain_samples,
+                out_domain_samples: rc.irs_committer.out_domain_samples,
+                sumcheck_rounds: rc.sumcheck.num_rounds,
+                interleaving_depth: rc.irs_committer.interleaving_depth,
+                coset_size: cs,
+                num_cosets: cl / cs,
+                num_variables: rv,
+            }
+        })
+        .collect();
 
     let params_fixture = WhirParamsFixture {
         num_variables,
@@ -331,12 +344,8 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
 ///
 /// Generates the unified WHIR proof fixture format with single
 /// transcript + hints covering both preprocessed and witness vectors.
-pub fn proof_to_fixture<F: PrimeField64>(
-    proof: &MleProof<F>,
-    degree_bits: usize,
-) -> ProofFixture {
-    let (whir_params, protocol_id, split_session_id) =
-        extract_whir_params(degree_bits);
+pub fn proof_to_fixture<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize) -> ProofFixture {
+    let (whir_params, protocol_id, split_session_id) = extract_whir_params(degree_bits);
 
     // Commitment roots
     let pre_root_hex: String = proof
@@ -393,10 +402,7 @@ pub fn proof_to_fixture<F: PrimeField64>(
 }
 
 /// Serialize an MleProof to a JSON string (all field elements as strings).
-pub fn proof_to_json<F: PrimeField64>(
-    proof: &MleProof<F>,
-    degree_bits: usize,
-) -> String {
+pub fn proof_to_json<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize) -> String {
     let fixture = proof_to_fixture(proof, degree_bits);
     serde_json::to_string_pretty(&fixture).expect("Failed to serialize proof fixture")
 }
@@ -407,7 +413,8 @@ pub fn proof_to_json<F: PrimeField64>(
 
 /// Parse a decimal string to a u64 (for Goldilocks field elements).
 pub fn parse_field_string(s: &str) -> u64 {
-    s.parse::<u64>().unwrap_or_else(|e| panic!("Invalid field element string '{}': {}", s, e))
+    s.parse::<u64>()
+        .unwrap_or_else(|e| panic!("Invalid field element string '{}': {}", s, e))
 }
 
 /// Parse a vector of decimal strings to u64 values.
@@ -422,9 +429,10 @@ pub fn fixture_from_json(json: &str) -> ProofFixture {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
 
     type F = GoldilocksField;
 
@@ -435,17 +443,21 @@ mod tests {
         let s = val.to_string();
         let parsed = parse_field_string(&s);
         assert_eq!(val, parsed, "String roundtrip should be exact");
-        assert!(val > (1u64 << 53), "Test value should exceed IEEE 754 safe range");
+        assert!(
+            val > (1u64 << 53),
+            "Test value should exceed IEEE 754 safe range"
+        );
     }
 
     #[test]
     fn test_proof_fixture_roundtrip() {
-        use crate::prover::mle_prove;
         use plonky2::iop::witness::{PartialWitness, WitnessWrite};
         use plonky2::plonk::circuit_builder::CircuitBuilder;
         use plonky2::plonk::circuit_data::CircuitConfig;
         use plonky2::plonk::config::PoseidonGoldilocksConfig;
         use plonky2::util::timing::TimingTree;
+
+        use crate::prover::mle_prove;
 
         type C = PoseidonGoldilocksConfig;
         const D: usize = 2;
@@ -463,22 +475,29 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(7));
 
         let mut timing = TimingTree::default();
-        let proof = mle_prove::<F, C, D>(
-            &circuit.prover_only,
-            &circuit.common,
-            pw,
-            &mut timing,
-        )
-        .unwrap();
+        let proof =
+            mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
         // Serialize to JSON
         let json = proof_to_json(&proof, circuit.common.degree_bits());
 
         // Verify unified WHIR format
-        assert!(json.contains("\"whirTranscript\": \""), "should have unified whirTranscript");
-        assert!(json.contains("\"whirHints\": \""), "should have unified whirHints");
-        assert!(json.contains("\"witnessBatchR\": \""), "witnessBatchR should be a string");
-        assert!(json.contains("\"preprocessedBatchR\": \""), "preprocessedBatchR should be a string");
+        assert!(
+            json.contains("\"whirTranscript\": \""),
+            "should have unified whirTranscript"
+        );
+        assert!(
+            json.contains("\"whirHints\": \""),
+            "should have unified whirHints"
+        );
+        assert!(
+            json.contains("\"witnessBatchR\": \""),
+            "witnessBatchR should be a string"
+        );
+        assert!(
+            json.contains("\"preprocessedBatchR\": \""),
+            "preprocessedBatchR should be a string"
+        );
         assert!(json.contains("\"alpha\": \""), "alpha should be a string");
         assert!(json.contains("\"roundPolys\""), "should have roundPolys");
 
@@ -490,14 +509,16 @@ mod tests {
         let wit_batch_r_parsed = parse_field_string(&fixture.witness_batch_r);
         assert_eq!(wit_batch_r_parsed, proof.witness_batch_r.to_canonical_u64());
         let pre_batch_r_parsed = parse_field_string(&fixture.preprocessed_batch_r);
-        assert_eq!(pre_batch_r_parsed, proof.preprocessed_batch_r.to_canonical_u64());
+        assert_eq!(
+            pre_batch_r_parsed,
+            proof.preprocessed_batch_r.to_canonical_u64()
+        );
 
         // Verify perm round polys roundtrip
         for (i, rp) in fixture.perm_proof.round_polys.iter().enumerate() {
             for (j, s) in rp.iter().enumerate() {
                 let parsed = parse_field_string(s);
-                let original = proof.permutation_proof.sumcheck_proof.round_polys[i]
-                    .evaluations[j]
+                let original = proof.permutation_proof.sumcheck_proof.round_polys[i].evaluations[j]
                     .to_canonical_u64();
                 assert_eq!(parsed, original, "perm round[{i}][{j}] mismatch");
             }

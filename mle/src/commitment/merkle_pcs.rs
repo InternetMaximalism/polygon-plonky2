@@ -100,10 +100,7 @@ impl<F: PrimeField64> MultilinearPCS<F> for MerklePCS {
     type CommitState = MerkleCommitState<F>;
     type EvalProof = MerkleEvalProof<F>;
 
-    fn commit(
-        &self,
-        poly: &DenseMultilinearExtension<F>,
-    ) -> (Self::Commitment, Self::CommitState) {
+    fn commit(&self, poly: &DenseMultilinearExtension<F>) -> (Self::Commitment, Self::CommitState) {
         let leaf_hashes: Vec<[u8; 32]> = poly
             .evaluations
             .iter()
@@ -168,9 +165,10 @@ impl<F: PrimeField64> MultilinearPCS<F> for MerklePCS {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
 
     type F = GoldilocksField;
 

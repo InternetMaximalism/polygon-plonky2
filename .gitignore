@@ -15,3 +15,6 @@ CLAUDE.md
 # Foundry build artifacts
 mle/contracts/out/
 mle/contracts/cache/
+
+#Claude
+mle/contracts/out/

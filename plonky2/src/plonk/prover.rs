@@ -438,11 +438,7 @@ pub struct ProverPolynomials<F: RichField + Extendable<D>, const D: usize> {
 /// The standard `prove()` discards the polynomial batches after computing
 /// the FRI proof.  This function preserves them so that WHIR can commit
 /// to the same polynomials and prove evaluations at ζ.
-pub fn prove_with_polys<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn prove_with_polys<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
     inputs: PartialWitness<F>,
@@ -669,7 +665,9 @@ where
     // Extract polynomial coefficients before consuming the batches
     let polys = ProverPolynomials {
         wires: wires_commitment.polynomials.clone(),
-        zs_partial_products: partial_products_zs_and_lookup_commitment.polynomials.clone(),
+        zs_partial_products: partial_products_zs_and_lookup_commitment
+            .polynomials
+            .clone(),
         quotient_chunks: quotient_polys_commitment.polynomials.clone(),
         zeta,
         g,

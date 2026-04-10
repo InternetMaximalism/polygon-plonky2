@@ -17,10 +17,7 @@ pub trait MultilinearPCS<F: Field> {
     type EvalProof: Clone + core::fmt::Debug;
 
     /// Commit to a multilinear polynomial.
-    fn commit(
-        &self,
-        poly: &DenseMultilinearExtension<F>,
-    ) -> (Self::Commitment, Self::CommitState);
+    fn commit(&self, poly: &DenseMultilinearExtension<F>) -> (Self::Commitment, Self::CommitState);
 
     /// Produce an evaluation proof: prove that `poly(point) = value`.
     fn open(

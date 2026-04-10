@@ -1,3 +1,4 @@
+use plonky2::hash::hash_types::RichField;
 /// Bridge between Plonky2 gate constraints and the MLE sumcheck system.
 ///
 /// Evaluates Plonky2's gate constraints at each row of the evaluation tables
@@ -11,11 +12,10 @@
 /// while violating them in the extension, breaking soundness for gates that
 /// use extension field wires (e.g., CosetInterpolationGate in recursive proofs).
 use plonky2::plonk::circuit_data::CommonCircuitData;
-use plonky2::plonk::vars::EvaluationVars;
 use plonky2::plonk::vanishing_poly::evaluate_gate_constraints;
+use plonky2::plonk::vars::EvaluationVars;
 use plonky2_field::extension::{Extendable, FieldExtension};
 use plonky2_field::types::Field;
-use plonky2::hash::hash_types::RichField;
 
 /// Evaluate all gate constraints at every row of the evaluation tables,
 /// and combine them with alpha powers into extension field values per row.
@@ -145,15 +145,16 @@ pub fn flatten_extension_constraints<F: RichField + Extendable<D>, const D: usiz
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use plonky2::iop::witness::{PartialWitness, WitnessWrite};
     use plonky2::plonk::circuit_builder::CircuitBuilder;
     use plonky2::plonk::circuit_data::CircuitConfig;
     use plonky2::plonk::config::PoseidonGoldilocksConfig;
     use plonky2::plonk::prover::extract_evaluation_tables;
+    use plonky2::util::timing::TimingTree;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
-    use plonky2::util::timing::TimingTree;
-    use plonky2::iop::witness::{PartialWitness, WitnessWrite};
+
+    use super::*;
 
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
@@ -249,7 +250,11 @@ mod tests {
 
         for (row, components) in combined.iter().enumerate() {
             for (k, &val) in components.iter().enumerate() {
-                assert_eq!(val, F::ZERO, "Poseidon constraint [{k}] at row {row}: {val}");
+                assert_eq!(
+                    val,
+                    F::ZERO,
+                    "Poseidon constraint [{k}] at row {row}: {val}"
+                );
             }
         }
     }
@@ -265,6 +270,9 @@ mod tests {
         let flat = flatten_extension_constraints::<F, 2>(&combined, challenge);
 
         assert_eq!(flat[0], F::ZERO); // 0 + 7*0
-        assert_eq!(flat[1], F::from_canonical_u64(3) + F::from_canonical_u64(7) * F::from_canonical_u64(5));
+        assert_eq!(
+            flat[1],
+            F::from_canonical_u64(3) + F::from_canonical_u64(7) * F::from_canonical_u64(5)
+        );
     }
 }

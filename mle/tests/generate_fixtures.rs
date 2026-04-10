@@ -8,7 +8,7 @@ use plonky2::plonk::config::PoseidonGoldilocksConfig;
 use plonky2::util::timing::TimingTree;
 use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::{Field, PrimeField64};
-use plonky2_mle::fixture::{proof_to_json, parse_field_string};
+use plonky2_mle::fixture::{parse_field_string, proof_to_json};
 use plonky2_mle::prover::{mle_prove, mle_setup};
 use plonky2_mle::verifier::mle_verify;
 
@@ -16,7 +16,9 @@ type F = GoldilocksField;
 type C = PoseidonGoldilocksConfig;
 const D: usize = 2;
 
-fn build_mul_chain_circuit(chain_len: usize) -> (
+fn build_mul_chain_circuit(
+    chain_len: usize,
+) -> (
     plonky2::plonk::circuit_data::CircuitData<F, C, D>,
     PartialWitness<F>,
 ) {
@@ -76,9 +78,8 @@ fn build_recursive_circuit() -> (
     let outer_config = CircuitConfig::standard_recursion_config();
     let mut outer_builder = CircuitBuilder::<F, D>::new(outer_config);
     let proof_t = outer_builder.add_virtual_proof_with_pis(&inner_data.common);
-    let vd_t = outer_builder.add_virtual_verifier_data(
-        inner_data.common.config.fri_config.cap_height,
-    );
+    let vd_t =
+        outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
     outer_builder.verify_proof::<C>(&proof_t, &vd_t, &inner_data.common);
     for &pi in &proof_t.public_inputs {
         outer_builder.register_public_input(pi);
@@ -99,7 +100,15 @@ fn generate_and_verify_all_fixtures() {
         .join("fixtures");
     std::fs::create_dir_all(&fixture_dir).unwrap();
 
-    let circuits: Vec<(&str, Box<dyn Fn() -> (plonky2::plonk::circuit_data::CircuitData<F, C, D>, PartialWitness<F>)>)> = vec![
+    let circuits: Vec<(
+        &str,
+        Box<
+            dyn Fn() -> (
+                plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+                PartialWitness<F>,
+            ),
+        >,
+    )> = vec![
         ("small_mul", Box::new(|| build_mul_chain_circuit(5))),
         ("medium_mul", Box::new(|| build_mul_chain_circuit(50))),
         ("large_mul", Box::new(|| build_mul_chain_circuit(200))),
@@ -123,28 +132,46 @@ fn generate_and_verify_all_fixtures() {
 
         let mut timing = TimingTree::default();
         let start = std::time::Instant::now();
-        let proof = mle_prove::<F, C, D>(
-            &circuit.prover_only,
-            &circuit.common,
-            pw,
-            &mut timing,
-        )
-        .unwrap();
+        let proof =
+            mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
         let prove_time = start.elapsed();
 
         println!("  prove_time={:?}", prove_time);
-        println!("  public_inputs={:?}", proof.public_inputs.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
-        println!("  num_polys={}", proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len());
-        println!("  perm_rounds={}", proof.permutation_proof.sumcheck_proof.round_polys.len());
-        println!("  constraint_rounds={}", proof.constraint_proof.round_polys.len());
-        println!("  whir_proof_bytes={}", proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len());
+        println!(
+            "  public_inputs={:?}",
+            proof
+                .public_inputs
+                .iter()
+                .map(|f| f.to_canonical_u64())
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  num_polys={}",
+            proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len()
+        );
+        println!(
+            "  perm_rounds={}",
+            proof.permutation_proof.sumcheck_proof.round_polys.len()
+        );
+        println!(
+            "  constraint_rounds={}",
+            proof.constraint_proof.round_polys.len()
+        );
+        println!(
+            "  whir_proof_bytes={}",
+            proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len()
+        );
 
         // Verify in Rust
         let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
         let start = std::time::Instant::now();
         let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
         let verify_time = start.elapsed();
-        assert!(result.is_ok(), "{name}: Rust verify failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "{name}: Rust verify failed: {:?}",
+            result.err()
+        );
         println!("  rust_verify={:?} ✓", verify_time);
 
         // Generate JSON fixture
@@ -152,24 +179,33 @@ fn generate_and_verify_all_fixtures() {
 
         // Verify fixture roundtrip
         let fixture = plonky2_mle::fixture::fixture_from_json(&json);
-        assert_eq!(parse_field_string(&fixture.witness_batch_r), proof.witness_batch_r.to_canonical_u64());
+        assert_eq!(
+            parse_field_string(&fixture.witness_batch_r),
+            proof.witness_batch_r.to_canonical_u64()
+        );
         assert_eq!(fixture.degree_bits, degree_bits);
 
         // Check all field elements survived serialization
         for (i, rp) in fixture.perm_proof.round_polys.iter().enumerate() {
             for (j, s) in rp.iter().enumerate() {
                 let parsed = parse_field_string(s);
-                let original = proof.permutation_proof.sumcheck_proof.round_polys[i]
-                    .evaluations[j].to_canonical_u64();
-                assert_eq!(parsed, original,
-                    "{name}: perm round[{i}][{j}] fixture mismatch: {parsed} != {original}");
+                let original = proof.permutation_proof.sumcheck_proof.round_polys[i].evaluations[j]
+                    .to_canonical_u64();
+                assert_eq!(
+                    parsed, original,
+                    "{name}: perm round[{i}][{j}] fixture mismatch: {parsed} != {original}"
+                );
             }
         }
 
         // Write fixture
         let path = fixture_dir.join(format!("{name}.json"));
         std::fs::write(&path, &json).unwrap();
-        println!("  fixture_written={} ({} bytes)", path.display(), json.len());
+        println!(
+            "  fixture_written={} ({} bytes)",
+            path.display(),
+            json.len()
+        );
 
         println!();
     }

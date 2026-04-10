@@ -39,9 +39,7 @@ pub fn verify_sumcheck<F: Field + plonky2_field::types::PrimeField64>(
         // Check: g_i(0) + g_i(1) == current_claim
         let sum = round_poly.evaluations[0] + round_poly.evaluations[1];
         if sum != current_claim {
-            return Err(SumcheckVerifyError::RoundCheckFailed {
-                round: i,
-            });
+            return Err(SumcheckVerifyError::RoundCheckFailed { round: i });
         }
 
         // Absorb round polynomial (must match prover's transcript)
@@ -70,7 +68,10 @@ impl core::fmt::Display for SumcheckVerifyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::WrongNumberOfRounds { expected, got } => {
-                write!(f, "Wrong number of sumcheck rounds: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "Wrong number of sumcheck rounds: expected {expected}, got {got}"
+                )
             }
             Self::RoundCheckFailed { round } => {
                 write!(f, "Sumcheck round {round} failed: g(0)+g(1) != claim")
@@ -81,11 +82,12 @@ impl core::fmt::Display for SumcheckVerifyError {
 
 #[cfg(test)]
 mod tests {
+    use plonky2_field::goldilocks_field::GoldilocksField;
+
     use super::*;
     use crate::dense_mle::DenseMultilinearExtension;
     use crate::eq_poly;
     use crate::sumcheck::prover::{compute_claimed_sum, prove_sumcheck_product};
-    use plonky2_field::goldilocks_field::GoldilocksField;
 
     type F = GoldilocksField;
 
@@ -93,7 +95,9 @@ mod tests {
     fn test_prove_verify_roundtrip() {
         let n = 4;
         let size = 1 << n;
-        let tau: Vec<F> = (0..n).map(|i| F::from_canonical_u64(i as u64 * 3 + 2)).collect();
+        let tau: Vec<F> = (0..n)
+            .map(|i| F::from_canonical_u64(i as u64 * 3 + 2))
+            .collect();
 
         let constraint_table: Vec<F> = (0..size)
             .map(|i| F::from_canonical_u64(i as u64 * 5 + 7))
@@ -120,7 +124,8 @@ mod tests {
 
         // Final check: final_eval == eq(τ, r) · C(r)
         let eq_at_r = eq_poly::eq_eval(&tau, &verifier_challenges);
-        let c_at_r = DenseMultilinearExtension::new(constraint_table).evaluate(&verifier_challenges);
+        let c_at_r =
+            DenseMultilinearExtension::new(constraint_table).evaluate(&verifier_challenges);
         assert_eq!(final_eval, eq_at_r * c_at_r);
     }
 
@@ -128,7 +133,9 @@ mod tests {
     fn test_verify_rejects_tampered_round_poly() {
         let n = 3;
         let size = 1 << n;
-        let tau: Vec<F> = (0..n).map(|i| F::from_canonical_u64(i as u64 + 10)).collect();
+        let tau: Vec<F> = (0..n)
+            .map(|i| F::from_canonical_u64(i as u64 + 10))
+            .collect();
         let constraint_table: Vec<F> = (0..size)
             .map(|i| F::from_canonical_u64(i as u64 + 1))
             .collect();
@@ -139,7 +146,8 @@ mod tests {
         let mut eq_mle = DenseMultilinearExtension::new(eq_table);
         let mut c_mle = DenseMultilinearExtension::new(constraint_table);
         let mut prover_transcript = Transcript::new();
-        let (mut proof, _) = prove_sumcheck_product(&mut eq_mle, &mut c_mle, 2, &mut prover_transcript);
+        let (mut proof, _) =
+            prove_sumcheck_product(&mut eq_mle, &mut c_mle, 2, &mut prover_transcript);
 
         // Tamper with the first round polynomial
         proof.round_polys[0].evaluations[0] = proof.round_polys[0].evaluations[0] + F::ONE;

@@ -103,14 +103,18 @@ pub fn tables_to_mles<F: Field>(tables: &[Vec<F>]) -> Vec<DenseMultilinearExtens
 /// Convert a row-major table into a vec of MLEs (one per column).
 ///
 /// `table[row][col]` → one MLE per column.
-pub fn row_major_to_mles<F: Field>(table: &[Vec<F>], num_cols: usize) -> Vec<DenseMultilinearExtension<F>> {
+pub fn row_major_to_mles<F: Field>(
+    table: &[Vec<F>],
+    num_cols: usize,
+) -> Vec<DenseMultilinearExtension<F>> {
     let num_rows = table.len();
     let next_pow2 = num_rows.next_power_of_two();
     (0..num_cols)
         .map(|col| {
-            let mut evals: Vec<F> = table.iter().map(|row| {
-                if col < row.len() { row[col] } else { F::ZERO }
-            }).collect();
+            let mut evals: Vec<F> = table
+                .iter()
+                .map(|row| if col < row.len() { row[col] } else { F::ZERO })
+                .collect();
             evals.resize(next_pow2, F::ZERO);
             DenseMultilinearExtension::new(evals)
         })
@@ -119,9 +123,10 @@ pub fn row_major_to_mles<F: Field>(table: &[Vec<F>], num_cols: usize) -> Vec<Den
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
 
     type F = GoldilocksField;
 
@@ -146,7 +151,10 @@ mod tests {
         // f(0.5) = 0.5*3 + 0.5*7 = 5 ... but in Goldilocks, use (p+1)/2
         let half = F::from_canonical_u64(2).inverse();
         let result = mle.evaluate(&[half]);
-        assert_eq!(result, F::from_canonical_u64(3) * (F::ONE - half) + F::from_canonical_u64(7) * half);
+        assert_eq!(
+            result,
+            F::from_canonical_u64(3) * (F::ONE - half) + F::from_canonical_u64(7) * half
+        );
     }
 
     #[test]
@@ -231,7 +239,11 @@ mod tests {
         let point = vec![F::from_canonical_u64(5), F::from_canonical_u64(9)];
 
         let eq_table = crate::eq_poly::eq_evals(&point);
-        let manual: F = evals.iter().zip(eq_table.iter()).map(|(&f, &e)| f * e).sum();
+        let manual: F = evals
+            .iter()
+            .zip(eq_table.iter())
+            .map(|(&f, &e)| f * e)
+            .sum();
         assert_eq!(mle.evaluate(&point), manual);
     }
 }

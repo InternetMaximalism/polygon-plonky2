@@ -67,7 +67,10 @@ fn test_transcript_vector_6_multiple_squeezes() {
     let c1: F = t.squeeze_challenge();
     let c2: F = t.squeeze_challenge();
     let c3: F = t.squeeze_challenge();
-    println!("Vector 6 - absorb(12345), squeeze x3: {}, {}, {}", c1.0, c2.0, c3.0);
+    println!(
+        "Vector 6 - absorb(12345), squeeze x3: {}, {}, {}",
+        c1.0, c2.0, c3.0
+    );
 }
 
 #[test]
@@ -91,7 +94,10 @@ fn test_transcript_vector_7_full_protocol_flow() {
     let beta: F = t.squeeze_challenge();
     let gamma: F = t.squeeze_challenge();
     let alpha: F = t.squeeze_challenge();
-    println!("Protocol flow - beta: {}, gamma: {}, alpha: {}", beta.0, gamma.0, alpha.0);
+    println!(
+        "Protocol flow - beta: {}, gamma: {}, alpha: {}",
+        beta.0, gamma.0, alpha.0
+    );
 }
 
 /// Generate all test vectors as a formatted output for Solidity test comparison.
@@ -151,7 +157,10 @@ fn generate_all_test_vectors() {
         let c1: F = t.squeeze_challenge();
         let c2: F = t.squeeze_challenge();
         let c3: F = t.squeeze_challenge();
-        println!("Vector 6 (absorb 12345, squeeze x3): {}, {}, {}", c1.0, c2.0, c3.0);
+        println!(
+            "Vector 6 (absorb 12345, squeeze x3): {}, {}, {}",
+            c1.0, c2.0, c3.0
+        );
     }
 
     // Vector 7

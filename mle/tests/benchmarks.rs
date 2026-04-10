@@ -40,22 +40,22 @@ fn bench_circuit(
     // Prove
     let mut timing = TimingTree::default();
     let start = Instant::now();
-    let proof = mle_prove::<F, C, D>(
-        &circuit.prover_only,
-        &circuit.common,
-        pw,
-        &mut timing,
-    )
-    .unwrap();
+    let proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
     let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Proof size
-    let whir_proof_bytes = proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len();
-    let sumcheck_bytes: usize = proof.constraint_proof.round_polys.iter()
+    let whir_proof_bytes =
+        proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len();
+    let sumcheck_bytes: usize = proof
+        .constraint_proof
+        .round_polys
+        .iter()
         .chain(proof.permutation_proof.sumcheck_proof.round_polys.iter())
         .map(|rp| rp.evaluations.len() * 8)
         .sum();
-    let individual_evals_bytes = (proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len()) * 8;
+    let individual_evals_bytes =
+        (proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len()) * 8;
     let proof_bytes = whir_proof_bytes + sumcheck_bytes + individual_evals_bytes;
 
     // Verify
@@ -87,7 +87,9 @@ fn benchmark_all_circuits() {
         let mut builder = CircuitBuilder::<F, D>::new(config);
         let x = builder.add_virtual_target();
         let mut cur = x;
-        for _ in 0..5 { cur = builder.mul(cur, x); }
+        for _ in 0..5 {
+            cur = builder.mul(cur, x);
+        }
         builder.register_public_input(cur);
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
@@ -101,7 +103,9 @@ fn benchmark_all_circuits() {
         let mut builder = CircuitBuilder::<F, D>::new(config);
         let x = builder.add_virtual_target();
         let mut cur = x;
-        for _ in 0..50 { cur = builder.mul(cur, x); }
+        for _ in 0..50 {
+            cur = builder.mul(cur, x);
+        }
         builder.register_public_input(cur);
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
@@ -115,7 +119,9 @@ fn benchmark_all_circuits() {
         let mut builder = CircuitBuilder::<F, D>::new(config);
         let x = builder.add_virtual_target();
         let mut cur = x;
-        for _ in 0..200 { cur = builder.mul(cur, x); }
+        for _ in 0..200 {
+            cur = builder.mul(cur, x);
+        }
         builder.register_public_input(cur);
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
@@ -130,7 +136,9 @@ fn benchmark_all_circuits() {
         let mut builder = CircuitBuilder::<F, D>::new(config);
         let inputs: Vec<_> = (0..4).map(|_| builder.add_virtual_target()).collect();
         let hash = builder.hash_n_to_hash_no_pad::<PoseidonHash>(inputs.clone());
-        for &h in hash.elements.iter() { builder.register_public_input(h); }
+        for &h in hash.elements.iter() {
+            builder.register_public_input(h);
+        }
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
         for (i, &inp) in inputs.iter().enumerate() {
@@ -146,7 +154,9 @@ fn benchmark_all_circuits() {
         let mut targets = Vec::new();
         targets.push(builder.add_virtual_target());
         targets.push(builder.add_virtual_target());
-        for i in 2..20 { targets.push(builder.add(targets[i-1], targets[i-2])); }
+        for i in 2..20 {
+            targets.push(builder.add(targets[i - 1], targets[i - 2]));
+        }
         builder.register_public_input(*targets.last().unwrap());
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
@@ -183,18 +193,22 @@ fn benchmark_all_circuits() {
         let outer_config = CircuitConfig::standard_recursion_config();
         let mut outer_builder = CircuitBuilder::<F, D>::new(outer_config);
         let proof_t = outer_builder.add_virtual_proof_with_pis(&inner_data.common);
-        let vd_t = outer_builder.add_virtual_verifier_data(
-            inner_data.common.config.fri_config.cap_height,
-        );
+        let vd_t =
+            outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
         outer_builder.verify_proof::<C>(&proof_t, &vd_t, &inner_data.common);
-        for &pi in &proof_t.public_inputs { outer_builder.register_public_input(pi); }
+        for &pi in &proof_t.public_inputs {
+            outer_builder.register_public_input(pi);
+        }
         println!("  [3] outer circuit setup:  {:?}", t2.elapsed());
 
         let t3 = Instant::now();
         let outer_data = outer_builder.build::<C>();
         let degree = outer_data.common.degree();
         let degree_bits = outer_data.common.degree_bits();
-        println!("  [4] outer circuit build:  {:?} (degree={degree}, bits={degree_bits})", t3.elapsed());
+        println!(
+            "  [4] outer circuit build:  {:?} (degree={degree}, bits={degree_bits})",
+            t3.elapsed()
+        );
 
         let t4 = Instant::now();
         let mut outer_pw = PartialWitness::new();
@@ -235,15 +249,19 @@ fn benchmark_recursive_only() {
     let outer_config = CircuitConfig::standard_recursion_config();
     let mut outer_builder = CircuitBuilder::<F, D>::new(outer_config);
     let proof_t = outer_builder.add_virtual_proof_with_pis(&inner_data.common);
-    let vd_t = outer_builder.add_virtual_verifier_data(
-        inner_data.common.config.fri_config.cap_height,
-    );
+    let vd_t =
+        outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
     outer_builder.verify_proof::<C>(&proof_t, &vd_t, &inner_data.common);
-    for &pi in &proof_t.public_inputs { outer_builder.register_public_input(pi); }
+    for &pi in &proof_t.public_inputs {
+        outer_builder.register_public_input(pi);
+    }
     let outer_data = outer_builder.build::<C>();
     let degree = outer_data.common.degree();
     let degree_bits = outer_data.common.degree_bits();
-    println!("  [3] outer circuit build:  {:?} (degree={degree}, bits={degree_bits})", t2.elapsed());
+    println!(
+        "  [3] outer circuit build:  {:?} (degree={degree}, bits={degree_bits})",
+        t2.elapsed()
+    );
 
     let t3 = Instant::now();
     let mut outer_pw = PartialWitness::new();
@@ -256,7 +274,8 @@ fn benchmark_recursive_only() {
         &outer_data.common,
         outer_pw,
         &mut timing,
-    ).unwrap();
+    )
+    .unwrap();
     println!("  [4] mle_prove:            {:?}", t3.elapsed());
 
     let vk = mle_setup::<F, C, D>(&outer_data.prover_only, &outer_data.common);
@@ -273,14 +292,24 @@ fn print_results(results: &[BenchResult]) {
     println!("  BENCHMARK RESULTS (WHIR PCS, Goldilocks field, release mode)");
     println!("{}\n", "=".repeat(110));
 
-    println!("{:<22} {:>6} {:>5} {:>6} {:>12} {:>12} {:>12} {:>12}",
-        "Circuit", "Degree", "Bits", "Gates", "Prove(ms)", "Verify(ms)", "Proof(B)", "WHIR(B)");
+    println!(
+        "{:<22} {:>6} {:>5} {:>6} {:>12} {:>12} {:>12} {:>12}",
+        "Circuit", "Degree", "Bits", "Gates", "Prove(ms)", "Verify(ms)", "Proof(B)", "WHIR(B)"
+    );
     println!("{}", "-".repeat(110));
 
     for r in results {
-        println!("{:<22} {:>6} {:>5} {:>6} {:>12.1} {:>12.1} {:>12} {:>12}",
-            r.name, r.degree, r.degree_bits, r.gate_types,
-            r.prove_ms, r.verify_ms, r.proof_bytes, r.whir_proof_bytes);
+        println!(
+            "{:<22} {:>6} {:>5} {:>6} {:>12.1} {:>12.1} {:>12} {:>12}",
+            r.name,
+            r.degree,
+            r.degree_bits,
+            r.gate_types,
+            r.prove_ms,
+            r.verify_ms,
+            r.proof_bytes,
+            r.whir_proof_bytes
+        );
     }
 
     println!("{}\n", "=".repeat(110));

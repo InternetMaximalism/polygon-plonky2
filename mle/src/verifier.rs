@@ -28,9 +28,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     vk: &MleVerificationKey<F>,
     proof: &MleProof<F>,
 ) -> Result<()> {
-    let degree_bits = plonky2_util::log2_strict(
-        common_data.degree(),
-    );
+    let degree_bits = plonky2_util::log2_strict(common_data.degree());
 
     // Step 1: Verify circuit digest matches VK
     // SECURITY: This is the first check — ensures this proof claims to be
@@ -244,7 +242,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     let whir_result = whir_pcs.verify_split(
         degree_bits,
         &proof.whir_eval_proof,
-        &[proof.preprocessed_whir_eval_ext3, proof.witness_whir_eval_ext3],
+        &[
+            proof.preprocessed_whir_eval_ext3,
+            proof.witness_whir_eval_ext3,
+        ],
         WHIR_SESSION_SPLIT,
     );
     ensure!(
@@ -258,8 +259,6 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::prover::{mle_prove, mle_setup};
     use plonky2::iop::witness::{PartialWitness, WitnessWrite};
     use plonky2::plonk::circuit_builder::CircuitBuilder;
     use plonky2::plonk::circuit_data::CircuitConfig;
@@ -267,6 +266,9 @@ mod tests {
     use plonky2::util::timing::TimingTree;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
+    use crate::prover::{mle_prove, mle_setup};
 
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
@@ -301,13 +303,7 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(7));
 
         let mut timing = TimingTree::default();
-        let proof = mle_prove::<F, C, D>(
-            &prover_data,
-            &common_data,
-            pw,
-            &mut timing,
-        )
-        .unwrap();
+        let proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
 
         // Verify
         let result = mle_verify::<F, D>(&common_data, &vk, &proof);
@@ -327,13 +323,7 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(11));
 
         let mut timing = TimingTree::default();
-        let mut proof = mle_prove::<F, C, D>(
-            &prover_data,
-            &common_data,
-            pw,
-            &mut timing,
-        )
-        .unwrap();
+        let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
 
         // Tamper with the preprocessed commitment root
         if !proof.preprocessed_root.is_empty() {
@@ -341,10 +331,14 @@ mod tests {
         }
 
         let result = mle_verify::<F, D>(&common_data, &vk, &proof);
-        assert!(result.is_err(), "Tampered preprocessed root should be rejected");
+        assert!(
+            result.is_err(),
+            "Tampered preprocessed root should be rejected"
+        );
         let err_msg = format!("{:?}", result.err().unwrap());
         assert!(
-            err_msg.contains("circuit binding violated") || err_msg.contains("commitment root mismatch"),
+            err_msg.contains("circuit binding violated")
+                || err_msg.contains("commitment root mismatch"),
             "Error should mention circuit binding: {err_msg}"
         );
     }
@@ -372,13 +366,8 @@ mod tests {
         pw_a.set_target(y_a, F::from_canonical_u64(7));
 
         let mut timing = TimingTree::default();
-        let proof_a = mle_prove::<F, C, D>(
-            &prover_data_a,
-            &common_data_a,
-            pw_a,
-            &mut timing,
-        )
-        .unwrap();
+        let proof_a =
+            mle_prove::<F, C, D>(&prover_data_a, &common_data_a, pw_a, &mut timing).unwrap();
 
         // Try to verify proof_a against vk_b — should fail
         let result = mle_verify::<F, D>(&common_data_a, &vk_b, &proof_a);
@@ -394,7 +383,10 @@ mod tests {
         let vk2 = mle_setup::<F, C, D>(&prover_data, &common_data);
 
         assert_eq!(vk1.circuit_digest, vk2.circuit_digest);
-        assert_eq!(vk1.preprocessed_commitment_root, vk2.preprocessed_commitment_root);
+        assert_eq!(
+            vk1.preprocessed_commitment_root,
+            vk2.preprocessed_commitment_root
+        );
         assert_eq!(vk1.num_constants, vk2.num_constants);
         assert_eq!(vk1.num_routed_wires, vk2.num_routed_wires);
     }

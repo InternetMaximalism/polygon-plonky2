@@ -37,7 +37,10 @@ fn checkpoint(label: &str, transcript: &Transcript) {
     let hash = transcript.peek_next_hash();
     println!("  CHECKPOINT [{label}]:");
     println!("    state_len: {}", state.len());
-    println!("    state_tail_32: {}", hex(&state[state.len().saturating_sub(32)..]));
+    println!(
+        "    state_tail_32: {}",
+        hex(&state[state.len().saturating_sub(32)..])
+    );
     println!("    squeeze_counter: {counter}");
     println!("    next_hash: {}", hex(&hash));
 }
@@ -75,7 +78,14 @@ fn test_e2e_transcript_trace() {
     let num_routed_wires = tables.num_routed_wires;
 
     println!("Circuit: degree={degree}, degree_bits={degree_bits}, num_wires={}, num_routed_wires={num_routed_wires}, num_constants={}", tables.num_wires, circuit.common.num_constants);
-    println!("Public inputs: {:?}", tables.public_inputs.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
+    println!(
+        "Public inputs: {:?}",
+        tables
+            .public_inputs
+            .iter()
+            .map(|f| f.to_canonical_u64())
+            .collect::<Vec<_>>()
+    );
     println!();
 
     // ── Replay the prover's transcript step by step ──
@@ -99,9 +109,15 @@ fn test_e2e_transcript_trace() {
     let sigma_mles = row_major_to_mles(&tables.sigma_values, num_routed_wires);
 
     let mut all_mles: Vec<&DenseMultilinearExtension<F>> = Vec::new();
-    for m in &wire_mles { all_mles.push(m); }
-    for m in &const_mles { all_mles.push(m); }
-    for m in &sigma_mles { all_mles.push(m); }
+    for m in &wire_mles {
+        all_mles.push(m);
+    }
+    for m in &const_mles {
+        all_mles.push(m);
+    }
+    for m in &sigma_mles {
+        all_mles.push(m);
+    }
     let num_polys = all_mles.len();
 
     let mut batched_evals = vec![F::ZERO; 1 << degree_bits];
@@ -134,8 +150,17 @@ fn test_e2e_transcript_trace() {
     println!("  beta  = {}", beta.to_canonical_u64());
     println!("  gamma = {}", gamma.to_canonical_u64());
     println!("  alpha = {}", alpha.to_canonical_u64());
-    println!("  tau   = {:?}", tau.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
-    println!("  tau_perm = {:?}", tau_perm.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
+    println!(
+        "  tau   = {:?}",
+        tau.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>()
+    );
+    println!(
+        "  tau_perm = {:?}",
+        tau_perm
+            .iter()
+            .map(|f| f.to_canonical_u64())
+            .collect::<Vec<_>>()
+    );
     checkpoint("after_challenges", &transcript);
 
     // Step 4: Permutation check
@@ -156,16 +181,30 @@ fn test_e2e_transcript_trace() {
             &mut transcript,
         );
 
-    println!("  perm_claimed_sum = {}", perm_claimed_sum.to_canonical_u64());
+    println!(
+        "  perm_claimed_sum = {}",
+        perm_claimed_sum.to_canonical_u64()
+    );
     println!("  perm_rounds = {}", perm_sumcheck.round_polys.len());
     for (i, rp) in perm_sumcheck.round_polys.iter().enumerate() {
         if i < 3 || i == perm_sumcheck.round_polys.len() - 1 {
-            println!("  perm_round[{i}] evals = {:?}",
-                rp.evaluations.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
+            println!(
+                "  perm_round[{i}] evals = {:?}",
+                rp.evaluations
+                    .iter()
+                    .map(|f| f.to_canonical_u64())
+                    .collect::<Vec<_>>()
+            );
         }
     }
-    println!("  perm_challenges[0..3] = {:?}",
-        perm_challenges.iter().take(3).map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
+    println!(
+        "  perm_challenges[0..3] = {:?}",
+        perm_challenges
+            .iter()
+            .take(3)
+            .map(|f| f.to_canonical_u64())
+            .collect::<Vec<_>>()
+    );
     checkpoint("after_perm_sumcheck", &transcript);
 
     // Compute perm final eval
@@ -173,22 +212,39 @@ fn test_e2e_transcript_trace() {
         &tables.wire_values,
         &tables.sigma_values,
         &plonky2_mle::permutation::logup::compute_identity_values(
-            &tables.k_is, &tables.subgroup, num_routed_wires, degree,
+            &tables.k_is,
+            &tables.subgroup,
+            num_routed_wires,
+            degree,
         ),
-        beta, gamma, num_routed_wires, degree,
+        beta,
+        gamma,
+        num_routed_wires,
+        degree,
     );
     let mut perm_h_padded = perm_h;
     perm_h_padded.resize(1 << degree_bits, F::ZERO);
     let perm_h_mle = DenseMultilinearExtension::new(perm_h_padded);
     let pcs_perm_eval = perm_h_mle.evaluate(&perm_challenges);
-    println!("  pcs_perm_numerator_eval = {}", pcs_perm_eval.to_canonical_u64());
+    println!(
+        "  pcs_perm_numerator_eval = {}",
+        pcs_perm_eval.to_canonical_u64()
+    );
 
     // Verify: perm final eval from sumcheck should match
-    let perm_final_from_sumcheck = perm_sumcheck.round_polys.last().unwrap()
+    let perm_final_from_sumcheck = perm_sumcheck
+        .round_polys
+        .last()
+        .unwrap()
         .evaluate(*perm_challenges.last().unwrap());
-    println!("  perm_final_from_sumcheck = {}", perm_final_from_sumcheck.to_canonical_u64());
-    assert_eq!(perm_final_from_sumcheck, pcs_perm_eval,
-        "Perm final eval mismatch between sumcheck output and MLE evaluation!");
+    println!(
+        "  perm_final_from_sumcheck = {}",
+        perm_final_from_sumcheck.to_canonical_u64()
+    );
+    assert_eq!(
+        perm_final_from_sumcheck, pcs_perm_eval,
+        "Perm final eval mismatch between sumcheck output and MLE evaluation!"
+    );
 
     // Step 5: Extension combine
     let has_lookup = !circuit.common.luts.is_empty();
@@ -220,7 +276,10 @@ fn test_e2e_transcript_trace() {
     transcript.domain_separate("zero-check");
     let eq_table = eq_poly::eq_evals(&tau);
     let claimed_sum = compute_claimed_sum(&eq_table, &padded_constraints);
-    println!("  constraint_claimed_sum = {}", claimed_sum.to_canonical_u64());
+    println!(
+        "  constraint_claimed_sum = {}",
+        claimed_sum.to_canonical_u64()
+    );
 
     let mut eq_mle = DenseMultilinearExtension::new(eq_table);
     let mut constraint_mle = DenseMultilinearExtension::new(padded_constraints.clone());
@@ -230,15 +289,29 @@ fn test_e2e_transcript_trace() {
     let (constraint_proof, sumcheck_challenges) =
         prove_sumcheck_product(&mut eq_mle, &mut constraint_mle, 2, &mut transcript);
 
-    println!("  constraint_rounds = {}", constraint_proof.round_polys.len());
+    println!(
+        "  constraint_rounds = {}",
+        constraint_proof.round_polys.len()
+    );
     for (i, rp) in constraint_proof.round_polys.iter().enumerate() {
         if i < 3 || i == constraint_proof.round_polys.len() - 1 {
-            println!("  constraint_round[{i}] evals = {:?}",
-                rp.evaluations.iter().map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
+            println!(
+                "  constraint_round[{i}] evals = {:?}",
+                rp.evaluations
+                    .iter()
+                    .map(|f| f.to_canonical_u64())
+                    .collect::<Vec<_>>()
+            );
         }
     }
-    println!("  sumcheck_challenges[0..3] = {:?}",
-        sumcheck_challenges.iter().take(3).map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
+    println!(
+        "  sumcheck_challenges[0..3] = {:?}",
+        sumcheck_challenges
+            .iter()
+            .take(3)
+            .map(|f| f.to_canonical_u64())
+            .collect::<Vec<_>>()
+    );
 
     // Compute oracle values
     let constraint_mle_for_eval = DenseMultilinearExtension::new(
@@ -249,17 +322,32 @@ fn test_e2e_transcript_trace() {
             .collect(),
     );
     let pcs_constraint_eval = constraint_mle_for_eval.evaluate(&sumcheck_challenges);
-    println!("  pcs_constraint_eval = {}", pcs_constraint_eval.to_canonical_u64());
+    println!(
+        "  pcs_constraint_eval = {}",
+        pcs_constraint_eval.to_canonical_u64()
+    );
 
     // Verify final eval
     let eq_at_r = eq_poly::eq_eval(&tau, &sumcheck_challenges);
     let expected_final = eq_at_r * pcs_constraint_eval;
-    let actual_final = constraint_proof.round_polys.last().unwrap()
+    let actual_final = constraint_proof
+        .round_polys
+        .last()
+        .unwrap()
         .evaluate(*sumcheck_challenges.last().unwrap());
     println!("  eq_at_r = {}", eq_at_r.to_canonical_u64());
-    println!("  expected_final (eq*C) = {}", expected_final.to_canonical_u64());
-    println!("  actual_final (sumcheck) = {}", actual_final.to_canonical_u64());
-    assert_eq!(expected_final, actual_final, "Constraint final eval mismatch!");
+    println!(
+        "  expected_final (eq*C) = {}",
+        expected_final.to_canonical_u64()
+    );
+    println!(
+        "  actual_final (sumcheck) = {}",
+        actual_final.to_canonical_u64()
+    );
+    assert_eq!(
+        expected_final, actual_final,
+        "Constraint final eval mismatch!"
+    );
 
     checkpoint("after_constraint_sumcheck", &transcript);
 
@@ -267,9 +355,18 @@ fn test_e2e_transcript_trace() {
     println!("  has_lookup = {has_lookup}");
     println!("\n  === PROOF SUMMARY ===");
     println!("  commitment_root: {}", hex(&commitment.root));
-    println!("  perm_claimed_sum: {}", perm_claimed_sum.to_canonical_u64());
-    println!("  pcs_perm_numerator_eval: {}", pcs_perm_eval.to_canonical_u64());
-    println!("  pcs_constraint_eval: {}", pcs_constraint_eval.to_canonical_u64());
+    println!(
+        "  perm_claimed_sum: {}",
+        perm_claimed_sum.to_canonical_u64()
+    );
+    println!(
+        "  pcs_perm_numerator_eval: {}",
+        pcs_perm_eval.to_canonical_u64()
+    );
+    println!(
+        "  pcs_constraint_eval: {}",
+        pcs_constraint_eval.to_canonical_u64()
+    );
     println!("  batch_r: {}", batch_r.to_canonical_u64());
     println!("  alpha: {}", alpha.to_canonical_u64());
     println!("  beta: {}", beta.to_canonical_u64());

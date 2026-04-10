@@ -32,7 +32,8 @@ impl Transcript {
     pub fn domain_separate(&mut self, label: &str) {
         let bytes = label.as_bytes();
         // Length-prefix to prevent ambiguity
-        self.state.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        self.state
+            .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         self.state.extend_from_slice(bytes);
         self.squeeze_counter = 0;
     }
@@ -132,9 +133,10 @@ impl Default for Transcript {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
 
     type F = GoldilocksField;
 

@@ -1,3 +1,4 @@
+use plonky2::hash::poseidon::PoseidonHash;
 /// Integration tests for the MLE proving system.
 ///
 /// Covers:
@@ -14,7 +15,6 @@ use plonky2::plonk::prover::extract_evaluation_tables;
 use plonky2::util::timing::TimingTree;
 use plonky2_field::goldilocks_field::GoldilocksField;
 use plonky2_field::types::Field;
-use plonky2::hash::poseidon::PoseidonHash;
 use plonky2_mle::config::WhirConfig;
 use plonky2_mle::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use plonky2_mle::permutation::logup::{compute_identity_values, compute_permutation_numerator};
@@ -127,7 +127,11 @@ fn test_permutation_with_copy_constraints() {
     );
 
     let sum: F = h.iter().copied().sum();
-    assert_eq!(sum, F::ZERO, "Sum should be zero for valid copy constraints");
+    assert_eq!(
+        sum,
+        F::ZERO,
+        "Sum should be zero for valid copy constraints"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -186,9 +190,7 @@ fn test_poseidon_gate_constraints_zero() {
     let mut builder = CircuitBuilder::<F, D>::new(config);
 
     // hash_n_to_hash_no_pad uses the Poseidon gate internally
-    let inputs: Vec<_> = (0..4)
-        .map(|_| builder.add_virtual_target())
-        .collect();
+    let inputs: Vec<_> = (0..4).map(|_| builder.add_virtual_target()).collect();
     let hash = builder.hash_n_to_hash_no_pad::<PoseidonHash>(inputs.clone());
     for &h in hash.elements.iter() {
         builder.register_public_input(h);
@@ -236,9 +238,7 @@ fn test_poseidon_circuit_prove_verify() {
     let config = CircuitConfig::standard_recursion_config();
     let mut builder = CircuitBuilder::<F, D>::new(config);
 
-    let inputs: Vec<_> = (0..4)
-        .map(|_| builder.add_virtual_target())
-        .collect();
+    let inputs: Vec<_> = (0..4).map(|_| builder.add_virtual_target()).collect();
     let hash = builder.hash_n_to_hash_no_pad::<PoseidonHash>(inputs.clone());
     for &h in hash.elements.iter() {
         builder.register_public_input(h);
@@ -251,17 +251,16 @@ fn test_poseidon_circuit_prove_verify() {
     }
 
     let mut timing = TimingTree::default();
-    let proof = mle_prove::<F, C, D>(
-        &circuit.prover_only,
-        &circuit.common,
-        pw,
-        &mut timing,
-    )
-    .unwrap();
+    let proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(result.is_ok(), "Poseidon circuit verify failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Poseidon circuit verify failed: {:?}",
+        result.err()
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -294,20 +293,19 @@ fn test_large_circuit_chain() {
     pw.set_target(x, F::from_canonical_u64(2));
 
     let mut timing = TimingTree::default();
-    let proof = mle_prove::<F, C, D>(
-        &circuit.prover_only,
-        &circuit.common,
-        pw,
-        &mut timing,
-    )
-    .unwrap();
+    let proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // x^201 mod p for x=2
     assert!(!proof.public_inputs.is_empty());
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(result.is_ok(), "Large circuit verify failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Large circuit verify failed: {:?}",
+        result.err()
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -348,21 +346,12 @@ fn test_randomized_arithmetic_circuits() {
         pw.set_target(b, b_val);
 
         let mut timing = TimingTree::default();
-        let proof = mle_prove::<F, C, D>(
-            &circuit.prover_only,
-            &circuit.common,
-            pw,
-            &mut timing,
-        )
-        .unwrap();
+        let proof =
+            mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
         let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
         let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-        assert!(
-            result.is_ok(),
-            "Trial {trial} failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Trial {trial} failed: {:?}", result.err());
     }
 }
 
@@ -386,23 +375,15 @@ fn test_tampered_public_inputs_rejected() {
     pw.set_target(y, F::from_canonical_u64(7));
 
     let mut timing = TimingTree::default();
-    let mut proof = mle_prove::<F, C, D>(
-        &circuit.prover_only,
-        &circuit.common,
-        pw,
-        &mut timing,
-    )
-    .unwrap();
+    let mut proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // Tamper: change public input from 21 to 22
     proof.public_inputs[0] = F::from_canonical_u64(22);
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(
-        result.is_err(),
-        "Should reject tampered public inputs"
-    );
+    assert!(result.is_err(), "Should reject tampered public inputs");
 }
 
 #[test]
@@ -421,23 +402,15 @@ fn test_tampered_eval_value_rejected() {
     pw.set_target(y, F::from_canonical_u64(9));
 
     let mut timing = TimingTree::default();
-    let mut proof = mle_prove::<F, C, D>(
-        &circuit.prover_only,
-        &circuit.common,
-        pw,
-        &mut timing,
-    )
-    .unwrap();
+    let mut proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // Tamper with the evaluation value
     proof.witness_eval_value = proof.witness_eval_value + F::ONE;
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(
-        result.is_err(),
-        "Should reject tampered evaluation value"
-    );
+    assert!(result.is_err(), "Should reject tampered evaluation value");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -480,9 +453,8 @@ fn test_tampered_constraint_round_poly_rejected() {
     pw.set_target(y, F::from_canonical_u64(6));
 
     let mut timing = TimingTree::default();
-    let mut proof = mle_prove::<F, C, D>(
-        &circuit.prover_only, &circuit.common, pw, &mut timing,
-    ).unwrap();
+    let mut proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // Tamper with a constraint sumcheck round polynomial
     if !proof.constraint_proof.round_polys.is_empty() {
@@ -492,7 +464,10 @@ fn test_tampered_constraint_round_poly_rejected() {
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(result.is_err(), "Should reject tampered constraint round poly");
+    assert!(
+        result.is_err(),
+        "Should reject tampered constraint round poly"
+    );
 }
 
 #[test]
@@ -510,19 +485,26 @@ fn test_tampered_permutation_round_poly_rejected() {
     pw.set_target(y, F::from_canonical_u64(8));
 
     let mut timing = TimingTree::default();
-    let mut proof = mle_prove::<F, C, D>(
-        &circuit.prover_only, &circuit.common, pw, &mut timing,
-    ).unwrap();
+    let mut proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // Tamper with a permutation sumcheck round polynomial
-    if !proof.permutation_proof.sumcheck_proof.round_polys.is_empty() {
+    if !proof
+        .permutation_proof
+        .sumcheck_proof
+        .round_polys
+        .is_empty()
+    {
         proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] =
             proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] + F::ONE;
     }
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(result.is_err(), "Should reject tampered permutation round poly");
+    assert!(
+        result.is_err(),
+        "Should reject tampered permutation round poly"
+    );
 }
 
 #[test]
@@ -542,9 +524,8 @@ fn test_swapped_commitment_rejected() {
     pw.set_target(y, F::from_canonical_u64(5));
 
     let mut timing = TimingTree::default();
-    let mut proof = mle_prove::<F, C, D>(
-        &circuit.prover_only, &circuit.common, pw, &mut timing,
-    ).unwrap();
+    let mut proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // Tamper with the witness root (simulates a different committed polynomial)
     proof.witness_root[0] ^= 0xFF;
@@ -577,16 +558,19 @@ fn test_fibonacci_circuit_prove_verify() {
     pw.set_target(targets[1], F::ONE);
 
     let mut timing = TimingTree::default();
-    let proof = mle_prove::<F, C, D>(
-        &circuit.prover_only, &circuit.common, pw, &mut timing,
-    ).unwrap();
+    let proof =
+        mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
     // fib(19) = 6765
     assert_eq!(proof.public_inputs[0], F::from_canonical_u64(6765));
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
     let result = mle_verify::<F, D>(&circuit.common, &vk, &proof);
-    assert!(result.is_ok(), "Fibonacci verify failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Fibonacci verify failed: {:?}",
+        result.err()
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -595,7 +579,9 @@ fn test_fibonacci_circuit_prove_verify() {
 
 #[test]
 fn test_lookup_logup_standalone() {
-    use plonky2_mle::permutation::lookup::{LookupData, compute_lookup_numerator, prove_lookup_check};
+    use plonky2_mle::permutation::lookup::{
+        compute_lookup_numerator, prove_lookup_check, LookupData,
+    };
     use plonky2_mle::sumcheck::verifier::verify_sumcheck;
     use plonky2_mle::transcript::Transcript;
 
@@ -654,8 +640,8 @@ fn test_recursive_circuit_constraints_zero() {
     //
     // SECURITY: This is the critical test for validity proofs. Without this,
     // the library is only safe for non-recursive circuits.
-    use plonky2::plonk::proof::ProofWithPublicInputs;
     use plonky2::plonk::circuit_data::VerifierCircuitTarget;
+    use plonky2::plonk::proof::ProofWithPublicInputs;
 
     // ── Inner circuit: x * y = z ──
     let inner_config = CircuitConfig::standard_recursion_config();
@@ -678,7 +664,8 @@ fn test_recursive_circuit_constraints_zero() {
     let mut outer_builder = CircuitBuilder::<F, D>::new(outer_config);
 
     let proof_t = outer_builder.add_virtual_proof_with_pis(&inner_data.common);
-    let verifier_data_t = outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
+    let verifier_data_t =
+        outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
     outer_builder.verify_proof::<C>(&proof_t, &verifier_data_t, &inner_data.common);
 
     // Register the inner proof's public inputs as outer public inputs

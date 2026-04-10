@@ -37,9 +37,7 @@ fn lagrange_interpolate_over_integers<F: Field>(evals: &[F], point: F) -> F {
     }
 
     // Precompute (point - j) for all j
-    let diffs: Vec<F> = (0..d)
-        .map(|j| point - F::from_canonical_usize(j))
-        .collect();
+    let diffs: Vec<F> = (0..d).map(|j| point - F::from_canonical_usize(j)).collect();
 
     // Numerator product = Π_{j=0}^{d-1} (point - j)
     let full_product: F = diffs.iter().copied().product();
@@ -78,8 +76,9 @@ pub struct SumcheckProof<F: Field> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
+
+    use super::*;
     type F = GoldilocksField;
 
     #[test]
@@ -91,16 +90,25 @@ mod tests {
         // Check at nodes
         assert_eq!(poly.evaluate(F::ZERO), F::ZERO);
         assert_eq!(poly.evaluate(F::ONE), F::ONE);
-        assert_eq!(poly.evaluate(F::from_canonical_u64(2)), F::from_canonical_u64(4));
+        assert_eq!(
+            poly.evaluate(F::from_canonical_u64(2)),
+            F::from_canonical_u64(4)
+        );
 
         // Check at 3: should give 9
-        assert_eq!(poly.evaluate(F::from_canonical_u64(3)), F::from_canonical_u64(9));
+        assert_eq!(
+            poly.evaluate(F::from_canonical_u64(3)),
+            F::from_canonical_u64(9)
+        );
     }
 
     #[test]
     fn test_round_poly_linear() {
         // f(x) = 2x + 1: f(0)=1, f(1)=3
         let poly = RoundPolynomial::new(vec![F::ONE, F::from_canonical_u64(3)]);
-        assert_eq!(poly.evaluate(F::from_canonical_u64(5)), F::from_canonical_u64(11));
+        assert_eq!(
+            poly.evaluate(F::from_canonical_u64(5)),
+            F::from_canonical_u64(11)
+        );
     }
 }

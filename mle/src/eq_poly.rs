@@ -51,8 +51,9 @@ pub fn eq_eval<F: Field>(tau: &[F], r: &[F]) -> F {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
+
+    use super::*;
 
     type F = GoldilocksField;
 
@@ -77,13 +78,7 @@ mod tests {
         // eq(τ, τ) should be 1 when τ is Boolean
         for b in 0..8u64 {
             let tau: Vec<F> = (0..3)
-                .map(|j| {
-                    if (b >> j) & 1 == 1 {
-                        F::ONE
-                    } else {
-                        F::ZERO
-                    }
-                })
+                .map(|j| if (b >> j) & 1 == 1 { F::ONE } else { F::ZERO })
                 .collect();
             let table = eq_evals(&tau);
             // eq(b, b) = 1
@@ -112,21 +107,12 @@ mod tests {
 
     #[test]
     fn test_eq_eval_matches_table() {
-        let tau = vec![
-            F::from_canonical_u64(7),
-            F::from_canonical_u64(11),
-        ];
+        let tau = vec![F::from_canonical_u64(7), F::from_canonical_u64(11)];
         let table = eq_evals(&tau);
 
         for b in 0..4u64 {
             let r: Vec<F> = (0..2)
-                .map(|j| {
-                    if (b >> j) & 1 == 1 {
-                        F::ONE
-                    } else {
-                        F::ZERO
-                    }
-                })
+                .map(|j| if (b >> j) & 1 == 1 { F::ONE } else { F::ZERO })
                 .collect();
             assert_eq!(eq_eval(&tau, &r), table[b as usize]);
         }

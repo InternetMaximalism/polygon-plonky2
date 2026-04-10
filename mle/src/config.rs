@@ -28,11 +28,11 @@ impl WhirConfig {
     /// Combined with 90-bit security target and appropriate query count.
     pub fn default_rate_16() -> Self {
         Self {
-            rate_bits: 4,       // rate = 1/2^4 = 1/16
-            num_queries: 28,    // Sufficient for 90-bit security at rate 1/16
+            rate_bits: 4,    // rate = 1/2^4 = 1/16
+            num_queries: 28, // Sufficient for 90-bit security at rate 1/16
             security_bits: 90,
             pow_bits: 0,
-            folding_factor: 4,  // Fold by 2^4 = 16 per round
+            folding_factor: 4, // Fold by 2^4 = 16 per round
         }
     }
 

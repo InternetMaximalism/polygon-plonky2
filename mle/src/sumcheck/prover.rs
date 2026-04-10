@@ -124,10 +124,11 @@ pub fn compute_claimed_sum<F: Field>(f_evals: &[F], g_evals: &[F]) -> F {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::eq_poly;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
+    use crate::eq_poly;
 
     type F = GoldilocksField;
 
@@ -136,7 +137,9 @@ mod tests {
         // C(b) = 0 for all b → claimed sum = 0, all round polys should be zero.
         let n = 3;
         let size = 1 << n;
-        let tau: Vec<F> = (0..n).map(|i| F::from_canonical_u64(i as u64 + 5)).collect();
+        let tau: Vec<F> = (0..n)
+            .map(|i| F::from_canonical_u64(i as u64 + 5))
+            .collect();
 
         let eq_table = eq_poly::eq_evals(&tau);
         let constraint_table = vec![F::ZERO; size];

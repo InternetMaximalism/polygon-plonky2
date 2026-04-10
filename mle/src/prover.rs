@@ -17,7 +17,7 @@ use plonky2::util::timing::TimingTree;
 use plonky2_field::extension::Extendable;
 use plonky2_field::types::Field as PlonkyField;
 
-use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_SPLIT, plonky2_vec_to_ark};
+use crate::commitment::whir_pcs::{plonky2_vec_to_ark, WhirPCS, WHIR_SESSION_SPLIT};
 use crate::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtension};
 use crate::eq_poly;
@@ -49,7 +49,10 @@ fn build_preprocessed_batch<'a, F: RichField>(
     sigma_mles: &'a [DenseMultilinearExtension<F>],
     batch_r: F,
     degree_bits: usize,
-) -> (DenseMultilinearExtension<F>, Vec<&'a DenseMultilinearExtension<F>>) {
+) -> (
+    DenseMultilinearExtension<F>,
+    Vec<&'a DenseMultilinearExtension<F>>,
+) {
     // INTENTIONALLY SIMPLE: Collect preprocessed MLEs in fixed order
     // (constants first, then sigmas) matching the batch decomposition
     // expected by the verifier.
@@ -72,7 +75,10 @@ fn build_preprocessed_batch<'a, F: RichField>(
         r_pow = r_pow * batch_r;
     }
 
-    (DenseMultilinearExtension::new(batched_evals), preprocessed_mles)
+    (
+        DenseMultilinearExtension::new(batched_evals),
+        preprocessed_mles,
+    )
 }
 
 /// Compute the MLE verification key for a circuit (setup phase).
@@ -86,11 +92,7 @@ fn build_preprocessed_batch<'a, F: RichField>(
 /// verifier to the specific gate selectors, constant values, and permutation
 /// routing of this circuit. An attacker using different constants/sigmas would
 /// produce a different Merkle root, causing verification to fail.
-pub fn mle_setup<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn mle_setup<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
 ) -> MleVerificationKey<F>
@@ -101,8 +103,8 @@ where
     let num_routed_wires = common_data.config.num_routed_wires;
 
     // Extract circuit_digest
-    let digest_bytes = serde_json::to_vec(&prover_data.circuit_digest)
-        .expect("circuit_digest serialization");
+    let digest_bytes =
+        serde_json::to_vec(&prover_data.circuit_digest).expect("circuit_digest serialization");
     let circuit_digest: Vec<F> = {
         let hash_out: plonky2::hash::hash_types::HashOut<F> =
             serde_json::from_slice(&digest_bytes).expect("circuit_digest deserialization");
@@ -116,16 +118,19 @@ where
 
     // Batch preprocessed polynomials with deterministic batch_r
     let batch_r_pre = derive_preprocessed_batch_r(&circuit_digest);
-    let (preprocessed_batched, _) = build_preprocessed_batch(
-        &const_mles, &sigma_mles, batch_r_pre, degree_bits,
-    );
+    let (preprocessed_batched, _) =
+        build_preprocessed_batch(&const_mles, &sigma_mles, batch_r_pre, degree_bits);
 
     // Convert to Goldilocks and compute WHIR commitment root
     let goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
-        preprocessed_batched.evaluations.iter()
-            .map(|&f| plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
-                f.to_canonical_u64(),
-            ))
+        preprocessed_batched
+            .evaluations
+            .iter()
+            .map(|&f| {
+                plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                    f.to_canonical_u64(),
+                )
+            })
             .collect();
     let goldilocks_mle = DenseMultilinearExtension::new(goldilocks_evals);
 
@@ -143,11 +148,7 @@ where
 /// Generate an MLE proof for a Plonky2 circuit.
 ///
 /// This is the main entry point for the MLE proving system.
-pub fn mle_prove<
-    F: RichField + Extendable<D>,
-    C: GenericConfig<D, F = F>,
-    const D: usize,
->(
+pub fn mle_prove<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
     inputs: PartialWitness<F>,
@@ -163,8 +164,8 @@ where
     // SECURITY: Extract circuit_digest (verifying key hash) to bind the proof
     // to a specific Plonky2 circuit. This is the first thing absorbed into the
     // Fiat-Shamir transcript, matching the standard Plonky2 verifier.
-    let digest_bytes = serde_json::to_vec(&prover_data.circuit_digest)
-        .expect("circuit_digest serialization");
+    let digest_bytes =
+        serde_json::to_vec(&prover_data.circuit_digest).expect("circuit_digest serialization");
     let circuit_digest: Vec<F> = {
         let hash_out: plonky2::hash::hash_types::HashOut<F> =
             serde_json::from_slice(&digest_bytes).expect("circuit_digest deserialization");
@@ -219,16 +220,19 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     // 4a: Build and commit preprocessed polynomial
     let _t = std::time::Instant::now();
     let batch_r_pre: F = derive_preprocessed_batch_r(circuit_digest);
-    let (preprocessed_batched, preprocessed_mles) = build_preprocessed_batch(
-        &const_mles, &sigma_mles, batch_r_pre, degree_bits,
-    );
+    let (preprocessed_batched, preprocessed_mles) =
+        build_preprocessed_batch(&const_mles, &sigma_mles, batch_r_pre, degree_bits);
 
     // Convert preprocessed to arkworks field
     let pre_goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
-        preprocessed_batched.evaluations.iter()
-            .map(|&f| plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
-                f.to_canonical_u64(),
-            ))
+        preprocessed_batched
+            .evaluations
+            .iter()
+            .map(|&f| {
+                plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                    f.to_canonical_u64(),
+                )
+            })
             .collect();
     let pre_ark_evals = plonky2_vec_to_ark(&pre_goldilocks_evals);
 
@@ -237,7 +241,10 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     // into the main transcript, but commit_split needs both vectors upfront.
     let pre_goldilocks_mle = DenseMultilinearExtension::new(pre_goldilocks_evals);
     let pre_root = whir_pcs.commit_root(&pre_goldilocks_mle);
-    eprintln!("[prover] step4a preprocessed commit_root: {:?}", _t.elapsed());
+    eprintln!(
+        "[prover] step4a preprocessed commit_root: {:?}",
+        _t.elapsed()
+    );
 
     // 4b: Absorb pre_root into main transcript, derive batch_r_wit
     transcript.absorb_bytes(&pre_root);
@@ -261,18 +268,19 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
 
     // Convert witness to arkworks field
     let wit_goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
-        wit_batched_mle.evaluations.iter()
-            .map(|&f| plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
-                f.to_canonical_u64(),
-            ))
+        wit_batched_mle
+            .evaluations
+            .iter()
+            .map(|&f| {
+                plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                    f.to_canonical_u64(),
+                )
+            })
             .collect();
     let wit_ark_evals = plonky2_vec_to_ark(&wit_goldilocks_evals);
 
     // 4d: Split commit both vectors
-    let commit_data = whir_pcs.commit_split(
-        &[&pre_ark_evals, &wit_ark_evals],
-        WHIR_SESSION_SPLIT,
-    );
+    let commit_data = whir_pcs.commit_split(&[&pre_ark_evals, &wit_ark_evals], WHIR_SESSION_SPLIT);
 
     // SECURITY: Verify that the deterministic pre_root matches the split commit root.
     // This is a sanity check — both use the same polynomial + params + session.
@@ -480,13 +488,14 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2::iop::witness::WitnessWrite;
     use plonky2::plonk::circuit_builder::CircuitBuilder;
     use plonky2::plonk::circuit_data::CircuitConfig;
     use plonky2::plonk::config::PoseidonGoldilocksConfig;
     use plonky2_field::goldilocks_field::GoldilocksField;
     use plonky2_field::types::Field;
+
+    use super::*;
 
     type F = GoldilocksField;
     type C = PoseidonGoldilocksConfig;
@@ -508,13 +517,8 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(7));
 
         let mut timing = TimingTree::default();
-        let proof = mle_prove::<F, C, D>(
-            &circuit.prover_only,
-            &circuit.common,
-            pw,
-            &mut timing,
-        )
-        .unwrap();
+        let proof =
+            mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
         assert_eq!(proof.public_inputs[0], F::from_canonical_u64(21));
         assert!(!proof.witness_individual_evals.is_empty());

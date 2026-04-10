@@ -15,10 +15,10 @@ use whir::algebra::fields::{Field64 as ArkGoldilocks, Field64_3};
 use whir::algebra::linear_form::{Evaluate, LinearForm, MultilinearExtension};
 use whir::parameters::ProtocolParameters;
 use whir::protocols::whir::{Config as WhirConfig, SplitWitness};
-use whir::transcript::{DomainSeparator, Proof as WhirProofData, ProverState, VerifierState};
+use whir::transcript::codecs::Empty;
 #[cfg(debug_assertions)]
 use whir::transcript::Interaction;
-use whir::transcript::codecs::Empty;
+use whir::transcript::{DomainSeparator, Proof as WhirProofData, ProverState, VerifierState};
 
 use crate::dense_mle::DenseMultilinearExtension;
 
@@ -145,11 +145,20 @@ impl WhirPCS {
         let folding_factor = num_vars.min(4).max(1);
         // Rate 1/16 (starting_log_inv_rate=4).
         // Must leave room for folding: num_vars > starting_log_inv_rate + folding
-        let starting_log_inv_rate = if num_vars <= 4 { 1 } else { 4.min(num_vars - folding_factor) };
+        let starting_log_inv_rate = if num_vars <= 4 {
+            1
+        } else {
+            4.min(num_vars - folding_factor)
+        };
         // PoW disabled; security level capped at 90 bits.
         let security_level = 90.min(num_vars * 5 + 10);
         let pow_bits = 0;
-        Self::new(security_level, pow_bits, starting_log_inv_rate, folding_factor)
+        Self::new(
+            security_level,
+            pow_bits,
+            starting_log_inv_rate,
+            folding_factor,
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -165,10 +174,7 @@ impl WhirPCS {
     /// Changing any evaluation changes the Merkle root. The root is the first
     /// 32 bytes of the WHIR proof output, deterministic for a given polynomial
     /// + WHIR parameters + session name.
-    pub fn commit_root(
-        &self,
-        poly: &DenseMultilinearExtension<GoldilocksField>,
-    ) -> Vec<u8> {
+    pub fn commit_root(&self, poly: &DenseMultilinearExtension<GoldilocksField>) -> Vec<u8> {
         let num_vars = poly.num_vars;
         let size = 1 << num_vars;
         let ark_evals = plonky2_vec_to_ark(&poly.evaluations);
@@ -218,14 +224,15 @@ impl WhirPCS {
         let split_witness = config.commit_split(&mut prover_state, evals_list);
 
         // Extract per-vector roots as Vec<u8>.
-        let roots: Vec<Vec<u8>> = split_witness.roots.iter()
+        let roots: Vec<Vec<u8>> = split_witness
+            .roots
+            .iter()
             .map(|hash| hash.0.to_vec())
             .collect();
 
         // Clone evals for later use in prove_split.
-        let ark_evals_list: Vec<Vec<ArkGoldilocks>> = evals_list.iter()
-            .map(|evals| evals.to_vec())
-            .collect();
+        let ark_evals_list: Vec<Vec<ArkGoldilocks>> =
+            evals_list.iter().map(|evals| evals.to_vec()).collect();
 
         // ds is consumed by ProverState::new_std; config is the only thing we keep.
         let _ = ds;
@@ -263,7 +270,9 @@ impl WhirPCS {
         let lf = MultilinearExtension::new(point_ext3.clone());
 
         // Evaluate each vector at the canonical point.
-        let eval_ext3s: Vec<Field64_3> = commit_data.ark_evals_list.iter()
+        let eval_ext3s: Vec<Field64_3> = commit_data
+            .ark_evals_list
+            .iter()
             .map(|evals| lf.evaluate(commit_data.config.embedding(), evals))
             .collect();
 
@@ -274,7 +283,9 @@ impl WhirPCS {
             vec![Box::new(MultilinearExtension::new(point_ext3))];
 
         // Build vectors for prove_split.
-        let vectors: Vec<Cow<'_, [ArkGoldilocks]>> = commit_data.ark_evals_list.iter()
+        let vectors: Vec<Cow<'_, [ArkGoldilocks]>> = commit_data
+            .ark_evals_list
+            .iter()
             .map(|evals| Cow::Borrowed(evals.as_slice()))
             .collect();
 
@@ -348,11 +359,14 @@ impl WhirPCS {
 
         // Verify the linear form (evaluation at canonical point).
         let verify_lf: Vec<Box<dyn LinearForm<Field64_3>>> =
-            vec![Box::new(MultilinearExtension::new(point_ext3))
-                as Box<dyn LinearForm<Field64_3>>];
+            vec![Box::new(MultilinearExtension::new(point_ext3)) as Box<dyn LinearForm<Field64_3>>];
 
         final_claim
-            .verify(verify_lf.iter().map(|l| l.as_ref() as &dyn LinearForm<Field64_3>))
+            .verify(
+                verify_lf
+                    .iter()
+                    .map(|l| l.as_ref() as &dyn LinearForm<Field64_3>),
+            )
             .map_err(|e| format!("WHIR split evaluation verification failed: {:?}", e))?;
 
         Ok(())
@@ -403,9 +417,13 @@ impl WhirPCS {
         // Build evaluation point — always compute value via WHIR's own evaluate()
         // to ensure consistency with verifier-side computation.
         let point_ext3: Vec<Field64_3> = if let Some(pt) = eval_point {
-            pt.iter().map(|f| Field64_3::from(f.to_canonical_u64())).collect()
+            pt.iter()
+                .map(|f| Field64_3::from(f.to_canonical_u64()))
+                .collect()
         } else {
-            (0..num_vars).map(|i| Field64_3::from((i + 1) as u64)).collect()
+            (0..num_vars)
+                .map(|i| Field64_3::from((i + 1) as u64))
+                .collect()
         };
         let lf = MultilinearExtension::new(point_ext3.clone());
         let eval_ext3 = lf.evaluate(config.embedding(), &ark_evals);
@@ -459,7 +477,13 @@ impl WhirPCS {
         eval_point: Option<&[GoldilocksField]>,
         eval_value_ext3: Option<Field64_3>,
     ) -> Result<(), String> {
-        self.verify_with_session(num_vars, proof, eval_point, eval_value_ext3, WHIR_SESSION_NAME)
+        self.verify_with_session(
+            num_vars,
+            proof,
+            eval_point,
+            eval_value_ext3,
+            WHIR_SESSION_NAME,
+        )
     }
 
     /// Verify a WHIR proof with a custom session name.
@@ -499,10 +523,14 @@ impl WhirPCS {
         // The prover always includes an evaluation at some point (canonical if None).
         // The verifier must match this exactly for transcript consistency.
         let point_ext3: Vec<Field64_3> = if let Some(pt) = eval_point {
-            pt.iter().map(|f| Field64_3::from(f.to_canonical_u64())).collect()
+            pt.iter()
+                .map(|f| Field64_3::from(f.to_canonical_u64()))
+                .collect()
         } else {
             // Canonical evaluation point (1, 2, 3, ..., n) — must match prover
-            (0..num_vars).map(|i| Field64_3::from((i + 1) as u64)).collect()
+            (0..num_vars)
+                .map(|i| Field64_3::from((i + 1) as u64))
+                .collect()
         };
 
         let has_eval_binding = eval_value_ext3.is_some();
@@ -517,8 +545,7 @@ impl WhirPCS {
         };
 
         let verify_lf: Vec<Box<dyn LinearForm<Field64_3>>> =
-            vec![Box::new(MultilinearExtension::new(point_ext3))
-                as Box<dyn LinearForm<Field64_3>>];
+            vec![Box::new(MultilinearExtension::new(point_ext3)) as Box<dyn LinearForm<Field64_3>>];
 
         let final_claim = config
             .verify(&mut verifier_state, &[&commitment], &evaluations)
@@ -530,7 +557,11 @@ impl WhirPCS {
         // by config.verify() above regardless.
         if has_eval_binding {
             final_claim
-                .verify(verify_lf.iter().map(|l| l.as_ref() as &dyn LinearForm<Field64_3>))
+                .verify(
+                    verify_lf
+                        .iter()
+                        .map(|l| l.as_ref() as &dyn LinearForm<Field64_3>),
+                )
                 .map_err(|e| format!("WHIR evaluation verification failed: {:?}", e))?;
         }
 
@@ -622,7 +653,11 @@ mod tests {
 
         // Verify with evaluation binding — pass the same Ext3 value
         let result = pcs.verify(num_vars, &proof, Some(&eval_point), Some(eval_ext3));
-        assert!(result.is_ok(), "prove_at_point verify failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "prove_at_point verify failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -638,10 +673,7 @@ mod tests {
         let pcs = WhirPCS::new(32, 0, 1, 2);
 
         // Split commit
-        let commit_data = pcs.commit_split(
-            &[&evals_a, &evals_b],
-            WHIR_SESSION_SPLIT,
-        );
+        let commit_data = pcs.commit_split(&[&evals_a, &evals_b], WHIR_SESSION_SPLIT);
 
         // Verify we got per-vector roots
         assert_eq!(commit_data.roots.len(), 2);
@@ -657,12 +689,7 @@ mod tests {
         assert_eq!(eval_ext3s.len(), 2);
 
         // Verify
-        let result = pcs.verify_split(
-            num_vars,
-            &eval_proof,
-            &eval_ext3s,
-            WHIR_SESSION_SPLIT,
-        );
+        let result = pcs.verify_split(num_vars, &eval_proof, &eval_ext3s, WHIR_SESSION_SPLIT);
         assert!(result.is_ok(), "Split verify failed: {:?}", result.err());
     }
 
@@ -685,10 +712,7 @@ mod tests {
         let dummy_evals: Vec<ArkGoldilocks> = (0..16)
             .map(|i| ArkGoldilocks::from((i * 5 + 3) as u64))
             .collect();
-        let commit_data = pcs.commit_split(
-            &[&ark_evals, &dummy_evals],
-            WHIR_SESSION_SPLIT,
-        );
+        let commit_data = pcs.commit_split(&[&ark_evals, &dummy_evals], WHIR_SESSION_SPLIT);
 
         assert_eq!(
             standalone_root, commit_data.roots[0],

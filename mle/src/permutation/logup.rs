@@ -167,8 +167,9 @@ pub struct PermutationProof<F: Field> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::goldilocks_field::GoldilocksField;
+
+    use super::*;
 
     type F = GoldilocksField;
 
@@ -183,8 +184,18 @@ mod tests {
             .collect();
 
         let wire_values = vec![
-            vec![F::from_canonical_u64(10), F::from_canonical_u64(20), F::from_canonical_u64(30), F::from_canonical_u64(40)],
-            vec![F::from_canonical_u64(50), F::from_canonical_u64(60), F::from_canonical_u64(70), F::from_canonical_u64(80)],
+            vec![
+                F::from_canonical_u64(10),
+                F::from_canonical_u64(20),
+                F::from_canonical_u64(30),
+                F::from_canonical_u64(40),
+            ],
+            vec![
+                F::from_canonical_u64(50),
+                F::from_canonical_u64(60),
+                F::from_canonical_u64(70),
+                F::from_canonical_u64(80),
+            ],
         ];
 
         let id_values = compute_identity_values(&k_is, &subgroup, num_routed, degree);
