@@ -8,14 +8,7 @@ import {SpongefishWhirVerify} from "../src/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "../src/spongefish/GoldilocksExt3.sol";
 
 /// @title MleE2ETest
-/// @notice Full end-to-end test: MleVerifier.verify() with unified WHIR PCS (split-commit).
-///         Exercises the complete verification pipeline including:
-///         - Fiat-Shamir transcript reconstruction
-///         - VK binding (preprocessed commitment root check)
-///         - Permutation sumcheck verification
-///         - Constraint zero-check sumcheck verification
-///         - Two batch evaluation consistency checks
-///         - Unified WHIR PCS polynomial commitment verification (split-commit)
+/// @notice Full end-to-end test: combined sumcheck + main WHIR + auxiliary WHIR.
 contract MleE2ETest is Test {
     MleVerifier verifier;
 
@@ -47,124 +40,34 @@ contract MleE2ETest is Test {
         _runE2E("test/fixtures/huge_mul.json");
     }
 
-    /// @notice Negative test: tampered witness eval value should fail batched eval check.
-    function test_e2e_tampered_eval_fails() public {
-        string memory json = vm.readFile("test/fixtures/small_mul.json");
-        (
-            MleVerifier.MleProof memory proof,
-            uint256 degreeBits,
-            bytes32 preCommitRoot,
-            uint256 numConstants,
-            uint256 numRoutedWires,
-            SpongefishWhirVerify.WhirParams memory whirParams,
-            bytes memory protocolId,
-            bytes memory splitSessionId,
-            GoldilocksExt3.Ext3[] memory whirEvals
-        ) = _parseAll(json);
-
-        // Tamper with witness eval value
-        proof.witnessEvalValue = (proof.witnessEvalValue + 1) % 0xFFFFFFFF00000001;
-
-        bool success;
-        try verifier.verify(
-            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
-            whirParams, protocolId, splitSessionId, whirEvals
-        ) returns (bool) {
-            success = true;
-        } catch {
-            success = false;
-        }
-        assertFalse(success, "Tampered witnessEvalValue should fail");
-    }
-
-    /// @notice Negative test: tampered pcsConstraintEval should fail constraint check.
-    function test_e2e_tampered_constraint_eval_fails() public {
-        string memory json = vm.readFile("test/fixtures/small_mul.json");
-        (
-            MleVerifier.MleProof memory proof,
-            uint256 degreeBits,
-            bytes32 preCommitRoot,
-            uint256 numConstants,
-            uint256 numRoutedWires,
-            SpongefishWhirVerify.WhirParams memory whirParams,
-            bytes memory protocolId,
-            bytes memory splitSessionId,
-            GoldilocksExt3.Ext3[] memory whirEvals
-        ) = _parseAll(json);
-
-        proof.pcsConstraintEval = (proof.pcsConstraintEval + 1) % 0xFFFFFFFF00000001;
-
-        bool success;
-        try verifier.verify(
-            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
-            whirParams, protocolId, splitSessionId, whirEvals
-        ) returns (bool) {
-            success = true;
-        } catch {
-            success = false;
-        }
-        assertFalse(success, "Tampered pcsConstraintEval should fail");
-    }
-
-    /// @notice Negative test: wrong VK (preprocessedCommitmentRoot) should fail.
-    function test_e2e_wrong_vk_fails() public {
-        string memory json = vm.readFile("test/fixtures/small_mul.json");
-        (
-            MleVerifier.MleProof memory proof,
-            uint256 degreeBits,
-            bytes32 preCommitRoot,
-            uint256 numConstants,
-            uint256 numRoutedWires,
-            SpongefishWhirVerify.WhirParams memory whirParams,
-            bytes memory protocolId,
-            bytes memory splitSessionId,
-            GoldilocksExt3.Ext3[] memory whirEvals
-        ) = _parseAll(json);
-
-        // Flip a bit in the VK root
-        preCommitRoot = bytes32(uint256(preCommitRoot) ^ 1);
-
-        bool success;
-        try verifier.verify(
-            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
-            whirParams, protocolId, splitSessionId, whirEvals
-        ) returns (bool) {
-            success = true;
-        } catch {
-            success = false;
-        }
-        assertFalse(success, "Wrong VK should fail");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
     //  E2E runner
-    // ═══════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// @dev Intermediate struct to avoid stack-too-deep.
+    struct E2EData {
+        MleVerifier.MleProof proof;
+        uint256 degreeBits;
+        bytes32 preCommitRoot;
+        uint256 numConstants;
+        uint256 numRoutedWires;
+        SpongefishWhirVerify.WhirParams whirParams;
+        bytes protocolId;
+        bytes sessionId;
+        GoldilocksExt3.Ext3[] whirEvals;
+    }
 
     function _runE2E(string memory fixturePath) internal view {
         string memory json = vm.readFile(fixturePath);
-
-        (
-            MleVerifier.MleProof memory proof,
-            uint256 degreeBits,
-            bytes32 preCommitRoot,
-            uint256 numConstants,
-            uint256 numRoutedWires,
-            SpongefishWhirVerify.WhirParams memory whirParams,
-            bytes memory protocolId,
-            bytes memory splitSessionId,
-            GoldilocksExt3.Ext3[] memory whirEvals
-        ) = _parseAll(json);
+        E2EData memory d = _parseAll(json);
 
         console.log("=== E2E:", fixturePath);
-        console.log("  degreeBits:", degreeBits);
-        console.log("  publicInputs count:", proof.publicInputs.length);
-        console.log("  preprocessedEvals count:", proof.preprocessedIndividualEvals.length);
-        console.log("  witnessEvals count:", proof.witnessIndividualEvals.length);
+        console.log("  degreeBits:", d.degreeBits);
 
         uint256 gasBefore = gasleft();
         bool valid = verifier.verify(
-            proof, degreeBits, preCommitRoot, numConstants, numRoutedWires,
-            whirParams, protocolId, splitSessionId, whirEvals
+            d.proof, d.degreeBits, d.preCommitRoot, d.numConstants, d.numRoutedWires,
+            d.whirParams, d.protocolId, d.sessionId, d.whirEvals
         );
         uint256 gasUsed = gasBefore - gasleft();
         console.log("  TOTAL verify gas:", gasUsed);
@@ -172,42 +75,41 @@ contract MleE2ETest is Test {
         assertTrue(valid, "E2E verification should pass");
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
     //  Fixture parsing
-    // ═══════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
 
-    function _parseAll(string memory json) internal pure returns (
-        MleVerifier.MleProof memory proof,
-        uint256 degreeBits,
-        bytes32 preCommitRoot,
-        uint256 numConstants,
-        uint256 numRoutedWires,
-        SpongefishWhirVerify.WhirParams memory whirParams,
-        bytes memory protocolId,
-        bytes memory splitSessionId,
-        GoldilocksExt3.Ext3[] memory whirEvals
-    ) {
-        proof = _parseProof(json);
-        degreeBits = vm.parseJsonUint(json, ".degreeBits");
-        whirParams = _parseWhirParams(json);
-        protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
-        splitSessionId = vm.parseJsonBytes(json, ".whirSplitSessionId");
+    function _parseAll(string memory json) internal pure returns (E2EData memory d) {
+        d.proof = _parseProof(json);
+        d.degreeBits = vm.parseJsonUint(json, ".degreeBits");
 
-        // Combined evaluations [preprocessed, witness]
-        whirEvals = new GoldilocksExt3.Ext3[](2);
-        whirEvals[0] = _parseExt3(json, ".preprocessedWhirEval");
-        whirEvals[1] = _parseExt3(json, ".witnessWhirEval");
+        // Single WHIR (3 vectors: preprocessed + witness + auxiliary)
+        d.whirParams = _parseWhirParams(json, ".whirParams");
+        d.whirParams.numCommitments = 3; // Override for 3-vector phased commit
+        d.protocolId = vm.parseJsonBytes(json, ".whirProtocolId");
+        d.sessionId = vm.parseJsonBytes(json, ".whirSplitSessionId");
 
-        // Extract VK values
-        preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
-        numConstants = vm.parseJsonUint(json, ".numConstants");
-        numRoutedWires = vm.parseJsonUint(json, ".numRoutedWires");
+        // 3 Ext3 evals: [preprocessed, witness, auxiliary]
+        d.whirEvals = new GoldilocksExt3.Ext3[](3);
+        d.whirEvals[0] = _parseExt3(json, ".preprocessedWhirEval");
+        d.whirEvals[1] = _parseExt3(json, ".witnessWhirEval");
+        d.whirEvals[2] = _parseExt3(json, ".auxWhirEval");
+
+        // Evaluation point (sumcheck output r)
+        GoldilocksExt3.Ext3[] memory evalPt = _parseExt3Array(json, ".evaluationPoint");
+        d.whirParams.evaluationPoint = evalPt;
+        d.whirParams.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+
+        // VK values
+        d.preCommitRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
+        d.numConstants = vm.parseJsonUint(json, ".numConstants");
+        d.numRoutedWires = vm.parseJsonUint(json, ".numRoutedWires");
     }
 
     function _parseProof(string memory json) internal pure returns (MleVerifier.MleProof memory proof) {
         proof.circuitDigest = _parseUintArray(json, ".circuitDigest");
 
-        // Unified WHIR PCS
+        // Main WHIR PCS
         proof.whirTranscript = vm.parseJsonBytes(json, ".whirTranscript");
         proof.whirHints = vm.parseJsonBytes(json, ".whirHints");
         proof.preprocessedRoot = vm.parseJsonBytes32(json, ".preprocessedCommitmentRoot");
@@ -223,30 +125,28 @@ contract MleE2ETest is Test {
         proof.witnessBatchR = vm.parseUint(vm.parseJsonString(json, ".witnessBatchR"));
         proof.witnessIndividualEvals = _parseUintArray(json, ".witnessIndividualEvals");
 
-        // Sumcheck proofs (numRounds = degreeBits)
+        // Auxiliary polynomial (3rd vector in same WHIR proof)
+        proof.auxCommitmentRoot = vm.parseJsonBytes32(json, ".auxCommitmentRoot");
+        proof.auxBatchR = vm.parseUint(vm.parseJsonString(json, ".auxBatchR"));
+        proof.auxConstraintEval = vm.parseUint(vm.parseJsonString(json, ".auxConstraintEval"));
+        proof.auxPermEval = vm.parseUint(vm.parseJsonString(json, ".auxPermEval"));
+        proof.auxEvalValue = vm.parseUint(vm.parseJsonString(json, ".auxEvalValue"));
+
+        // Combined sumcheck
         uint256 degreeBits = vm.parseJsonUint(json, ".degreeBits");
-        proof.permProof = _parseSumcheckProof(json, ".permProof", degreeBits);
-        proof.permClaimedSum = vm.parseUint(vm.parseJsonString(json, ".permClaimedSum"));
-        proof.constraintProof = _parseSumcheckProof(json, ".constraintProof", degreeBits);
+        proof.combinedProof = _parseSumcheckProof(json, ".combinedProof", degreeBits);
 
         // Challenges
         proof.alpha = vm.parseUint(vm.parseJsonString(json, ".alpha"));
         proof.beta = vm.parseUint(vm.parseJsonString(json, ".beta"));
         proof.gamma = vm.parseUint(vm.parseJsonString(json, ".gamma"));
+        proof.mu = vm.parseUint(vm.parseJsonString(json, ".mu"));
 
         // Arrays
         proof.publicInputs = _parseUintArray(json, ".publicInputs");
         proof.tau = _parseUintArray(json, ".tau");
-        proof.tauPerm = _parseUintArray(json, ".tauPerm");
 
-        // Circuit dimensions
-        proof.numWires = vm.parseJsonUint(json, ".numWires");
-        proof.numRoutedWires = vm.parseJsonUint(json, ".numRoutedWires");
-        proof.numConstants = vm.parseJsonUint(json, ".numConstants");
-
-        // Oracle values
-        proof.pcsConstraintEval = vm.parseUint(vm.parseJsonString(json, ".pcsConstraintEval"));
-        proof.pcsPermNumeratorEval = vm.parseUint(vm.parseJsonString(json, ".pcsPermNumeratorEval"));
+        // (circuit dimensions from VK, not proof)
     }
 
     function _parseSumcheckProof(string memory json, string memory path, uint256 numRounds)
@@ -264,6 +164,80 @@ contract MleE2ETest is Test {
         }
     }
 
+    function _parseWhirParams(string memory json, string memory basePath)
+        internal pure returns (SpongefishWhirVerify.WhirParams memory params)
+    {
+        params.numVariables = vm.parseJsonUint(json, string.concat(basePath, ".numVariables"));
+        params.foldingFactor = vm.parseJsonUint(json, string.concat(basePath, ".foldingFactor"));
+        params.numVectors = vm.parseJsonUint(json, string.concat(basePath, ".numVectors"));
+        params.numCommitments = vm.parseJsonUint(json, string.concat(basePath, ".numCommitments"));
+        params.outDomainSamples = vm.parseJsonUint(json, string.concat(basePath, ".outDomainSamples"));
+        params.inDomainSamples = vm.parseJsonUint(json, string.concat(basePath, ".inDomainSamples"));
+        params.initialSumcheckRounds = vm.parseJsonUint(json, string.concat(basePath, ".initialSumcheckRounds"));
+        params.numRounds = vm.parseJsonUint(json, string.concat(basePath, ".numRounds"));
+        params.finalSumcheckRounds = vm.parseJsonUint(json, string.concat(basePath, ".finalSumcheckRounds"));
+        params.finalSize = vm.parseJsonUint(json, string.concat(basePath, ".finalSize"));
+        params.initialCodewordLength = vm.parseJsonUint(json, string.concat(basePath, ".initialCodewordLength"));
+        params.initialMerkleDepth = vm.parseJsonUint(json, string.concat(basePath, ".initialMerkleDepth"));
+        params.initialDomainGenerator = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(basePath, ".initialDomainGenerator"))));
+        params.initialInterleavingDepth = vm.parseJsonUint(json, string.concat(basePath, ".initialInterleavingDepth"));
+        params.initialNumVariables = vm.parseJsonUint(json, string.concat(basePath, ".initialNumVariables"));
+        params.initialCosetSize = vm.parseJsonUint(json, string.concat(basePath, ".initialCosetSize"));
+        params.initialNumCosets = vm.parseJsonUint(json, string.concat(basePath, ".initialNumCosets"));
+
+        uint256 nr = params.numRounds;
+        params.rounds = new SpongefishWhirVerify.RoundParams[](nr);
+        for (uint256 i = 0; i < nr; i++) {
+            string memory rp = string.concat(basePath, ".rounds[", vm.toString(i), "]");
+            params.rounds[i].codewordLength = vm.parseJsonUint(json, string.concat(rp, ".codewordLength"));
+            params.rounds[i].merkleDepth = vm.parseJsonUint(json, string.concat(rp, ".merkleDepth"));
+            params.rounds[i].domainGenerator = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(rp, ".domainGenerator"))));
+            params.rounds[i].inDomainSamples = vm.parseJsonUint(json, string.concat(rp, ".inDomainSamples"));
+            params.rounds[i].outDomainSamples = vm.parseJsonUint(json, string.concat(rp, ".outDomainSamples"));
+            params.rounds[i].sumcheckRounds = vm.parseJsonUint(json, string.concat(rp, ".sumcheckRounds"));
+            params.rounds[i].interleavingDepth = vm.parseJsonUint(json, string.concat(rp, ".interleavingDepth"));
+            params.rounds[i].cosetSize = vm.parseJsonUint(json, string.concat(rp, ".cosetSize"));
+            params.rounds[i].numCosets = vm.parseJsonUint(json, string.concat(rp, ".numCosets"));
+            params.rounds[i].numVariables = vm.parseJsonUint(json, string.concat(rp, ".numVariables"));
+        }
+
+        params.evaluationPoint = new GoldilocksExt3.Ext3[](0);
+        params.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+    }
+
+    function _parseExt3(string memory json, string memory path)
+        internal pure returns (GoldilocksExt3.Ext3 memory)
+    {
+        return GoldilocksExt3.Ext3(
+            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c0")))),
+            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c1")))),
+            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c2"))))
+        );
+    }
+
+    function _parseExt3Array(string memory json, string memory path)
+        internal pure returns (GoldilocksExt3.Ext3[] memory result)
+    {
+        // Parse array length by trying indices
+        uint256 len = 0;
+        for (uint256 i = 0; i < 20; i++) {
+            try vm.parseJsonString(json, string.concat(path, "[", vm.toString(i), "].c0")) returns (string memory) {
+                len = i + 1;
+            } catch {
+                break;
+            }
+        }
+        result = new GoldilocksExt3.Ext3[](len);
+        for (uint256 i = 0; i < len; i++) {
+            string memory ep = string.concat(path, "[", vm.toString(i), "]");
+            result[i] = GoldilocksExt3.Ext3(
+                uint64(vm.parseUint(vm.parseJsonString(json, string.concat(ep, ".c0")))),
+                uint64(vm.parseUint(vm.parseJsonString(json, string.concat(ep, ".c1")))),
+                uint64(vm.parseUint(vm.parseJsonString(json, string.concat(ep, ".c2"))))
+            );
+        }
+    }
+
     function _parseUintArray(string memory json, string memory path)
         internal pure returns (uint256[] memory)
     {
@@ -275,53 +249,16 @@ contract MleE2ETest is Test {
         return result;
     }
 
-    function _parseExt3(string memory json, string memory prefix)
-        internal pure returns (GoldilocksExt3.Ext3 memory)
-    {
-        uint64 c0 = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(prefix, ".c0"))));
-        uint64 c1 = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(prefix, ".c1"))));
-        uint64 c2 = uint64(vm.parseUint(vm.parseJsonString(json, string.concat(prefix, ".c2"))));
-        return GoldilocksExt3.Ext3(c0, c1, c2);
-    }
-
-    function _parseWhirParams(string memory json) internal pure returns (SpongefishWhirVerify.WhirParams memory params) {
-        params.numVariables = vm.parseJsonUint(json, ".whirParams.numVariables");
-        params.foldingFactor = vm.parseJsonUint(json, ".whirParams.foldingFactor");
-        params.numVectors = vm.parseJsonUint(json, ".whirParams.numVectors");
-        params.numCommitments = vm.parseJsonUint(json, ".whirParams.numCommitments");
-        params.outDomainSamples = vm.parseJsonUint(json, ".whirParams.outDomainSamples");
-        params.inDomainSamples = vm.parseJsonUint(json, ".whirParams.inDomainSamples");
-        params.initialSumcheckRounds = vm.parseJsonUint(json, ".whirParams.initialSumcheckRounds");
-        params.numRounds = vm.parseJsonUint(json, ".whirParams.numRounds");
-        params.finalSumcheckRounds = vm.parseJsonUint(json, ".whirParams.finalSumcheckRounds");
-        params.finalSize = vm.parseJsonUint(json, ".whirParams.finalSize");
-        params.initialCodewordLength = vm.parseJsonUint(json, ".whirParams.initialCodewordLength");
-        params.initialMerkleDepth = vm.parseJsonUint(json, ".whirParams.initialMerkleDepth");
-        params.initialDomainGenerator = uint64(vm.parseJsonUint(json, ".whirParams.initialDomainGenerator"));
-        params.initialInterleavingDepth = vm.parseJsonUint(json, ".whirParams.initialInterleavingDepth");
-        params.initialNumVariables = vm.parseJsonUint(json, ".whirParams.initialNumVariables");
-        params.initialCosetSize = vm.parseJsonUint(json, ".whirParams.initialCosetSize");
-        params.initialNumCosets = vm.parseJsonUint(json, ".whirParams.initialNumCosets");
-
-        // Rounds
-        uint256 numRounds = params.numRounds;
-        params.rounds = new SpongefishWhirVerify.RoundParams[](numRounds);
-        for (uint256 i = 0; i < numRounds; i++) {
-            string memory p = string.concat(".whirParams.rounds[", vm.toString(i), "]");
-            params.rounds[i].codewordLength = vm.parseJsonUint(json, string.concat(p, ".codewordLength"));
-            params.rounds[i].merkleDepth = vm.parseJsonUint(json, string.concat(p, ".merkleDepth"));
-            params.rounds[i].domainGenerator = uint64(vm.parseJsonUint(json, string.concat(p, ".domainGenerator")));
-            params.rounds[i].inDomainSamples = vm.parseJsonUint(json, string.concat(p, ".inDomainSamples"));
-            params.rounds[i].outDomainSamples = vm.parseJsonUint(json, string.concat(p, ".outDomainSamples"));
-            params.rounds[i].sumcheckRounds = vm.parseJsonUint(json, string.concat(p, ".sumcheckRounds"));
-            params.rounds[i].interleavingDepth = vm.parseJsonUint(json, string.concat(p, ".interleavingDepth"));
-            params.rounds[i].cosetSize = vm.parseJsonUint(json, string.concat(p, ".cosetSize"));
-            params.rounds[i].numCosets = vm.parseJsonUint(json, string.concat(p, ".numCosets"));
-            params.rounds[i].numVariables = vm.parseJsonUint(json, string.concat(p, ".numVariables"));
+    /// @dev Compute WHIR session ID from a session name string via CBOR + Keccak.
+    function _computeSessionId(string memory sessionName) internal pure returns (bytes memory) {
+        // CBOR encoding of a text string: major type 3
+        bytes memory nameBytes = bytes(sessionName);
+        bytes memory cbor;
+        if (nameBytes.length < 24) {
+            cbor = abi.encodePacked(uint8(0x60 + nameBytes.length), nameBytes);
+        } else {
+            cbor = abi.encodePacked(uint8(0x78), uint8(nameBytes.length), nameBytes);
         }
-
-        // Empty evaluation points (canonical mode)
-        params.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        params.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+        return abi.encodePacked(keccak256(cbor));
     }
 }

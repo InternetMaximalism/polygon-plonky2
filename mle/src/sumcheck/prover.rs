@@ -67,6 +67,91 @@ pub fn prove_sumcheck_product<F: Field + plonky2_field::types::PrimeField64>(
     (SumcheckProof { round_polys }, challenges)
 }
 
+/// Run the sumcheck prover for a combined constraint+permutation polynomial:
+///   `Σ_b [eq(τ, b) · C(b) + μ · h(b)] = 0`
+///
+/// where `Σ eq(τ,b)·C(b) = 0` (zero-check) and `Σ h(b) = 0` (logUp).
+///
+/// This merges the constraint zero-check and permutation check into a single
+/// sumcheck, halving the number of sumcheck rounds (n instead of 2n) and
+/// producing a single output point r where all evaluations are needed.
+///
+/// NOTE: The permutation term uses h(b) UNWEIGHTED (not eq(τ_perm,b)·h(b)),
+/// because logUp guarantees Σ h(b) = 0 (total sum) but NOT h(b) = 0 at each row.
+/// The eq-weighted constraint term handles the zero-check (C must be zero at each row).
+///
+/// # Arguments
+/// - `eq_constraint_mle`: eq(τ, ·) MLE
+/// - `constraint_mle`: C(·) MLE (flattened constraint polynomial)
+/// - `h_mle`: h(·) MLE (logUp permutation numerator)
+/// - `mu`: Fiat-Shamir combination scalar
+/// - `max_degree`: Maximum degree per variable (2 for product of multilinear polynomials)
+/// - `transcript`: Fiat-Shamir transcript
+///
+/// SECURITY: μ is derived after all MLEs are determined. A prover who tries to
+/// cancel constraint violations against permutation imbalances must predict μ,
+/// which by Schwartz-Zippel has probability ≤ deg/|F| ≈ 2^{-64}.
+pub fn prove_sumcheck_combined<F: Field + plonky2_field::types::PrimeField64>(
+    eq_constraint_mle: &mut DenseMultilinearExtension<F>,
+    constraint_mle: &mut DenseMultilinearExtension<F>,
+    h_mle: &mut DenseMultilinearExtension<F>,
+    mu: F,
+    max_degree: usize,
+    transcript: &mut Transcript,
+) -> (SumcheckProof<F>, Vec<F>) {
+    let n = eq_constraint_mle.num_vars;
+    assert_eq!(constraint_mle.num_vars, n);
+    assert_eq!(h_mle.num_vars, n);
+
+    let mut round_polys = Vec::with_capacity(n);
+    let mut challenges = Vec::with_capacity(n);
+
+    for _round in 0..n {
+        let half = eq_constraint_mle.evaluations.len() / 2;
+        let mut evals = vec![F::ZERO; max_degree + 1];
+
+        for j in 0..half {
+            // Constraint term: eq(τ, ·) · C(·)
+            let ec_lo = eq_constraint_mle.evaluations[2 * j];
+            let ec_hi = eq_constraint_mle.evaluations[2 * j + 1];
+            let c_lo = constraint_mle.evaluations[2 * j];
+            let c_hi = constraint_mle.evaluations[2 * j + 1];
+
+            // Permutation term: μ · h(·) (unweighted)
+            let h_lo = h_mle.evaluations[2 * j];
+            let h_hi = h_mle.evaluations[2 * j + 1];
+
+            for (d, eval) in evals.iter_mut().enumerate() {
+                let t = F::from_canonical_usize(d);
+                let one_minus_t = F::ONE - t;
+
+                let ec_t = one_minus_t * ec_lo + t * ec_hi;
+                let c_t = one_minus_t * c_lo + t * c_hi;
+                let h_t = one_minus_t * h_lo + t * h_hi;
+
+                // Combined: eq(τ,t) · C(t) + μ · h(t)
+                *eval += ec_t * c_t + mu * h_t;
+            }
+        }
+
+        let round_poly = RoundPolynomial::new(evals.clone());
+
+        transcript.domain_separate("sumcheck-round");
+        transcript.absorb_field_vec(&evals);
+
+        let r_i: F = transcript.squeeze_challenge();
+        challenges.push(r_i);
+
+        eq_constraint_mle.bind_variable_in_place(r_i);
+        constraint_mle.bind_variable_in_place(r_i);
+        h_mle.bind_variable_in_place(r_i);
+
+        round_polys.push(round_poly);
+    }
+
+    (SumcheckProof { round_polys }, challenges)
+}
+
 /// Run the sumcheck prover for a single MLE: `Σ_b f(b) = claimed_sum`.
 ///
 /// This uses the identity `Σ f(b) = Σ eq(1,...,1, b)·f(b)` ... no, that's wrong.

@@ -27,67 +27,52 @@ use crate::sumcheck::types::SumcheckProof;
 
 /// A complete serializable proof fixture for Solidity consumption.
 ///
-/// Every field element is a decimal string to prevent IEEE 754 precision loss.
-/// Uses unified WHIR proof format (single transcript + hints for both vectors).
+/// Combined sumcheck architecture: single sumcheck output point r.
+/// Two WHIR proofs: main (preprocessed+witness) and auxiliary (C̃+h̃).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProofFixture {
-    /// Circuit digest (verifying key hash) — 4 Goldilocks field elements as decimal strings.
-    /// SECURITY: Binds the proof to a specific Plonky2 circuit.
     pub circuit_digest: Vec<String>,
 
-    // ── Unified WHIR PCS (preprocessed + witness) ───────────────────────
-    /// WHIR commitment root for preprocessed polynomial (hex, 0x-prefixed).
-    /// SECURITY: This is the VK binding value.
+    // ── Main WHIR PCS (preprocessed + witness) ─────────────────────────
     pub preprocessed_commitment_root: String,
-    /// WHIR commitment root for witness polynomial (hex, 0x-prefixed).
     pub witness_commitment_root: String,
-    /// Unified WHIR transcript bytes (hex, 0x-prefixed).
     pub whir_transcript: String,
-    /// Unified WHIR hints (hex, 0x-prefixed).
     pub whir_hints: String,
-
-    // ── Preprocessed batch evaluation ───────────────────────────────────
-    /// Batched evaluation for preprocessed polynomial.
     pub preprocessed_eval_value: String,
-    /// Deterministic batch scalar for preprocessed (from circuit_digest).
     pub preprocessed_batch_r: String,
-    /// Individual evaluations: [const_0..const_C, sigma_0..sigma_R].
     pub preprocessed_individual_evals: Vec<String>,
-    /// WHIR evaluation in Ext3 for preprocessed.
     pub preprocessed_whir_eval: Ext3Fixture,
-
-    // ── Witness batch evaluation ────────────────────────────────────────
-    /// Batched evaluation for witness polynomial.
     pub witness_eval_value: String,
-    /// Fiat-Shamir derived batch scalar for witness.
     pub witness_batch_r: String,
-    /// Individual evaluations: [wire_0..wire_W].
     pub witness_individual_evals: Vec<String>,
-    /// WHIR evaluation in Ext3 for witness.
     pub witness_whir_eval: Ext3Fixture,
 
-    // ── Sumcheck proofs ──────────────────────────────────────────────────
-    pub perm_proof: SumcheckFixture,
-    pub perm_claimed_sum: String,
-    pub constraint_proof: SumcheckFixture,
+    // ── Auxiliary polynomial (3rd vector in same WHIR proof) ──────────
+    pub aux_commitment_root: String,
+    pub aux_batch_r: String,
+    pub aux_constraint_eval: String,
+    pub aux_perm_eval: String,
+    pub aux_eval_value: String,
+    pub aux_whir_eval: Ext3Fixture,
 
-    // ── Public data ──────────────────────────────────────────────────────
+    // ── Evaluation point (combined sumcheck output r) ──────────────────
+    pub evaluation_point: Vec<Ext3Fixture>,
+
+    // ── Combined sumcheck proof ────────────────────────────────────────
+    pub combined_proof: SumcheckFixture,
+
+    // ── Public data ────────────────────────────────────────────────────
     pub public_inputs: Vec<String>,
-    /// Fiat-Shamir challenges.
     pub alpha: String,
     pub beta: String,
     pub gamma: String,
+    pub mu: String,
     pub tau: Vec<String>,
     pub tau_perm: Vec<String>,
-    /// Oracle values (PCS-bound).
-    pub pcs_constraint_eval: String,
-    pub pcs_perm_numerator_eval: String,
-    /// Circuit dimensions.
     pub num_wires: usize,
     pub num_routed_wires: usize,
     pub num_constants: usize,
-    /// Circuit degree (log2).
     pub degree_bits: usize,
 
     // ── WHIR config ─────────────────────────────────────────────────────
@@ -362,34 +347,46 @@ pub fn proof_to_fixture<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize
 
     ProofFixture {
         circuit_digest: field_vec_to_strings(&proof.circuit_digest),
-        // Unified WHIR PCS
+        // Main WHIR PCS
         preprocessed_commitment_root: format!("0x{pre_root_hex}"),
         witness_commitment_root: format!("0x{wit_root_hex}"),
         whir_transcript: hex_encode(&proof.whir_eval_proof.narg_string),
         whir_hints: hex_encode(&proof.whir_eval_proof.hints),
-        // Preprocessed batch
         preprocessed_eval_value: field_to_string(proof.preprocessed_eval_value),
         preprocessed_batch_r: field_to_string(proof.preprocessed_batch_r),
         preprocessed_individual_evals: field_vec_to_strings(&proof.preprocessed_individual_evals),
         preprocessed_whir_eval: ext3_to_fixture(&proof.preprocessed_whir_eval_ext3),
-        // Witness batch
         witness_eval_value: field_to_string(proof.witness_eval_value),
         witness_batch_r: field_to_string(proof.witness_batch_r),
         witness_individual_evals: field_vec_to_strings(&proof.witness_individual_evals),
         witness_whir_eval: ext3_to_fixture(&proof.witness_whir_eval_ext3),
-        // Sumcheck proofs
-        perm_proof: sumcheck_to_fixture(&proof.permutation_proof.sumcheck_proof),
-        perm_claimed_sum: field_to_string(proof.permutation_proof.claimed_sum),
-        constraint_proof: sumcheck_to_fixture(&proof.constraint_proof),
+        // Auxiliary polynomial (3rd vector in same WHIR proof)
+        aux_commitment_root: hex_encode(&proof.aux_commitment_root),
+        aux_batch_r: field_to_string(proof.aux_batch_r),
+        aux_constraint_eval: field_to_string(proof.aux_constraint_eval),
+        aux_perm_eval: field_to_string(proof.aux_perm_eval),
+        aux_eval_value: field_to_string(proof.aux_eval_value),
+        aux_whir_eval: ext3_to_fixture(&proof.aux_whir_eval_ext3),
+        // Evaluation point
+        evaluation_point: proof
+            .sumcheck_challenges
+            .iter()
+            .map(|&f| Ext3Fixture {
+                c0: f.to_canonical_u64().to_string(),
+                c1: "0".to_string(),
+                c2: "0".to_string(),
+            })
+            .collect(),
+        // Combined sumcheck
+        combined_proof: sumcheck_to_fixture(&proof.combined_proof),
         // Public data
         public_inputs: field_vec_to_strings(&proof.public_inputs),
         alpha: field_to_string(proof.alpha),
         beta: field_to_string(proof.beta),
         gamma: field_to_string(proof.gamma),
+        mu: field_to_string(proof.mu),
         tau: field_vec_to_strings(&proof.tau),
         tau_perm: field_vec_to_strings(&proof.tau_perm),
-        pcs_constraint_eval: field_to_string(proof.pcs_constraint_eval),
-        pcs_perm_numerator_eval: field_to_string(proof.pcs_perm_numerator_eval),
         num_wires: proof.num_wires,
         num_routed_wires: proof.num_routed_wires,
         num_constants: proof.num_constants,
@@ -514,13 +511,13 @@ mod tests {
             proof.preprocessed_batch_r.to_canonical_u64()
         );
 
-        // Verify perm round polys roundtrip
-        for (i, rp) in fixture.perm_proof.round_polys.iter().enumerate() {
+        // Verify combined proof round polys roundtrip
+        for (i, rp) in fixture.combined_proof.round_polys.iter().enumerate() {
             for (j, s) in rp.iter().enumerate() {
                 let parsed = parse_field_string(s);
-                let original = proof.permutation_proof.sumcheck_proof.round_polys[i].evaluations[j]
+                let original = proof.combined_proof.round_polys[i].evaluations[j]
                     .to_canonical_u64();
-                assert_eq!(parsed, original, "perm round[{i}][{j}] mismatch");
+                assert_eq!(parsed, original, "combined round[{i}][{j}] mismatch");
             }
         }
     }

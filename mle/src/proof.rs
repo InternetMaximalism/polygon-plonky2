@@ -1,9 +1,16 @@
 /// Proof structure for the MLE-native proving system.
+///
+/// Architecture: Combined sumcheck (constraint + permutation) with single
+/// output point r. Two WHIR proofs:
+///   1. Main split-commit: preprocessed + witness polynomials
+///   2. Auxiliary single-vector: C̃ + h̃ (constraint + permutation MLEs)
+///
+/// All evaluations are at the single sumcheck output point r, providing
+/// direct WHIR binding for individual_evals, C̃(r), and h̃(r).
 use plonky2_field::types::Field;
 use whir::algebra::fields::Field64_3;
 
 use crate::commitment::whir_pcs::WhirEvalProof;
-use crate::permutation::logup::PermutationProof;
 use crate::permutation::lookup::LookupProof;
 use crate::sumcheck::types::SumcheckProof;
 
@@ -21,8 +28,6 @@ pub struct MleVerificationKey<F: Field> {
     /// Circuit digest (verifying key hash) — 4 Goldilocks field elements.
     pub circuit_digest: Vec<F>,
     /// WHIR commitment root for the batched preprocessed polynomial.
-    /// This is the first 32 bytes of the split-commit Merkle root for the
-    /// preprocessed vector, and is deterministic for a given circuit.
     pub preprocessed_commitment_root: Vec<u8>,
     /// Number of constant columns in the circuit.
     pub num_constants: usize,
@@ -32,70 +37,78 @@ pub struct MleVerificationKey<F: Field> {
 
 /// A complete MLE proof for a Plonky2 circuit.
 ///
-/// Uses a single unified WHIR proof covering both preprocessed (constants + sigmas)
-/// and witness (wires) polynomials via the split-commit API.
+/// SECURITY: All polynomial evaluations at the sumcheck output point r are
+/// WHIR-bound. The verification chain:
+///   1. Main WHIR binds P_pre(r), P_wit(r) → individual wire/const/sigma evals
+///   2. Auxiliary WHIR binds P_aux(r) → C̃(r) and h̃(r) via batch decomposition
+///   3. Combined sumcheck: eq(τ,r)·C̃(r) + μ·eq(τ_perm,r)·h̃(r) = final_eval
+///   4. Verifier checks final_eval matches sumcheck output
+///
+/// No prover-claimed oracle values are trusted without WHIR binding.
 #[derive(Clone, Debug)]
 pub struct MleProof<F: Field> {
     /// Circuit digest (verifying key hash) — 4 Goldilocks field elements.
-    /// SECURITY: Binds this proof to a specific Plonky2 circuit. Without this,
-    /// an attacker could generate a proof for a trivial circuit and present it
-    /// as valid for the target circuit.
     pub circuit_digest: Vec<F>,
 
-    // ── Unified WHIR PCS (preprocessed + witness) ───────────────────────
-    /// Single WHIR evaluation proof covering both vectors.
+    // ── Main WHIR PCS (preprocessed + witness) ─────────────────────────
+    /// Single WHIR evaluation proof covering both preprocessed and witness.
     pub whir_eval_proof: WhirEvalProof,
     /// Preprocessed commitment root (32 bytes, for VK binding check).
-    /// SECURITY: Must match the VK's preprocessed_commitment_root.
     pub preprocessed_root: Vec<u8>,
     /// Witness commitment root (32 bytes).
     pub witness_root: Vec<u8>,
 
-    // ── Preprocessed batch evaluation ───────────────────────────────────
-    /// Batched evaluation value for the preprocessed polynomial.
+    // ── Preprocessed batch evaluation at r ──────────────────────────────
     pub preprocessed_eval_value: F,
-    /// Batching scalar for preprocessed polys (deterministic, from circuit_digest).
     pub preprocessed_batch_r: F,
-    /// Individual evaluations at sumcheck point: [const_0..const_C, sigma_0..sigma_R].
+    /// Individual evals at r: [const_0..const_C, sigma_0..sigma_R].
     pub preprocessed_individual_evals: Vec<F>,
-    /// WHIR evaluation in Ext3 for preprocessed polynomial.
     pub preprocessed_whir_eval_ext3: Field64_3,
 
-    // ── Witness batch evaluation ────────────────────────────────────────
-    /// Batched evaluation value for the witness polynomial.
+    // ── Witness batch evaluation at r ───────────────────────────────────
     pub witness_eval_value: F,
-    /// Batching scalar for witness polys (Fiat-Shamir derived).
     pub witness_batch_r: F,
-    /// Individual evaluations at sumcheck point: [wire_0..wire_W].
+    /// Individual evals at r: [wire_0..wire_W].
     pub witness_individual_evals: Vec<F>,
-    /// WHIR evaluation in Ext3 for witness polynomial.
     pub witness_whir_eval_ext3: Field64_3,
 
-    // ── Sub-protocol proofs ──────────────────────────────────────────────
-    /// Zero-check sumcheck proof for gate constraints.
-    pub constraint_proof: SumcheckProof<F>,
-    /// Permutation check proof.
-    pub permutation_proof: PermutationProof<F>,
+    // ── Auxiliary polynomial (C̃ + h̃, 3rd vector in same WHIR proof) ───
+    /// SECURITY: The auxiliary polynomial P_aux = C̃ + batch_r_aux · h̃ is the
+    /// 3rd vector in the same WHIR split-commit proof. WHIR cross-term OOD
+    /// binding + Schwartz-Zippel over batch_r_aux ensures C̃(r) and h̃(r) are
+    /// uniquely determined (forgery probability ≤ 1/|F| ≈ 2^{-64}).
+    pub aux_commitment_root: Vec<u8>,
+    pub aux_batch_r: F,
+    /// C̃(r) — constraint MLE evaluation at r, WHIR-bound.
+    pub aux_constraint_eval: F,
+    /// h̃(r) — permutation numerator MLE evaluation at r, WHIR-bound.
+    pub aux_perm_eval: F,
+    /// Auxiliary batched evaluation at r: P_aux(r) = C̃(r) + batch_r_aux · h̃(r).
+    pub aux_eval_value: F,
+    pub aux_whir_eval_ext3: Field64_3,
+
+    // ── Sumcheck output ────────────────────────────────────────────────
+    /// Combined sumcheck output point r.
+    pub sumcheck_challenges: Vec<F>,
+
+    // ── Combined sumcheck proof ────────────────────────────────────────
+    /// Single sumcheck proof for: eq(τ,b)·C(b) + μ·eq(τ_perm,b)·h(b) = 0.
+    pub combined_proof: SumcheckProof<F>,
     /// Lookup proofs (one per lookup table, empty if no lookups).
     pub lookup_proofs: Vec<LookupProof<F>>,
 
-    // ── Public data ──────────────────────────────────────────────────────
-    /// Public inputs.
+    // ── Public data ────────────────────────────────────────────────────
     pub public_inputs: Vec<F>,
-    /// Challenges used (for verifier reference / debugging).
+    pub public_inputs_hash: plonky2::hash::hash_types::HashOut<F>,
+    /// Fiat-Shamir challenges.
     pub alpha: F,
     pub beta: F,
     pub gamma: F,
     pub tau: Vec<F>,
     pub tau_perm: Vec<F>,
-    /// PCS-bound constraint evaluation C(r) at the sumcheck output point.
-    /// Computed by the prover as the flattened extension-field combined constraint.
-    /// The Solidity verifier checks: constraintFinalEval == eq(τ, r) · pcs_constraint_eval.
-    pub pcs_constraint_eval: F,
-    /// PCS-bound permutation numerator h(r_perm) at the permutation sumcheck output point.
-    /// The Solidity verifier checks: permFinalEval == pcs_perm_numerator_eval.
-    pub pcs_perm_numerator_eval: F,
-    /// Circuit dimensions for verifier decomposition of individual_evals.
+    /// Combined sumcheck combination scalar.
+    pub mu: F,
+    /// Circuit dimensions.
     pub num_wires: usize,
     pub num_routed_wires: usize,
     pub num_constants: usize,

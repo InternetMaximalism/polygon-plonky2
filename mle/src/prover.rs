@@ -1,12 +1,11 @@
 /// Integrated MLE prover combining all sub-protocols.
 ///
-/// Takes a Plonky2 circuit + witness and produces an MLE proof using:
-/// 1. MLE construction from raw evaluation tables
-/// 2. Split-commit WHIR PCS (preprocessed + witness in one proof)
-/// 3. Fiat-Shamir (Keccak) for all challenges
-/// 4. Zero-check sumcheck for gate constraints
-/// 5. Log-derivative permutation check
-/// 6. Unified PCS evaluation proof
+/// Architecture: Combined sumcheck (constraint + permutation) with single output
+/// point r. Two WHIR proofs:
+///   1. Main split-commit: preprocessed + witness polynomials (committed before challenges)
+///   2. Auxiliary single-vector: C̃ + h̃ batched (committed after challenges, before sumcheck)
+///
+/// All evaluations are at the single combined sumcheck output point r.
 use anyhow::Result;
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::witness::PartialWitness;
@@ -21,9 +20,8 @@ use crate::commitment::whir_pcs::{plonky2_vec_to_ark, WhirPCS, WHIR_SESSION_SPLI
 use crate::constraint_eval::{compute_combined_constraints, flatten_extension_constraints};
 use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtension};
 use crate::eq_poly;
-use crate::permutation::logup::PermutationProof;
 use crate::proof::{MleProof, MleVerificationKey};
-use crate::sumcheck::prover::{compute_claimed_sum, prove_sumcheck_product};
+use crate::sumcheck::prover::prove_sumcheck_combined;
 use crate::transcript::Transcript;
 
 /// Derive the deterministic batching scalar for preprocessed polynomials.
@@ -31,8 +29,6 @@ use crate::transcript::Transcript;
 /// SECURITY: This must produce the same value during setup and proving for the
 /// same circuit. It is derived solely from the circuit_digest (verifying key hash)
 /// using a dedicated mini-transcript with its own domain separation.
-/// The value is public — security comes from the WHIR commitment binding, not
-/// from batch_r secrecy.
 pub fn derive_preprocessed_batch_r<F: RichField>(circuit_digest: &[F]) -> F {
     let mut t = Transcript::new();
     t.domain_separate("preprocessed-batch-r");
@@ -41,9 +37,6 @@ pub fn derive_preprocessed_batch_r<F: RichField>(circuit_digest: &[F]) -> F {
 }
 
 /// Build the batched preprocessed MLE from constants and sigmas.
-///
-/// Returns (batched_mle, preprocessed_mles) where preprocessed_mles are
-/// [const_0, ..., const_C, sigma_0, ..., sigma_R].
 fn build_preprocessed_batch<'a, F: RichField>(
     const_mles: &'a [DenseMultilinearExtension<F>],
     sigma_mles: &'a [DenseMultilinearExtension<F>],
@@ -53,9 +46,6 @@ fn build_preprocessed_batch<'a, F: RichField>(
     DenseMultilinearExtension<F>,
     Vec<&'a DenseMultilinearExtension<F>>,
 ) {
-    // INTENTIONALLY SIMPLE: Collect preprocessed MLEs in fixed order
-    // (constants first, then sigmas) matching the batch decomposition
-    // expected by the verifier.
     let mut preprocessed_mles: Vec<&DenseMultilinearExtension<F>> = Vec::new();
     for m in const_mles {
         preprocessed_mles.push(m);
@@ -82,16 +72,6 @@ fn build_preprocessed_batch<'a, F: RichField>(
 }
 
 /// Compute the MLE verification key for a circuit (setup phase).
-///
-/// This is called once per circuit after `CircuitBuilder::build()`.
-/// The VK contains the WHIR commitment root for the preprocessed polynomials
-/// (constants + sigmas), which is used by the verifier to ensure the prover
-/// cannot substitute fabricated preprocessed data.
-///
-/// SECURITY: The preprocessed_commitment_root in the returned VK binds the
-/// verifier to the specific gate selectors, constant values, and permutation
-/// routing of this circuit. An attacker using different constants/sigmas would
-/// produce a different Merkle root, causing verification to fail.
 pub fn mle_setup<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
@@ -102,7 +82,6 @@ where
     let degree_bits = common_data.degree_bits();
     let num_routed_wires = common_data.config.num_routed_wires;
 
-    // Extract circuit_digest
     let digest_bytes =
         serde_json::to_vec(&prover_data.circuit_digest).expect("circuit_digest serialization");
     let circuit_digest: Vec<F> = {
@@ -111,17 +90,13 @@ where
         hash_out.elements.to_vec()
     };
 
-    // Build preprocessed MLEs from prover_data
-    // constant_evals is row-major [row][col], sigmas is row-major [row][col]
     let const_mles = row_major_to_mles(&prover_data.constant_evals, common_data.num_constants);
     let sigma_mles = row_major_to_mles(&prover_data.sigmas, num_routed_wires);
 
-    // Batch preprocessed polynomials with deterministic batch_r
     let batch_r_pre = derive_preprocessed_batch_r(&circuit_digest);
     let (preprocessed_batched, _) =
         build_preprocessed_batch(&const_mles, &sigma_mles, batch_r_pre, degree_bits);
 
-    // Convert to Goldilocks and compute WHIR commitment root
     let goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
         preprocessed_batched
             .evaluations
@@ -146,8 +121,6 @@ where
 }
 
 /// Generate an MLE proof for a Plonky2 circuit.
-///
-/// This is the main entry point for the MLE proving system.
 pub fn mle_prove<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
@@ -158,12 +131,8 @@ where
     C::Hasher: Hasher<F>,
     C::InnerHasher: Hasher<F>,
 {
-    // Step 1: Extract raw evaluation tables from Plonky2
     let tables = extract_evaluation_tables::<F, C, D>(prover_data, common_data, inputs, timing)?;
 
-    // SECURITY: Extract circuit_digest (verifying key hash) to bind the proof
-    // to a specific Plonky2 circuit. This is the first thing absorbed into the
-    // Fiat-Shamir transcript, matching the standard Plonky2 verifier.
     let digest_bytes =
         serde_json::to_vec(&prover_data.circuit_digest).expect("circuit_digest serialization");
     let circuit_digest: Vec<F> = {
@@ -176,9 +145,6 @@ where
 }
 
 /// Generate an MLE proof from pre-extracted evaluation tables.
-///
-/// This allows decoupling the witness generation (Plonky2-specific) from the
-/// MLE proof generation (generic).
 pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     common_data: &CommonCircuitData<F, D>,
     tables: &EvaluationTables<F>,
@@ -186,44 +152,32 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
 ) -> Result<MleProof<F>> {
     let degree = tables.degree;
     let degree_bits = tables.degree_bits;
-    let _num_wires = tables.num_wires;
     let num_routed_wires = tables.num_routed_wires;
 
-    let _prover_start = std::time::Instant::now();
     eprintln!("[prover] degree_bits={degree_bits}, degree={degree}");
 
-    // Step 2: Initialize transcript with circuit identity
-    // SECURITY: Absorb circuit_digest first to bind this proof to the specific
-    // Plonky2 circuit (verifying key). Without this, an attacker could forge a
-    // proof for a trivial circuit and claim it verifies the target circuit.
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 1: Commit preprocessed + witness
+    // ═══════════════════════════════════════════════════════════════════
     let mut transcript = Transcript::new();
     transcript.domain_separate("circuit");
     transcript.absorb_field_vec(circuit_digest);
-    // Absorb public inputs into transcript
     transcript.absorb_field_vec(&tables.public_inputs);
 
-    // Step 3: Build MLEs from evaluation tables
     let _t = std::time::Instant::now();
     let wire_mles = tables_to_mles(&tables.wire_values);
     let const_mles = row_major_to_mles(&tables.constant_values, common_data.num_constants);
     let sigma_mles = row_major_to_mles(&tables.sigma_values, num_routed_wires);
-    eprintln!("[prover] step3 build MLEs: {:?}", _t.elapsed());
+    eprintln!("[prover] build MLEs: {:?}", _t.elapsed());
 
     let whir_pcs = WhirPCS::for_num_vars(degree_bits);
 
-    // Step 4: Unified WHIR split commit + prove
-    //
-    // SECURITY: The split-commit API commits each vector individually (getting
-    // per-vector Merkle roots) but produces a single proof with cross-term binding.
-    // This binds preprocessed and witness polynomials cryptographically.
-
-    // 4a: Build and commit preprocessed polynomial
+    // Preprocessed batch + commit root
     let _t = std::time::Instant::now();
     let batch_r_pre: F = derive_preprocessed_batch_r(circuit_digest);
     let (preprocessed_batched, preprocessed_mles) =
         build_preprocessed_batch(&const_mles, &sigma_mles, batch_r_pre, degree_bits);
 
-    // Convert preprocessed to arkworks field
     let pre_goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
         preprocessed_batched
             .evaluations
@@ -236,24 +190,14 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
             .collect();
     let pre_ark_evals = plonky2_vec_to_ark(&pre_goldilocks_evals);
 
-    // Compute pre_root deterministically (throwaway commit).
-    // This is needed because batch_r_wit depends on pre_root being absorbed
-    // into the main transcript, but commit_split needs both vectors upfront.
     let pre_goldilocks_mle = DenseMultilinearExtension::new(pre_goldilocks_evals);
     let pre_root = whir_pcs.commit_root(&pre_goldilocks_mle);
-    eprintln!(
-        "[prover] step4a preprocessed commit_root: {:?}",
-        _t.elapsed()
-    );
 
-    // 4b: Absorb pre_root into main transcript, derive batch_r_wit
     transcript.absorb_bytes(&pre_root);
-
     transcript.domain_separate("batch-commit-witness");
     let batch_r_wit: F = transcript.squeeze_challenge();
 
-    // 4c: Build batched witness polynomial using batch_r_wit
-    let _t = std::time::Instant::now();
+    // Witness batch
     let mut wit_batched_evals = vec![F::ZERO; 1 << degree_bits];
     let mut r_pow = F::ONE;
     for mle in &wire_mles {
@@ -264,12 +208,8 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         }
         r_pow *= batch_r_wit;
     }
-    let wit_batched_mle = DenseMultilinearExtension::new(wit_batched_evals);
-
-    // Convert witness to arkworks field
     let wit_goldilocks_evals: Vec<plonky2_field::goldilocks_field::GoldilocksField> =
-        wit_batched_mle
-            .evaluations
+        wit_batched_evals
             .iter()
             .map(|&f| {
                 plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
@@ -279,30 +219,17 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
             .collect();
     let wit_ark_evals = plonky2_vec_to_ark(&wit_goldilocks_evals);
 
-    // 4d: Split commit both vectors
-    let commit_data = whir_pcs.commit_split(&[&pre_ark_evals, &wit_ark_evals], WHIR_SESSION_SPLIT);
-
-    // SECURITY: Verify that the deterministic pre_root matches the split commit root.
-    // This is a sanity check — both use the same polynomial + params + session.
-    assert_eq!(
-        pre_root, commit_data.roots[0],
-        "SECURITY: Deterministic preprocessed root mismatch between \
-         commit_root() and commit_split(). This indicates a configuration error."
-    );
+    // Split commit preprocessed + witness (phase 1 — before challenges)
+    let mut commit_data =
+        whir_pcs.commit_split(&[&pre_ark_evals, &wit_ark_evals], WHIR_SESSION_SPLIT);
+    assert_eq!(pre_root, commit_data.roots[0]);
     let witness_root = commit_data.roots[1].clone();
-    eprintln!("[prover] step4d split commit: {:?}", _t.elapsed());
-
-    // 4e: Absorb witness root into main transcript
     transcript.absorb_bytes(&witness_root);
+    eprintln!("[prover] phase1 commit: {:?}", _t.elapsed());
 
-    // 4f: Single WHIR prove
-    let _t = std::time::Instant::now();
-    let (whir_eval_proof, whir_eval_ext3s) = whir_pcs.prove_split_with_eval(commit_data);
-    let pre_eval_ext3 = whir_eval_ext3s[0];
-    let wit_eval_ext3 = whir_eval_ext3s[1];
-    eprintln!("[prover] step4f split prove: {:?}", _t.elapsed());
-
-    // Step 5: Derive challenges
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 2: Derive challenges + compute C̃ and h̃
+    // ═══════════════════════════════════════════════════════════════════
     transcript.domain_separate("challenges");
     let beta: F = transcript.squeeze_challenge();
     let gamma: F = transcript.squeeze_challenge();
@@ -310,44 +237,8 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let tau: Vec<F> = transcript.squeeze_challenges(degree_bits);
     let tau_perm: Vec<F> = transcript.squeeze_challenges(degree_bits);
 
-    // Step 6: Permutation check
+    // Compute C̃ (constraint MLE)
     let _t = std::time::Instant::now();
-    transcript.domain_separate("permutation");
-    let (perm_sumcheck, perm_challenges, perm_claimed_sum) =
-        crate::permutation::logup::prove_permutation_check(
-            &tables.wire_values,
-            &tables.sigma_values,
-            &tables.k_is,
-            &tables.subgroup,
-            num_routed_wires,
-            degree,
-            beta,
-            gamma,
-            &tau_perm,
-            &mut transcript,
-        );
-
-    eprintln!("[prover] step6 permutation: {:?}", _t.elapsed());
-
-    // Step 6b: Lookup argument (if circuit has lookup tables)
-    let has_lookup = !common_data.luts.is_empty();
-    let lookup_proofs = if has_lookup {
-        transcript.domain_separate("lookup");
-        let _delta_lookup: F = transcript.squeeze_challenge();
-        let _beta_lookup: F = transcript.squeeze_challenge();
-
-        // TODO: Implement full lookup data extraction from evaluation tables.
-        Vec::new()
-    } else {
-        Vec::new()
-    };
-
-    let _t = std::time::Instant::now();
-    // Step 7: Compute combined gate constraints (extension field)
-    // SECURITY: Gate constraints live in F::Extension (D=2 components).
-    // ALL components must be zero for the constraint to be satisfied.
-    // We flatten the D components into a single base-field value per row
-    // using a fresh Fiat-Shamir challenge for the extension combination.
     let combined_ext = compute_combined_constraints::<F, D>(
         common_data,
         &tables.wire_values,
@@ -356,57 +247,12 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         &tables.public_inputs_hash,
         degree,
     );
-
     transcript.domain_separate("extension-combine");
     let ext_challenge: F = transcript.squeeze_challenge();
-
-    let combined_constraints = flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
-
-    eprintln!("[prover] step7 constraints: {:?}", _t.elapsed());
-
-    // Pad to power of 2
-    let mut padded_constraints = combined_constraints;
+    let mut padded_constraints = flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
     padded_constraints.resize(1 << degree_bits, F::ZERO);
 
-    // Step 8: Zero-check sumcheck
-    let _t = std::time::Instant::now();
-    transcript.domain_separate("zero-check");
-    let eq_table = eq_poly::eq_evals(&tau);
-    let _claimed_sum = compute_claimed_sum(&eq_table, &padded_constraints);
-
-    let mut eq_mle = DenseMultilinearExtension::new(eq_table);
-    let mut constraint_mle = DenseMultilinearExtension::new(padded_constraints);
-
-    let (constraint_proof, sumcheck_challenges) =
-        prove_sumcheck_product(&mut eq_mle, &mut constraint_mle, 2, &mut transcript);
-
-    eprintln!("[prover] step8 zero-check sumcheck: {:?}", _t.elapsed());
-
-    // Step 9: Evaluate individual MLEs at the sumcheck point, split by commitment
-    let _t = std::time::Instant::now();
-
-    // Preprocessed evaluations: [const_0(r), ..., const_C(r), sigma_0(r), ..., sigma_R(r)]
-    let mut preprocessed_individual_evals = Vec::with_capacity(preprocessed_mles.len());
-    for mle in &preprocessed_mles {
-        preprocessed_individual_evals.push(mle.evaluate(&sumcheck_challenges));
-    }
-
-    // Witness evaluations: [wire_0(r), ..., wire_W(r)]
-    let mut witness_individual_evals = Vec::with_capacity(wire_mles.len());
-    for mle in &wire_mles {
-        witness_individual_evals.push(mle.evaluate(&sumcheck_challenges));
-    }
-
-    // Step 9b: Compute PCS-bound oracle values for the Solidity verifier.
-    let constraint_mle_for_eval = DenseMultilinearExtension::new(
-        flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge)
-            .into_iter()
-            .chain(std::iter::repeat(F::ZERO))
-            .take(1 << degree_bits)
-            .collect(),
-    );
-    let pcs_constraint_eval = constraint_mle_for_eval.evaluate(&sumcheck_challenges);
-
+    // Compute h̃ (permutation numerator MLE)
     let id_values = crate::permutation::logup::compute_identity_values(
         &tables.k_is,
         &tables.subgroup,
@@ -424,62 +270,194 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     );
     let mut perm_h_padded = perm_h;
     perm_h_padded.resize(1 << degree_bits, F::ZERO);
-    let perm_h_mle = DenseMultilinearExtension::new(perm_h_padded);
-    let pcs_perm_numerator_eval = perm_h_mle.evaluate(&perm_challenges);
+    eprintln!("[prover] phase2 constraints+perm: {:?}", _t.elapsed());
 
-    // Recompute batched evaluations for each commitment
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 3: Auxiliary commitment (C̃ + h̃ batched)
+    //
+    // SECURITY: C̃ and h̃ depend on challenges (alpha, beta, gamma) derived
+    // AFTER the main commitment. A second commitment round makes their
+    // evaluations WHIR-bound, closing the oracle gap.
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    transcript.domain_separate("aux-commit");
+    let batch_r_aux: F = transcript.squeeze_challenge();
+
+    // P_aux(x) = C̃(x) + batch_r_aux · h̃(x)
+    let mut aux_batched_evals = vec![F::ZERO; 1 << degree_bits];
+    for (j, &c_val) in padded_constraints.iter().enumerate() {
+        aux_batched_evals[j] += c_val;
+    }
+    for (j, &h_val) in perm_h_padded.iter().enumerate() {
+        if j < aux_batched_evals.len() {
+            aux_batched_evals[j] += batch_r_aux * h_val;
+        }
+    }
+
+    // Convert auxiliary to arkworks field
+    let aux_ark_evals = plonky2_vec_to_ark(
+        &aux_batched_evals
+            .iter()
+            .map(|&f| {
+                plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                    f.to_canonical_u64(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    // Add auxiliary to the SAME WHIR session (phased commit — vector 2)
+    // SECURITY: commit_additional uses the same WHIR ProverState, ensuring
+    // cross-term OOD binding with preprocessed and witness vectors.
+    let aux_root = whir_pcs.commit_additional(&mut commit_data, &aux_ark_evals);
+    transcript.absorb_bytes(&aux_root);
+    eprintln!("[prover] phase3 aux commit (phased): {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 4: Derive combination scalar μ + lookups
+    // ═══════════════════════════════════════════════════════════════════
+    transcript.domain_separate("combined-sumcheck");
+    let mu: F = transcript.squeeze_challenge();
+
+    // Lookup (TODO)
+    let has_lookup = !common_data.luts.is_empty();
+    let lookup_proofs = if has_lookup {
+        transcript.domain_separate("lookup");
+        let _delta_lookup: F = transcript.squeeze_challenge();
+        let _beta_lookup: F = transcript.squeeze_challenge();
+        Vec::new()
+    } else {
+        Vec::new()
+    };
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 5: Combined sumcheck
+    //   Σ_b [eq(τ,b)·C̃(b) + μ·eq(τ_perm,b)·h̃(b)] = 0
+    // Single sumcheck → single output point r
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    let eq_table = eq_poly::eq_evals(&tau);
+
+    let mut eq_mle = DenseMultilinearExtension::new(eq_table);
+    let mut constraint_mle = DenseMultilinearExtension::new(padded_constraints.clone());
+    let mut h_mle = DenseMultilinearExtension::new(perm_h_padded.clone());
+
+    // Max degree: eq(τ,·)·C(·) has degree 2 per variable (product of two multilinear),
+    // μ·h(·) has degree 1 per variable (scaled multilinear). Combined: degree 2.
+    let max_constraint_degree = 2;
+    let (combined_proof, sumcheck_challenges) = prove_sumcheck_combined(
+        &mut eq_mle,
+        &mut constraint_mle,
+        &mut h_mle,
+        mu,
+        max_constraint_degree,
+        &mut transcript,
+    );
+    eprintln!("[prover] phase5 combined sumcheck: {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 6: Evaluate at sumcheck output point r
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+
+    // Individual evals from main commitment
+    let preprocessed_individual_evals: Vec<F> = preprocessed_mles
+        .iter()
+        .map(|m| m.evaluate(&sumcheck_challenges))
+        .collect();
+    let witness_individual_evals: Vec<F> = wire_mles
+        .iter()
+        .map(|m| m.evaluate(&sumcheck_challenges))
+        .collect();
+
+    // Auxiliary oracle evals at r
+    let constraint_mle_eval = DenseMultilinearExtension::new(padded_constraints);
+    let perm_h_mle_eval = DenseMultilinearExtension::new(perm_h_padded);
+    let aux_constraint_eval = constraint_mle_eval.evaluate(&sumcheck_challenges);
+    let aux_perm_eval = perm_h_mle_eval.evaluate(&sumcheck_challenges);
+    let aux_eval_value = aux_constraint_eval + batch_r_aux * aux_perm_eval;
+
+    // Batched main evaluations
     let mut preprocessed_eval_value = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &preprocessed_individual_evals {
         preprocessed_eval_value += r_pow * eval;
         r_pow *= batch_r_pre;
     }
-
     let mut witness_eval_value = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &witness_individual_evals {
         witness_eval_value += r_pow * eval;
         r_pow *= batch_r_wit;
     }
+    eprintln!("[prover] phase6 evals: {:?}", _t.elapsed());
 
-    eprintln!("[prover] step9 individual evals + pcs: {:?}", _t.elapsed());
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 7: WHIR prove — main split at r, auxiliary at r
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    let r_gl: Vec<plonky2_field::goldilocks_field::GoldilocksField> = sumcheck_challenges
+        .iter()
+        .map(|&f| {
+            plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                f.to_canonical_u64(),
+            )
+        })
+        .collect();
 
-    // Step 10: Proof assembly (WHIR proof already generated in step 4f)
+    // Single WHIR proof for all 3 vectors at r (phased split-commit)
+    // commit_data now contains [preprocessed, witness, auxiliary]
+    let (whir_eval_proof, whir_per_point_evals) =
+        whir_pcs.prove_split_with_eval(commit_data, &[&r_gl]);
+    // whir_per_point_evals[0] = [P_pre(r), P_wit(r), P_aux(r)]
+    let pre_eval_ext3 = whir_per_point_evals[0][0];
+    let wit_eval_ext3 = whir_per_point_evals[0][1];
+    let aux_whir_eval_ext3 = whir_per_point_evals[0][2];
+
+    eprintln!("[prover] phase7 WHIR prove: {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 8: Proof assembly
+    // ═══════════════════════════════════════════════════════════════════
     transcript.domain_separate("pcs-eval");
 
     Ok(MleProof {
         circuit_digest: circuit_digest.to_vec(),
-        // Unified WHIR PCS
+        // Main WHIR PCS
         whir_eval_proof,
         preprocessed_root: pre_root,
         witness_root,
-        // Preprocessed batch
+        // Preprocessed batch at r
         preprocessed_eval_value,
         preprocessed_batch_r: batch_r_pre,
         preprocessed_individual_evals,
         preprocessed_whir_eval_ext3: pre_eval_ext3,
-        // Witness batch
+        // Witness batch at r
         witness_eval_value,
         witness_batch_r: batch_r_wit,
         witness_individual_evals,
         witness_whir_eval_ext3: wit_eval_ext3,
-        // Sub-protocol proofs
-        constraint_proof,
-        permutation_proof: PermutationProof {
-            sumcheck_proof: perm_sumcheck,
-            challenges: perm_challenges,
-            claimed_sum: perm_claimed_sum,
-        },
+        // Auxiliary polynomial (3rd vector in same WHIR proof)
+        aux_commitment_root: aux_root,
+        aux_batch_r: batch_r_aux,
+        aux_constraint_eval,
+        aux_perm_eval,
+        aux_eval_value,
+        aux_whir_eval_ext3,
+        // Sumcheck output
+        sumcheck_challenges: sumcheck_challenges.clone(),
+        // Combined sumcheck
+        combined_proof,
         lookup_proofs,
         // Public data
         public_inputs: tables.public_inputs.clone(),
+        public_inputs_hash: tables.public_inputs_hash,
         alpha,
         beta,
         gamma,
         tau,
         tau_perm,
-        pcs_constraint_eval,
-        pcs_perm_numerator_eval,
+        mu,
         num_wires: tables.num_wires,
         num_routed_wires,
         num_constants: common_data.num_constants,

@@ -5,10 +5,10 @@ A sumcheck + multilinear PCS proof system that reuses Plonky2's circuit format
 proof engine with a multilinear-native pipeline:
 
 - **MLE construction** on `{0,1}^n` from raw evaluation tables
-- **Zero-check sumcheck** for gate constraint verification
+- **Combined sumcheck**: single sumcheck merging constraint zero-check and permutation logUp (n rounds instead of 2n)
 - **Log-derivative permutation argument** (replaces univariate grand product)
 - **Log-derivative lookup argument** (replaces Sum/RE/LDC)
-- **Unified split-commit WHIR PCS**: single proof covering both preprocessed (constants+sigmas) and witness (wires) with per-vector Merkle roots for VK binding
+- **Phased 3-vector WHIR PCS**: single proof covering preprocessed, witness, and auxiliary (C̃+h̃) polynomials via phased `commit_single` API. All evaluations at sumcheck output point r with direct WHIR binding
 - **Keccak256 Fiat-Shamir** (single transcript, no dual-system ambiguity)
 - **Solidity on-chain verifier** with Yul-optimized field arithmetic
 
@@ -188,29 +188,33 @@ Vector 2 (absorb 42): 5382117256048105213
 Copy the numeric values into `contracts/test/TranscriptCompat.t.sol` constants
 (`V1_EMPTY_SQUEEZE`, etc.) and re-run `forge test` to confirm Solidity matches.
 
-## Unified Split-Commit WHIR PCS Architecture
+## Phased 3-Vector WHIR PCS Architecture
 
-The proof system uses a **single WHIR proof** covering both preprocessed and
-witness polynomials via the split-commit API. Each vector is committed
-individually (yielding per-vector Merkle roots), but the proof is unified:
+The proof system uses a **single WHIR proof** covering three polynomial vectors
+via the phased `commit_single` API:
 
-1. **Preprocessed vector** (constants + sigmas): committed during setup,
-   Merkle root stored in the Verification Key (VK). The Solidity verifier
-   receives this as a deploy-time constant (`preprocessedCommitmentRoot`).
+1. **Preprocessed vector** (constants + sigmas): committed in Phase 1 (before
+   challenges). Merkle root stored in the VK.
 
-2. **Witness vector** (wires): committed per-proof. Merkle root absorbed
-   into the Fiat-Shamir transcript to bind all subsequent challenges.
+2. **Witness vector** (wires): committed in Phase 1 (before challenges).
+   Merkle root absorbed into the Fiat-Shamir transcript.
 
-3. **Cross-term binding**: the unified WHIR proof includes cross-OOD
-   evaluations (each vector evaluated at the other's OOD points), providing
-   cryptographic binding between preprocessed and witness polynomials.
+3. **Auxiliary vector** (C̃ + h̃ batched): committed in Phase 2 (after
+   α, β, γ challenges are derived). Contains the constraint MLE C̃ and
+   permutation numerator MLE h̃ batched with a fresh Fiat-Shamir scalar.
 
-This design prevents an attacker from substituting fabricated gate selectors
-or permutation routing that trivially satisfy constraints. The VK binding ensures
-the prover used the correct preprocessed polynomials for the target circuit.
+All three vectors are opened at the **single combined sumcheck output point r**
+in one unified WHIR proof. Cross-term OOD evaluations bind all vectors.
 
-A single WHIR session name is used for domain separation:
-- Split-commit: `"plonky2-mle-whir-split"`
+**Combined sumcheck**: constraint zero-check and permutation logUp are merged
+into a single sumcheck: `Σ_b [eq(τ,b)·C̃(b) + μ·h̃(b)] = 0`, producing n
+rounds instead of 2n, halving sumcheck gas cost.
+
+**Security**: WHIR directly binds:
+- Individual wire/const/sigma evaluations at r (from preprocessed + witness vectors)
+- C̃(r) and h̃(r) (from auxiliary vector via Schwartz-Zippel decomposition)
+
+No prover-claimed oracle values are trusted without WHIR binding.
 
 ### API
 
@@ -223,44 +227,6 @@ let proof = mle_prove::<F, C, D>(&prover_data, &common_data, witness, &mut timin
 
 // Verify
 mle_verify::<F, D>(&common_data, &vk, &proof)?;
-```
-
-### Proof Structure
-
-```rust
-pub struct MleProof<F: Field> {
-    pub circuit_digest: Vec<F>,              // 4 Goldilocks elements (circuit identity)
-
-    // ── Unified WHIR PCS ────────────────────────────────────────────────
-    pub whir_eval_proof: WhirEvalProof,      // Single proof (transcript + hints)
-    pub preprocessed_root: Vec<u8>,          // 32 bytes (VK binding)
-    pub witness_root: Vec<u8>,               // 32 bytes
-
-    // ── Preprocessed batch evaluation ───────────────────────────────────
-    pub preprocessed_eval_value: F,          // Batched eval
-    pub preprocessed_batch_r: F,             // Deterministic from circuit_digest
-    pub preprocessed_individual_evals: Vec<F>, // [const_0..C, sigma_0..R]
-    pub preprocessed_whir_eval_ext3: Field64_3,
-
-    // ── Witness batch evaluation ────────────────────────────────────────
-    pub witness_eval_value: F,               // Batched eval
-    pub witness_batch_r: F,                  // Fiat-Shamir derived
-    pub witness_individual_evals: Vec<F>,    // [wire_0..W]
-    pub witness_whir_eval_ext3: Field64_3,
-
-    // ── Sub-protocol proofs ─────────────────────────────────────────────
-    pub constraint_proof: SumcheckProof<F>,
-    pub permutation_proof: PermutationProof<F>,
-    pub lookup_proofs: Vec<LookupProof<F>>,
-
-    // ── Public data + challenges ────────────────────────────────────────
-    pub public_inputs: Vec<F>,
-    pub alpha: F, pub beta: F, pub gamma: F,
-    pub tau: Vec<F>, pub tau_perm: Vec<F>,
-    pub pcs_constraint_eval: F,
-    pub pcs_perm_numerator_eval: F,
-    pub num_wires: usize, pub num_routed_wires: usize, pub num_constants: usize,
-}
 ```
 
 ### Verification Key (VK)
@@ -391,7 +357,9 @@ The verifier performs:
    it matches `proof.preprocessedBatchR`.
 2. **VK binding** — checks `proof.preprocessedRoot == preprocessedCommitmentRoot`.
 3. **Single WHIR verification** — one call to `SpongefishWhirVerify.verifyWhirProof()`
-   with combined evaluations `[preprocessedEval, witnessEval]`.
+   with 3-vector evaluations `[preprocessedEval, witnessEval, auxEval]`.
+4. **Auxiliary decomposition** — checks `P_aux(r) = C̃(r) + batch_r_aux · h̃(r)`.
+5. **Combined final eval** — checks `eq(τ,r)·C̃(r) + μ·h̃(r) = finalEval`.
 
 In production, `preprocessedCommitmentRoot` would be set as an immutable
 contract parameter at deployment time (one VK per circuit).
@@ -408,12 +376,14 @@ contract parameter at deployment time (one VK per circuit).
 [absorb] witness_commitment_root (32 bytes)
 [domain] "challenges"
 [squeeze] beta, gamma, alpha, tau, tau_perm
-[domain] "permutation"
-         ... permutation sumcheck ...
 [domain] "extension-combine"
 [squeeze] ext_challenge
-[domain] "zero-check"
-         ... constraint sumcheck ...
+[domain] "aux-commit"
+[squeeze] batch_r_aux
+[absorb] auxiliary_commitment_root (32 bytes)        ← C̃+h̃ binding
+[domain] "combined-sumcheck"
+[squeeze] mu (combination scalar)
+         ... combined sumcheck (n rounds) ...
 [domain] "pcs-eval"
 ```
 
@@ -422,20 +392,31 @@ mini-transcript seeded with `circuit_digest` only.
 
 ### WHIR Internal Transcript (Split-Commit)
 
-Within the unified WHIR proof, the split-commit transcript has the following
-structure for 2 commitments (preprocessed + witness), each with `numVectors=1`:
+Within the unified WHIR proof, the phased split-commit transcript has the
+following structure for 3 commitments (preprocessed + witness + auxiliary),
+each with `numVectors=1`. The auxiliary commitment happens after challenges
+are derived from the first two roots:
 
 ```
+Phase 1 (before challenges):
 [prover_hash]  preprocessed Merkle root
 [verifier]     K OOD challenge points (Ext3)
 [prover]       K OOD answers for preprocessed vector
 [prover_hash]  witness Merkle root
 [verifier]     K OOD challenge points (Ext3)
 [prover]       K OOD answers for witness vector
-[prover]       K cross-term evaluations (witness at preprocessed OOD points)
-[prover]       K cross-term evaluations (preprocessed at witness OOD points)
-[verifier]     2 vector RLC coefficients
-[verifier]     (1 + 2K) constraint RLC coefficients
+
+(External: derive α, β, γ from roots → compute C̃, h̃ → batch into P_aux)
+
+Phase 2 (after challenges):
+[prover_hash]  auxiliary Merkle root (P_aux = C̃ + batch_r_aux · h̃)
+[verifier]     K OOD challenge points (Ext3)
+[prover]       K OOD answers for auxiliary vector
+
+Cross-terms + prove:
+[prover]       6K cross-term evaluations (3 vectors × 2 other vectors × K)
+[verifier]     3 vector RLC coefficients
+[verifier]     (1 + 3K) constraint RLC coefficients
                ... initial sumcheck ...
                ... intermediate rounds (if any) ...
                ... final vector + Merkle ...
@@ -444,14 +425,12 @@ structure for 2 commitments (preprocessed + witness), each with `numVectors=1`:
 
 ### WhirParams (Solidity)
 
-The `WhirParams` struct passed to the Solidity verifier includes:
-
 ```solidity
 struct WhirParams {
     uint256 numVariables;
     uint256 foldingFactor;
-    uint256 numVectors;        // Per-commitment vector count (typically 1)
-    uint256 numCommitments;    // Number of split-commit calls (2 for preprocessed + witness)
+    uint256 numVectors;        // Per-commitment vector count (1)
+    uint256 numCommitments;    // 3 (preprocessed + witness + auxiliary)
     uint256 outDomainSamples;
     uint256 inDomainSamples;
     uint256 initialSumcheckRounds;
@@ -494,57 +473,46 @@ Measured on Foundry with `--via-ir` and optimizer (200 runs):
 | Sumcheck verify 12 rounds | 353,209 |
 | Sumcheck verify 16 rounds | 478,558 |
 
-### End-to-End Verification Gas (Unified Split-Commit WHIR PCS)
+### End-to-End Verification Gas (Phased 3-Vector WHIR PCS)
 
 Measured from Solidity E2E tests (`MleE2ETest.t.sol`):
 
 | Circuit | degree_bits | Gates | verify() Gas |
 |---------|-------------|-------|-------------|
-| small_mul (5 chain muls) | 2 | 4 | **1,158,773** |
-| medium_mul (50 chain muls) | 3 | 8 | **1,444,884** |
-| large_mul (200 chain muls) | 4 | 16 | **1,698,640** |
-| poseidon_hash (4 inputs) | 2 | 4 | **1,157,939** |
-| recursive_verify (inner proof) | 11 | 2048 | **4,449,082** |
-| huge_mul (100K chain muls) | 13 | 8192 | **6,306,932** |
+| small_mul (5 chain muls) | 2 | 4 | **1,367,467** |
+| medium_mul (50 chain muls) | 3 | 8 | **1,674,131** |
+| large_mul (200 chain muls) | 4 | 16 | **1,979,151** |
+| poseidon_hash (4 inputs) | 2 | 4 | **1,384,317** |
+| recursive_verify (inner proof) | 11 | 2048 | **4,889,359** |
+| huge_mul (100K chain muls) | 13 | 8192 | **6,795,194** |
 
-The unified split-commit WHIR PCS reduces gas by 13-33% compared to the
-previous two-separate-proof architecture, with larger circuits benefiting most.
+Architecture: combined sumcheck (n rounds instead of 2n) + single WHIR proof
+covering 3 vectors (preprocessed + witness + auxiliary) via phased `commit_single`.
+All evaluations at sumcheck output point r with direct WHIR binding. Auxiliary
+polynomial C̃ + h̃ is committed after challenges, closing the oracle gap.
 
 ## Security Audit Status
 
-### Unified Split-Commit Architecture (latest)
+### Phased 3-Vector Architecture (latest)
 
-The split-commit migration consolidates two separate WHIR proofs into one,
-providing the following security properties:
+The current architecture provides complete soundness:
 
-- **VK binding**: Preprocessed Merkle root from split-commit is deterministic
-  and checked against the VK. Changing any constant or sigma value changes
-  the root, failing verification.
-- **Cross-term binding**: The unified WHIR proof includes cross-OOD evaluations
-  (each vector evaluated at the other's OOD points), cryptographically binding
-  preprocessed and witness polynomials within a single Fiat-Shamir chain.
-- **Domain separation**: Session name `"plonky2-mle-whir-split"` prevents
-  cross-protocol confusion with any legacy proof format.
+- **WHIR at sumcheck output point r**: All polynomial evaluations (wire, const,
+  sigma, C̃, h̃) are WHIR-bound at the actual sumcheck output point, not a
+  canonical point. This directly binds committed polynomials to the evaluation
+  point where the verifier checks constraints.
+- **Auxiliary commitment (C̃ + h̃)**: Committed AFTER challenges (α, β, γ) are
+  derived, using the phased `commit_single` API. WHIR cross-term OOD binding
+  ensures cryptographic binding with preprocessed and witness vectors.
+- **Combined sumcheck**: Constraint zero-check and permutation logUp merged
+  into a single sumcheck (n rounds), producing one output point r.
+- **Oracle values WHIR-bound**: C̃(r) and h̃(r) are extracted from the
+  auxiliary polynomial P_aux(r) = C̃(r) + batch_r_aux · h̃(r) via
+  Schwartz-Zippel decomposition (forgery probability ≤ 1/|F|).
+- **VK binding**: Preprocessed Merkle root checked against VK.
+- **Domain separation**: Session name `"plonky2-mle-whir-split"`.
 
   **LOOKUP TABLE NOT SUPPORTED NOW!!**
-
-### Previous Audit Findings (all addressed)
-
-An adversarial subagent audit of the two-commitment migration identified
-10 findings (3 HIGH, 3 MEDIUM, 2 LOW, 2 INFO). Addressed items:
-
-- **[HIGH] Shared WHIR session name** — Fixed: split-commit uses a single
-  session `"plonky2-mle-whir-split"` with unified proof
-- **[HIGH] WHIR canonical evaluation point** — Documented as known limitation.
-  Soundness relies on WHIR proximity testing (commitment binding for all evals).
-  Phase 2: move WHIR evaluation to sumcheck output point for stronger binding.
-- **[HIGH] Verifier does not recompute C(r)** — By design (oracle approach).
-  Soundness argument: committed polynomials are binding, Schwartz-Zippel over
-  batch_r ensures individual evals are correct, sumcheck proves constraint = 0.
-- **[MEDIUM] Public preprocessed batch_r** — Safe: VK binding makes polynomial
-  forgery impossible regardless of batch_r knowledge.
-- **[MEDIUM] Preprocessed WHIR proof is static** — By design: VK binding makes
-  replayability safe.
 
 ### Original Solidity Verifier Audit
 

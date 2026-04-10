@@ -151,12 +151,8 @@ fn generate_and_verify_all_fixtures() {
             proof.witness_individual_evals.len() + proof.preprocessed_individual_evals.len()
         );
         println!(
-            "  perm_rounds={}",
-            proof.permutation_proof.sumcheck_proof.round_polys.len()
-        );
-        println!(
-            "  constraint_rounds={}",
-            proof.constraint_proof.round_polys.len()
+            "  combined_sumcheck_rounds={}",
+            proof.combined_proof.round_polys.len()
         );
         println!(
             "  whir_proof_bytes={}",
@@ -187,14 +183,14 @@ fn generate_and_verify_all_fixtures() {
         assert_eq!(fixture.degree_bits, degree_bits);
 
         // Check all field elements survived serialization
-        for (i, rp) in fixture.perm_proof.round_polys.iter().enumerate() {
+        for (i, rp) in fixture.combined_proof.round_polys.iter().enumerate() {
             for (j, s) in rp.iter().enumerate() {
                 let parsed = parse_field_string(s);
-                let original = proof.permutation_proof.sumcheck_proof.round_polys[i].evaluations[j]
+                let original = proof.combined_proof.round_polys[i].evaluations[j]
                     .to_canonical_u64();
                 assert_eq!(
                     parsed, original,
-                    "{name}: perm round[{i}][{j}] fixture mismatch: {parsed} != {original}"
+                    "{name}: combined round[{i}][{j}] fixture mismatch: {parsed} != {original}"
                 );
             }
         }

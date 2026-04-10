@@ -14,7 +14,7 @@ use whir::algebra::embedding::Basefield;
 use whir::algebra::fields::{Field64 as ArkGoldilocks, Field64_3};
 use whir::algebra::linear_form::{Evaluate, LinearForm, MultilinearExtension};
 use whir::parameters::ProtocolParameters;
-use whir::protocols::whir::{Config as WhirConfig, SplitWitness};
+use whir::protocols::whir::{Config as WhirConfig, SplitWitness, Witness as WhirWitness};
 use whir::transcript::codecs::Empty;
 #[cfg(debug_assertions)]
 use whir::transcript::Interaction;
@@ -27,6 +27,9 @@ pub const WHIR_SESSION_NAME: &str = "plonky2-mle-whir";
 /// WHIR session name for the split-commit mode (preprocessed + witness in one proof).
 /// SECURITY: Must differ from legacy session names to prevent cross-protocol confusion.
 pub const WHIR_SESSION_SPLIT: &str = "plonky2-mle-whir-split";
+/// WHIR session name for the auxiliary commitment (C̃ + h̃ oracle polynomials).
+/// SECURITY: Must differ from all other session names to prevent cross-protocol confusion.
+pub const WHIR_SESSION_AUX: &str = "plonky2-mle-whir-aux";
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Field conversion
@@ -93,17 +96,21 @@ pub struct WhirEvalProof {
     pub pattern: Vec<Interaction>,
 }
 
-/// Intermediate state for split-commit proving flow.
+/// Intermediate state for phased split-commit proving flow.
 ///
-/// Holds the WHIR config, prover state, split witness, and per-vector
-/// evaluations between the commit and prove phases.
+/// Supports adding vectors in phases: commit some vectors, derive external
+/// challenges from their roots, then commit additional vectors before proving.
+///
+/// SECURITY: The WHIR internal transcript is advanced by each commit_single call.
+/// External operations between commits do NOT affect the WHIR transcript.
+/// The prove step computes cross-term OOD evaluations across ALL vectors.
 pub struct WhirSplitCommitData {
     /// WHIR config for this polynomial size.
     pub config: WhirConfig<Basefield<Field64_3>>,
-    /// Prover state (WHIR-internal transcript, using default Keccak256Chain + StdRng).
+    /// Prover state (WHIR-internal transcript).
     pub prover_state: ProverState,
-    /// Split witness with per-vector Merkle roots.
-    pub split_witness: SplitWitness<Field64_3, Basefield<Field64_3>>,
+    /// Per-vector witnesses collected from commit_single calls.
+    pub witnesses: Vec<WhirWitness<Field64_3, Basefield<Field64_3>>>,
     /// Per-vector polynomial evaluations in arkworks representation.
     pub ark_evals_list: Vec<Vec<ArkGoldilocks>>,
     /// Per-vector Merkle root hashes (32 bytes each).
@@ -192,14 +199,13 @@ impl WhirPCS {
         proof.narg_string[..32.min(proof.narg_string.len())].to_vec()
     }
 
-    /// Commit to multiple vectors individually using split-commit mode.
+    /// Begin a phased split-commit by committing initial vectors.
     ///
-    /// Each vector gets its own Merkle tree and root, but they share a single
-    /// WHIR transcript. This allows extracting individual commitment roots
-    /// (e.g., for VK binding) while producing one unified proof.
+    /// Each vector gets its own Merkle tree and root. The returned
+    /// `WhirSplitCommitData` can be extended with `commit_additional`
+    /// before calling `prove_split_with_eval`.
     ///
-    /// SECURITY: The `session_name` parameter creates domain separation.
-    /// All vectors must use the same session to ensure cross-term binding.
+    /// SECURITY: The `session_name` creates domain separation.
     pub fn commit_split(
         &self,
         evals_list: &[&[ArkGoldilocks]],
@@ -220,67 +226,117 @@ impl WhirPCS {
 
         let mut prover_state = ProverState::new_std(&ds);
 
-        // commit_split: each vector gets its own Merkle tree.
-        let split_witness = config.commit_split(&mut prover_state, evals_list);
+        // Use commit_single for each vector (phased approach).
+        let mut witnesses = Vec::with_capacity(evals_list.len());
+        let mut roots = Vec::with_capacity(evals_list.len());
+        for evals in evals_list {
+            let (witness, root) = config.commit_single(&mut prover_state, evals);
+            roots.push(root.0.to_vec());
+            witnesses.push(witness);
+        }
 
-        // Extract per-vector roots as Vec<u8>.
-        let roots: Vec<Vec<u8>> = split_witness
-            .roots
-            .iter()
-            .map(|hash| hash.0.to_vec())
-            .collect();
-
-        // Clone evals for later use in prove_split.
         let ark_evals_list: Vec<Vec<ArkGoldilocks>> =
             evals_list.iter().map(|evals| evals.to_vec()).collect();
 
-        // ds is consumed by ProverState::new_std; config is the only thing we keep.
-        let _ = ds;
         WhirSplitCommitData {
             config,
             prover_state,
-            split_witness,
+            witnesses,
             ark_evals_list,
             roots,
             num_vars,
         }
     }
 
-    /// Generate a unified WHIR proof for split-committed vectors.
+    /// Add an additional vector to a phased split-commit session.
     ///
-    /// Builds a canonical evaluation point, evaluates each vector at that point
-    /// using WHIR's embedding, and generates a single proof covering all vectors.
+    /// Call this after deriving challenges from earlier commitment roots
+    /// and computing challenge-dependent polynomials (e.g., C̃, h̃).
     ///
-    /// Returns (WhirEvalProof, per-vector Ext3 evaluations).
+    /// SECURITY: The new vector is committed to the same WHIR transcript,
+    /// ensuring cross-term OOD binding with all previous vectors.
+    pub fn commit_additional(
+        &self,
+        commit_data: &mut WhirSplitCommitData,
+        evals: &[ArkGoldilocks],
+    ) -> Vec<u8> {
+        let size = 1 << commit_data.num_vars;
+        assert_eq!(evals.len(), size, "Additional vector size mismatch");
+
+        let (witness, root) = commit_data
+            .config
+            .commit_single(&mut commit_data.prover_state, evals);
+        let root_bytes = root.0.to_vec();
+        commit_data.roots.push(root_bytes.clone());
+        commit_data.witnesses.push(witness);
+        commit_data.ark_evals_list.push(evals.to_vec());
+        root_bytes
+    }
+
+    /// Generate a unified WHIR proof for split-committed vectors at one or more
+    /// evaluation points.
+    ///
+    /// Each evaluation point becomes a separate `LinearForm` in the WHIR proof.
+    /// Evaluations are returned per-point, per-vector (outer: points, inner: vectors).
     ///
     /// SECURITY: The evaluation values are computed internally using WHIR's
-    /// embedding to ensure consistency with how WHIR verifies. The canonical
-    /// point (1, 2, ..., num_vars) is deterministic.
+    /// embedding to ensure consistency with how WHIR verifies. Each evaluation
+    /// point should be a sumcheck output point (e.g., constraint r, permutation
+    /// r_perm) so that WHIR directly binds polynomial evaluations at the points
+    /// where the verifier needs them.
     pub fn prove_split_with_eval(
         &self,
         mut commit_data: WhirSplitCommitData,
-    ) -> (WhirEvalProof, Vec<Field64_3>) {
+        eval_points: &[&[GoldilocksField]],
+    ) -> (WhirEvalProof, Vec<Vec<Field64_3>>) {
         let num_vars = commit_data.num_vars;
-        let _num_vectors = commit_data.ark_evals_list.len();
+        let num_vectors = commit_data.ark_evals_list.len();
+        assert!(
+            !eval_points.is_empty(),
+            "SECURITY: At least one evaluation point is required"
+        );
+        for (i, pt) in eval_points.iter().enumerate() {
+            assert_eq!(
+                pt.len(),
+                num_vars,
+                "SECURITY: eval_points[{i}] length {} must match num_vars {num_vars}",
+                pt.len()
+            );
+        }
 
-        // Build canonical evaluation point in Ext3.
-        let point_ext3: Vec<Field64_3> = (0..num_vars)
-            .map(|i| Field64_3::from((i + 1) as u64))
-            .collect();
-        let lf = MultilinearExtension::new(point_ext3.clone());
-
-        // Evaluate each vector at the canonical point.
-        let eval_ext3s: Vec<Field64_3> = commit_data
-            .ark_evals_list
+        // Convert each evaluation point to Ext3 and build LinearForms.
+        let points_ext3: Vec<Vec<Field64_3>> = eval_points
             .iter()
-            .map(|evals| lf.evaluate(commit_data.config.embedding(), evals))
+            .map(|pt| {
+                pt.iter()
+                    .map(|f| Field64_3::from(f.to_canonical_u64()))
+                    .collect()
+            })
             .collect();
 
-        // Build evaluations vector: for 1 linear form × N vectors, row-major.
-        let evaluations: Vec<Field64_3> = eval_ext3s.clone();
+        // Evaluate each vector at each point.
+        // Layout: per_point_evals[point_idx] = [vec_0_eval, vec_1_eval, ...]
+        let per_point_evals: Vec<Vec<Field64_3>> = points_ext3
+            .iter()
+            .map(|pt| {
+                let lf = MultilinearExtension::new(pt.clone());
+                commit_data
+                    .ark_evals_list
+                    .iter()
+                    .map(|evals| lf.evaluate(commit_data.config.embedding(), evals))
+                    .collect()
+            })
+            .collect();
 
-        let prove_lf: Vec<Box<dyn LinearForm<Field64_3>>> =
-            vec![Box::new(MultilinearExtension::new(point_ext3))];
+        // Flatten evaluations: row-major (num_linear_forms × num_vectors).
+        let evaluations: Vec<Field64_3> = per_point_evals.iter().flatten().copied().collect();
+        assert_eq!(evaluations.len(), eval_points.len() * num_vectors);
+
+        // Build LinearForms — one per evaluation point.
+        let prove_lf: Vec<Box<dyn LinearForm<Field64_3>>> = points_ext3
+            .into_iter()
+            .map(|pt| Box::new(MultilinearExtension::new(pt)) as Box<dyn LinearForm<Field64_3>>)
+            .collect();
 
         // Build vectors for prove_split.
         let vectors: Vec<Cow<'_, [ArkGoldilocks]>> = commit_data
@@ -289,10 +345,22 @@ impl WhirPCS {
             .map(|evals| Cow::Borrowed(evals.as_slice()))
             .collect();
 
+        // Build SplitWitness from individually collected witnesses.
+        let roots: Vec<whir::hash::Hash> = commit_data
+            .roots
+            .iter()
+            .map(|r| {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&r[..32]);
+                whir::hash::Hash(arr)
+            })
+            .collect();
+        let split_witness = SplitWitness::new(commit_data.witnesses, roots);
+
         let _final_claim = commit_data.config.prove_split(
             &mut commit_data.prover_state,
             vectors,
-            commit_data.split_witness,
+            split_witness,
             prove_lf,
             Cow::Owned(evaluations),
         );
@@ -306,25 +374,45 @@ impl WhirPCS {
             pattern: proof.pattern,
         };
 
-        (eval_proof, eval_ext3s)
+        (eval_proof, per_point_evals)
     }
 
-    /// Verify a unified WHIR proof for split-committed vectors.
-    ///
-    /// Receives `num_vectors` individual commitments from the proof, then
-    /// verifies the combined proximity test and evaluation bindings.
+    /// Verify a unified WHIR proof for split-committed vectors at one or more
+    /// evaluation points.
     ///
     /// SECURITY: The session name must match the one used during proving.
-    /// The eval_values must be the Ext3 evaluations at the canonical point
-    /// for each committed vector.
+    /// `eval_values` is flattened row-major: [point_0_vec_0, point_0_vec_1, ...,
+    /// point_1_vec_0, point_1_vec_1, ...]. `num_vectors` is the number of
+    /// committed vectors (typically 2: preprocessed + witness).
     pub fn verify_split(
         &self,
         num_vars: usize,
         proof: &WhirEvalProof,
         eval_values: &[Field64_3],
         session_name: &str,
+        eval_points: &[&[GoldilocksField]],
+        num_vectors: usize,
     ) -> Result<(), String> {
-        let num_vectors = eval_values.len();
+        assert!(
+            !eval_points.is_empty(),
+            "SECURITY: At least one evaluation point is required"
+        );
+        assert_eq!(
+            eval_values.len(),
+            eval_points.len() * num_vectors,
+            "eval_values length {} must equal num_points({}) × num_vectors({})",
+            eval_values.len(),
+            eval_points.len(),
+            num_vectors
+        );
+        for (i, pt) in eval_points.iter().enumerate() {
+            assert_eq!(
+                pt.len(),
+                num_vars,
+                "SECURITY: eval_points[{i}] length must match num_vars"
+            );
+        }
+
         let size = 1 << num_vars;
 
         let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
@@ -347,19 +435,22 @@ impl WhirPCS {
             .map_err(|e| format!("WHIR split commitment verification failed: {:?}", e))?;
         let commitment_refs: Vec<&_> = commitments.iter().collect();
 
-        // Build canonical evaluation point.
-        let point_ext3: Vec<Field64_3> = (0..num_vars)
-            .map(|i| Field64_3::from((i + 1) as u64))
-            .collect();
-
         // Verify the combined proof.
         let final_claim = config
             .verify_split(&mut verifier_state, &commitment_refs, eval_values)
             .map_err(|e| format!("WHIR split verification failed: {:?}", e))?;
 
-        // Verify the linear form (evaluation at canonical point).
-        let verify_lf: Vec<Box<dyn LinearForm<Field64_3>>> =
-            vec![Box::new(MultilinearExtension::new(point_ext3)) as Box<dyn LinearForm<Field64_3>>];
+        // Build LinearForms — one per evaluation point.
+        let verify_lf: Vec<Box<dyn LinearForm<Field64_3>>> = eval_points
+            .iter()
+            .map(|pt| {
+                let ext3: Vec<Field64_3> = pt
+                    .iter()
+                    .map(|f| Field64_3::from(f.to_canonical_u64()))
+                    .collect();
+                Box::new(MultilinearExtension::new(ext3)) as Box<dyn LinearForm<Field64_3>>
+            })
+            .collect();
 
         final_claim
             .verify(
@@ -368,6 +459,164 @@ impl WhirPCS {
                     .map(|l| l.as_ref() as &dyn LinearForm<Field64_3>),
             )
             .map_err(|e| format!("WHIR split evaluation verification failed: {:?}", e))?;
+
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Auxiliary single-vector API (commit + multi-point prove)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Commit and prove a single auxiliary polynomial at multiple evaluation points.
+    ///
+    /// Used for the auxiliary commitment round: after challenges are derived,
+    /// the prover commits C̃ and h̃ (batched into one polynomial) and proves
+    /// evaluation at both the constraint point r and the permutation point r_perm.
+    ///
+    /// Returns (commitment_root, proof, per_point_evals).
+    ///
+    /// SECURITY: Uses a dedicated session name to prevent cross-protocol confusion
+    /// with the main split-commit WHIR proof. The auxiliary polynomial binds
+    /// C̃(r) and h̃(r_perm) to the committed polynomial, closing the oracle gap.
+    pub fn commit_and_prove_aux(
+        &self,
+        poly: &DenseMultilinearExtension<GoldilocksField>,
+        eval_points: &[&[GoldilocksField]],
+        session_name: &str,
+    ) -> (Vec<u8>, WhirEvalProof, Vec<Field64_3>) {
+        let num_vars = poly.num_vars;
+        let size = 1 << num_vars;
+        let ark_evals = plonky2_vec_to_ark(&poly.evaluations);
+
+        assert!(
+            !eval_points.is_empty(),
+            "SECURITY: At least one evaluation point required"
+        );
+        for (i, pt) in eval_points.iter().enumerate() {
+            assert_eq!(
+                pt.len(),
+                num_vars,
+                "SECURITY: eval_points[{i}] length must match num_vars {num_vars}"
+            );
+        }
+
+        let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
+        let ds = DomainSeparator::protocol(&config)
+            .session(&session_name.to_string())
+            .instance(&Empty);
+
+        let mut prover_state = ProverState::new_std(&ds);
+        let witness = config.commit(&mut prover_state, &[&ark_evals]);
+
+        // Extract commitment root (first 32 bytes of transcript).
+        let commit_proof = prover_state.proof();
+        let root = commit_proof.narg_string[..32.min(commit_proof.narg_string.len())].to_vec();
+        // Reset prover state — we need to re-create it because proof() consumes state.
+        // Instead, re-do the commit to get fresh prover_state for proving.
+        let mut prover_state = ProverState::new_std(&ds);
+        let _witness = config.commit(&mut prover_state, &[&ark_evals]);
+
+        // Build LinearForms and evaluate at each point.
+        let points_ext3: Vec<Vec<Field64_3>> = eval_points
+            .iter()
+            .map(|pt| {
+                pt.iter()
+                    .map(|f| Field64_3::from(f.to_canonical_u64()))
+                    .collect()
+            })
+            .collect();
+
+        let per_point_evals: Vec<Field64_3> = points_ext3
+            .iter()
+            .map(|pt| {
+                let lf = MultilinearExtension::new(pt.clone());
+                lf.evaluate(config.embedding(), &ark_evals)
+            })
+            .collect();
+
+        let prove_lf: Vec<Box<dyn LinearForm<Field64_3>>> = points_ext3
+            .into_iter()
+            .map(|pt| Box::new(MultilinearExtension::new(pt)) as Box<dyn LinearForm<Field64_3>>)
+            .collect();
+
+        let _final_claim = config.prove(
+            &mut prover_state,
+            vec![Cow::Borrowed(ark_evals.as_slice())],
+            vec![Cow::Owned(witness)],
+            prove_lf,
+            Cow::Owned(per_point_evals.clone()),
+        );
+
+        let proof = prover_state.proof();
+
+        let eval_proof = WhirEvalProof {
+            narg_string: proof.narg_string,
+            hints: proof.hints,
+            #[cfg(debug_assertions)]
+            pattern: proof.pattern,
+        };
+
+        (root, eval_proof, per_point_evals)
+    }
+
+    /// Verify a single-vector auxiliary WHIR proof at multiple evaluation points.
+    ///
+    /// SECURITY: Session name must match the one used during proving.
+    pub fn verify_aux(
+        &self,
+        num_vars: usize,
+        proof: &WhirEvalProof,
+        eval_values: &[Field64_3],
+        eval_points: &[&[GoldilocksField]],
+        session_name: &str,
+    ) -> Result<(), String> {
+        assert_eq!(
+            eval_values.len(),
+            eval_points.len(),
+            "eval_values length must match eval_points length"
+        );
+
+        let size = 1 << num_vars;
+        let config = WhirConfig::<Basefield<Field64_3>>::new(size, &self.params);
+        let ds = DomainSeparator::protocol(&config)
+            .session(&session_name.to_string())
+            .instance(&Empty);
+
+        let proof_data = WhirProofData {
+            narg_string: proof.narg_string.clone(),
+            hints: proof.hints.clone(),
+            #[cfg(debug_assertions)]
+            pattern: proof.pattern.clone(),
+        };
+
+        let mut verifier_state = VerifierState::new_std(&ds, &proof_data);
+
+        let commitment = config
+            .receive_commitment(&mut verifier_state)
+            .map_err(|e| format!("WHIR aux commitment verification failed: {:?}", e))?;
+
+        let final_claim = config
+            .verify(&mut verifier_state, &[&commitment], eval_values)
+            .map_err(|e| format!("WHIR aux verification failed: {:?}", e))?;
+
+        let verify_lf: Vec<Box<dyn LinearForm<Field64_3>>> = eval_points
+            .iter()
+            .map(|pt| {
+                let ext3: Vec<Field64_3> = pt
+                    .iter()
+                    .map(|f| Field64_3::from(f.to_canonical_u64()))
+                    .collect();
+                Box::new(MultilinearExtension::new(ext3)) as Box<dyn LinearForm<Field64_3>>
+            })
+            .collect();
+
+        final_claim
+            .verify(
+                verify_lf
+                    .iter()
+                    .map(|l| l.as_ref() as &dyn LinearForm<Field64_3>),
+            )
+            .map_err(|e| format!("WHIR aux evaluation verification failed: {:?}", e))?;
 
         Ok(())
     }
@@ -663,8 +912,8 @@ mod tests {
     }
 
     #[test]
-    fn test_whir_split_commit_prove_verify() {
-        // Two vectors of size 16 (4 variables)
+    fn test_whir_split_commit_prove_verify_single_point() {
+        // Two vectors of size 16 (4 variables), single evaluation point
         let evals_a: Vec<ArkGoldilocks> = (0..16)
             .map(|i| ArkGoldilocks::from((i + 1) as u64))
             .collect();
@@ -681,18 +930,81 @@ mod tests {
         assert_eq!(commit_data.roots.len(), 2);
         assert_eq!(commit_data.roots[0].len(), 32);
         assert_eq!(commit_data.roots[1].len(), 32);
-        // Roots should be distinct
         assert_ne!(commit_data.roots[0], commit_data.roots[1]);
 
         let num_vars = commit_data.num_vars;
 
-        // Prove
-        let (eval_proof, eval_ext3s) = pcs.prove_split_with_eval(commit_data);
-        assert_eq!(eval_ext3s.len(), 2);
+        // Simulate sumcheck output point (non-canonical)
+        let eval_point: Vec<GoldilocksField> = (0..num_vars)
+            .map(|i| GoldilocksField::from_canonical_u64((i as u64) * 3 + 7))
+            .collect();
+
+        // Prove at sumcheck output point
+        let (eval_proof, per_point_evals) =
+            pcs.prove_split_with_eval(commit_data, &[&eval_point]);
+        assert_eq!(per_point_evals.len(), 1); // 1 point
+        assert_eq!(per_point_evals[0].len(), 2); // 2 vectors
+
+        // Flatten evaluations for verify
+        let flat_evals: Vec<Field64_3> = per_point_evals.into_iter().flatten().collect();
 
         // Verify
-        let result = pcs.verify_split(num_vars, &eval_proof, &eval_ext3s, WHIR_SESSION_SPLIT);
+        let result = pcs.verify_split(
+            num_vars,
+            &eval_proof,
+            &flat_evals,
+            WHIR_SESSION_SPLIT,
+            &[&eval_point],
+            2, // num_vectors
+        );
         assert!(result.is_ok(), "Split verify failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_whir_split_commit_prove_verify_two_points() {
+        // Two vectors, TWO evaluation points (simulating r and r_perm)
+        let evals_a: Vec<ArkGoldilocks> = (0..16)
+            .map(|i| ArkGoldilocks::from((i + 1) as u64))
+            .collect();
+        let evals_b: Vec<ArkGoldilocks> = (0..16)
+            .map(|i| ArkGoldilocks::from((i * 3 + 7) as u64))
+            .collect();
+
+        let pcs = WhirPCS::new(32, 0, 1, 2);
+        let commit_data = pcs.commit_split(&[&evals_a, &evals_b], WHIR_SESSION_SPLIT);
+        let num_vars = commit_data.num_vars;
+
+        // Two distinct evaluation points (constraint r and permutation r_perm)
+        let r: Vec<GoldilocksField> = (0..num_vars)
+            .map(|i| GoldilocksField::from_canonical_u64((i as u64) * 3 + 7))
+            .collect();
+        let r_perm: Vec<GoldilocksField> = (0..num_vars)
+            .map(|i| GoldilocksField::from_canonical_u64((i as u64) * 11 + 2))
+            .collect();
+
+        // Prove at both points
+        let (eval_proof, per_point_evals) =
+            pcs.prove_split_with_eval(commit_data, &[&r, &r_perm]);
+        assert_eq!(per_point_evals.len(), 2); // 2 points
+        assert_eq!(per_point_evals[0].len(), 2); // 2 vectors each
+
+        // Evaluations at different points should differ
+        assert_ne!(per_point_evals[0], per_point_evals[1]);
+
+        // Flatten: [P_a(r), P_b(r), P_a(r_perm), P_b(r_perm)]
+        let flat_evals: Vec<Field64_3> = per_point_evals.into_iter().flatten().collect();
+        assert_eq!(flat_evals.len(), 4);
+
+        // Verify
+        let result = pcs.verify_split(
+            num_vars,
+            &eval_proof,
+            &flat_evals,
+            WHIR_SESSION_SPLIT,
+            &[&r, &r_perm],
+            2, // num_vectors
+        );
+        assert!(result.is_ok(), "Two-point split verify failed: {:?}", result.err());
     }
 
     #[test]

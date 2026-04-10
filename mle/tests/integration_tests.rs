@@ -456,9 +456,9 @@ fn test_tampered_constraint_round_poly_rejected() {
     let mut proof =
         mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
-    // Tamper with a constraint sumcheck round polynomial
-    if !proof.constraint_proof.round_polys.is_empty() {
-        proof.constraint_proof.round_polys[0].evaluations[0] += F::ONE;
+    // Tamper with the combined sumcheck round polynomial
+    if !proof.combined_proof.round_polys.is_empty() {
+        proof.combined_proof.round_polys[0].evaluations[0] += F::ONE;
     }
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
@@ -487,14 +487,9 @@ fn test_tampered_permutation_round_poly_rejected() {
     let mut proof =
         mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
-    // Tamper with a permutation sumcheck round polynomial
-    if !proof
-        .permutation_proof
-        .sumcheck_proof
-        .round_polys
-        .is_empty()
-    {
-        proof.permutation_proof.sumcheck_proof.round_polys[0].evaluations[0] += F::ONE;
+    // Tamper with the combined sumcheck round polynomial (same proof, permutation is merged)
+    if !proof.combined_proof.round_polys.is_empty() {
+        proof.combined_proof.round_polys[0].evaluations[0] += F::ONE;
     }
 
     let vk = mle_setup::<F, C, D>(&circuit.prover_only, &circuit.common);
