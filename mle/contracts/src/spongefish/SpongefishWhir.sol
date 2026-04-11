@@ -89,7 +89,13 @@ library SpongefishWhir {
             raw := or(shl(32, and(raw, 0x00000000FFFFFFFF)), shr(32, and(raw, 0xFFFFFFFF00000000)))
             raw := or(shl(16, and(raw, 0x0000FFFF0000FFFF)), shr(16, and(raw, 0xFFFF0000FFFF0000)))
             raw := or(shl(8,  and(raw, 0x00FF00FF00FF00FF)), shr(8,  and(raw, 0xFF00FF00FF00FF00)))
-            val := mod(raw, 0xFFFFFFFF00000001) // GL_P
+            // SECURITY: Reject non-canonical field element encodings.
+            // The sponge already absorbed the raw bytes above. A prover who sends
+            // GL_P (which encodes as 0 in the field) but uses a different byte pattern
+            // can steer challenge derivation, because the transcript hash is over bytes,
+            // not over field values. Canonical encoding requires raw < GL_P.
+            if iszero(lt(raw, 0xFFFFFFFF00000001)) { revert(0, 0) }
+            val := raw // already canonical; no mod needed
         }
     }
 
@@ -122,6 +128,10 @@ library SpongefishWhir {
         c0 = _leModReduce64(data, 0, 8);
         c1 = _leModReduce64(data, 8, 8);
         c2 = _leModReduce64(data, 16, 8);
+        // SECURITY: Reject non-canonical field element encodings. The sponge absorbed
+        // the raw bytes above. A prover who sends a non-canonical value (e.g. GL_P for zero)
+        // uses a different byte pattern that steers Fiat-Shamir challenge derivation.
+        require(c0 < GL_P && c1 < GL_P && c2 < GL_P, "SpongefishWhir: non-canonical field element");
     }
 
     /// @dev Squeeze a Field64_3: 3 × (8 + 32) = 120 bytes.
@@ -306,15 +316,8 @@ library SpongefishWhir {
             }
             // acc = lo + hi * 2^256
             // result = (lo + hi * 2^256) mod GL_P
-            // Since GL_P is 64-bit, 2^256 mod GL_P is a constant
-            // 2^256 mod (2^64 - 2^32 + 1)
-            // We can compute this as: mulmod(hi, 2^256 mod P, P) + acc mod P
-            uint256 pow256modP = uint256(2) ** 64; // Simplified — need exact value
-            // Actually, for correctness: reduce acc mod P first, then add hi * (2^256 mod P)
-            // But since acc is 256 bits and P is 64 bits, acc mod P is at most 64 bits
-            // And hi * (2^256 mod P) mod P is at most 64 bits
-            // So we can just compute (acc + hi * 2^256) mod P
-            // Using Solidity's modular arithmetic:
+            // Since GL_P is 64-bit, 2^256 mod GL_P = 2^32 - 1 (see _pow256ModP()).
+            // (The formerly-present dead variable `pow256modP = 2**64` was wrong and removed.)
             acc = addmod(acc % uint256(GL_P), mulmod(hi, _pow256ModP(), uint256(GL_P)), uint256(GL_P));
             return uint64(acc);
         }
@@ -384,9 +387,14 @@ library SpongefishWhir {
         assembly {
             let base := add(arr, 0x20) // pointer to arr[0]
 
-            // Use scratch memory for an explicit stack (max depth ~64 for any practical size)
-            let stackPtr := mload(0x40)
-            let stackBase := stackPtr
+            // SECURITY: Reserve scratch space for the sort stack by updating the free
+            // memory pointer BEFORE writing any stack data. Without this, a future Solidity
+            // heap allocation inside the same call frame could overwrite the sort stack,
+            // silently corrupting the indices being sorted and producing wrong challenge indices.
+            // Max recursion depth for quicksort is O(log n); 128 levels × 64 bytes = 8192 bytes.
+            let stackBase := mload(0x40)
+            mstore(0x40, add(stackBase, 0x2000)) // reserve 8192 bytes for sort stack
+            let stackPtr := stackBase
 
             // Push initial (lo=0, hi=n-1)
             mstore(stackPtr, 0)

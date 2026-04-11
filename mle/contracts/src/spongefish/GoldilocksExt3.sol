@@ -28,15 +28,23 @@ library GoldilocksExt3 {
     }
 
     function fromBase(uint64 x) internal pure returns (Ext3 memory r) {
+        // SECURITY: Reject out-of-range values. uint64 can hold [P, 2^64-1] which are
+        // non-canonical representations that bypass isZero checks and corrupt inv().
+        require(x < uint64(P), "GoldilocksExt3: value not in field");
         r.c0 = x;
     }
 
     function isZero(Ext3 memory a) internal pure returns (bool) {
-        return a.c0 == 0 && a.c1 == 0 && a.c2 == 0;
+        // SECURITY: Compare modulo P, not bitwise. A value c0 == P is zero in the field
+        // but would pass bitwise comparison as non-zero, defeating the guard before inv().
+        return a.c0 % uint64(P) == 0 && a.c1 % uint64(P) == 0 && a.c2 % uint64(P) == 0;
     }
 
     function eq(Ext3 memory a, Ext3 memory b) internal pure returns (bool) {
-        return a.c0 == b.c0 && a.c1 == b.c1 && a.c2 == b.c2;
+        // SECURITY: Compare modulo P for field equality, not bitwise.
+        return a.c0 % uint64(P) == b.c0 % uint64(P) &&
+               a.c1 % uint64(P) == b.c1 % uint64(P) &&
+               a.c2 % uint64(P) == b.c2 % uint64(P);
     }
 
     function add(Ext3 memory a, Ext3 memory b) internal pure returns (Ext3 memory r) {
@@ -51,18 +59,27 @@ library GoldilocksExt3 {
     function sub(Ext3 memory a, Ext3 memory b) internal pure returns (Ext3 memory r) {
         assembly {
             let p := 0xFFFFFFFF00000001
-            mstore(r, addmod(mload(a), sub(p, mload(b)), p))
-            mstore(add(r, 0x20), addmod(mload(add(a, 0x20)), sub(p, mload(add(b, 0x20))), p))
-            mstore(add(r, 0x40), addmod(mload(add(a, 0x40)), sub(p, mload(add(b, 0x40))), p))
+            // SECURITY: Normalize b components to [0, p-1] before negating.
+            // Non-canonical b (b >= p) causes sub(p, b) to wrap in 256-bit arithmetic:
+            // sub(p, p+k) = 2^256 - k, which is NOT the field negation.
+            // Since 2^256 mod p != 0, addmod would then produce a wrong result.
+            let b0 := mod(mload(b), p)
+            let b1 := mod(mload(add(b, 0x20)), p)
+            let b2 := mod(mload(add(b, 0x40)), p)
+            mstore(r, addmod(mload(a), sub(p, b0), p))
+            mstore(add(r, 0x20), addmod(mload(add(a, 0x20)), sub(p, b1), p))
+            mstore(add(r, 0x40), addmod(mload(add(a, 0x40)), sub(p, b2), p))
         }
     }
 
     function neg(Ext3 memory a) internal pure returns (Ext3 memory r) {
         assembly {
             let p := 0xFFFFFFFF00000001
-            let a0 := mload(a)
-            let a1 := mload(add(a, 0x20))
-            let a2 := mload(add(a, 0x40))
+            // SECURITY: Normalize components to [0, p-1] before negating.
+            // A raw value a >= p causes sub(p, a) to wrap in 256-bit arithmetic.
+            let a0 := mod(mload(a), p)
+            let a1 := mod(mload(add(a, 0x20)), p)
+            let a2 := mod(mload(add(a, 0x40)), p)
             mstore(r, mul(iszero(iszero(a0)), sub(p, a0)))
             mstore(add(r, 0x20), mul(iszero(iszero(a1)), sub(p, a1)))
             mstore(add(r, 0x40), mul(iszero(iszero(a2)), sub(p, a2)))
@@ -168,6 +185,11 @@ library GoldilocksExt3 {
 
             // normInv = norm^(p-2) mod p via square-and-multiply
             let base := mod(norm, p)
+            // SECURITY: Revert if the element is zero. norm == 0 means a == 0, which has
+            // no multiplicative inverse. Without this check, inv(0) silently returns (0,0,0),
+            // corrupting any subsequent division (e.g. the guard before inv() can be bypassed
+            // by passing a non-canonical zero where c0 == P, which isZero() missed pre-fix).
+            if iszero(base) { revert(0, 0) }
             let e := sub(p, 2)
             let result := 1
             for {} gt(e, 0) {} {
@@ -192,15 +214,24 @@ library GoldilocksExt3 {
 
     /// @dev Check equality
     function isEqual(Ext3 memory a, Ext3 memory b) internal pure returns (bool) {
-        return a.c0 == b.c0 && a.c1 == b.c1 && a.c2 == b.c2;
+        // SECURITY: Compare modulo P for field equality.
+        return a.c0 % uint64(P) == b.c0 % uint64(P) &&
+               a.c1 % uint64(P) == b.c1 % uint64(P) &&
+               a.c2 % uint64(P) == b.c2 % uint64(P);
     }
 
     /// @dev Evaluate L_0(x) = (x^n - 1) / (n * (x - 1)) where n = 2^degreeBits
     function evalL0(Ext3 memory x, uint256 degreeBits) internal pure returns (Ext3 memory) {
-        uint256 n = 1 << degreeBits;
+        // SECURITY: Reject degreeBits >= 64 to prevent uint64 truncation of n.
+        // If degreeBits >= 64, uint64(1 << degreeBits) = 0, causing mulScalar to return
+        // zero and inv(zero) to silently return zero, making evalL0 return 0 for any x.
+        require(degreeBits < 64, "GoldilocksExt3: degreeBits out of range");
+        uint64 nScalar = uint64(1) << uint64(degreeBits);
+        // SECURITY: Also check that n < P (required for valid scalar field element).
+        require(nScalar < uint64(P), "GoldilocksExt3: n exceeds field modulus");
         Ext3 memory xPowN = expPowerOf2(x, degreeBits);
         Ext3 memory numerator = sub(xPowN, one());
-        Ext3 memory denominator = mulScalar(sub(x, one()), uint64(n));
+        Ext3 memory denominator = mulScalar(sub(x, one()), nScalar);
         return mul(numerator, inv(denominator));
     }
 

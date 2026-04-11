@@ -21,6 +21,10 @@ library WhirLinearAlgebra {
 
     /// @dev mleEvaluateUnivariateFrom — full assembly, zero intermediate Ext3 allocs.
     ///      Computes Π_i ((1 - r_i) + r_i * x^(2^i)) for i in [start..point.length), iterated in reverse.
+    ///
+    /// SECURITY: Points are paired in REVERSE order (point[len-1] → x^1, ..., point[start] → x^(2^{n-1})).
+    /// This matches the prover's bit-reversal convention for WHIR univariate MLE evaluation.
+    /// If the prover uses the forward convention, this would evaluate a different polynomial.
     function mleEvaluateUnivariateFrom(
         GoldilocksExt3.Ext3 memory x,
         GoldilocksExt3.Ext3[] memory point,
@@ -49,6 +53,12 @@ library WhirLinearAlgebra {
                 let r2 := mload(add(rPtr, 0x40))
 
                 // term = (1 - r) + r * x2i
+                // SECURITY: Normalize r components before negating. Non-canonical r (r >= p)
+                // causes sub(p, r) to wrap in 256-bit: sub(p, p+k) = 2^256-k, and since
+                // 2^256 mod p != 0, the subsequent addmod produces an incorrect field value.
+                r0 := mod(r0, p)
+                r1 := mod(r1, p)
+                r2 := mod(r2, p)
                 // oneMinusR = (1-r0, -r1, -r2) mod p
                 let omr0 := addmod(1, sub(p, r0), p)
                 let omr1 := sub(p, r1)
@@ -105,6 +115,10 @@ library WhirLinearAlgebra {
         uint256 numVariables,
         GoldilocksExt3.Ext3[] memory evalPoint
     ) internal pure returns (GoldilocksExt3.Ext3 memory result) {
+        // SECURITY: require length equality — silent truncation allows a prover to supply
+        // a shorter evalPoint, making the verifier evaluate over fewer variables and
+        // accepting constraints that only hold on a proper subset of the required domain.
+        require(numVariables == evalPoint.length, "WhirLinearAlgebra: length mismatch");
         assembly {
             let p := P
             let res0 := 1
@@ -113,6 +127,7 @@ library WhirLinearAlgebra {
 
             let epLen := mload(evalPoint)
             let n := numVariables
+            // Length equality is enforced above; the min is kept only as defensive fallback.
             if lt(epLen, n) { n := epLen }
             let epData := add(evalPoint, 0x20)
 
@@ -123,6 +138,11 @@ library WhirLinearAlgebra {
                 let r0 := mload(rPtr)
                 let r1 := mload(add(rPtr, 0x20))
                 let r2 := mload(add(rPtr, 0x40))
+
+                // SECURITY: Normalize r components before negating.
+                r0 := mod(r0, p)
+                r1 := mod(r1, p)
+                r2 := mod(r2, p)
 
                 // lr = l * r = (li*r0, li*r1, li*r2) (scalar mul)
                 let lr0 := mulmod(li, r0, p)
@@ -168,6 +188,10 @@ library WhirLinearAlgebra {
         GoldilocksExt3.Ext3[] memory point,
         GoldilocksExt3.Ext3[] memory evalPoint
     ) internal pure returns (GoldilocksExt3.Ext3 memory result) {
+        // SECURITY: require length equality — silent truncation allows a prover to supply
+        // a shorter array, causing the verifier to evaluate over fewer variables and
+        // potentially accepting constraints that only hold on a subset of the domain.
+        require(point.length == evalPoint.length, "WhirLinearAlgebra: length mismatch");
         assembly {
             let p := P
             let res0 := 1
@@ -177,6 +201,7 @@ library WhirLinearAlgebra {
             let pLen := mload(point)
             let epLen := mload(evalPoint)
             let n := pLen
+            // Length equality is enforced above; the min is kept only as defensive fallback.
             if lt(epLen, n) { n := epLen }
 
             let pData := add(point, 0x20)
@@ -192,6 +217,14 @@ library WhirLinearAlgebra {
                 let r0 := mload(rPtr)
                 let r1 := mload(add(rPtr, 0x20))
                 let r2 := mload(add(rPtr, 0x40))
+
+                // SECURITY: Normalize l and r components before negating.
+                l0 := mod(l0, p)
+                l1 := mod(l1, p)
+                l2 := mod(l2, p)
+                r0 := mod(r0, p)
+                r1 := mod(r1, p)
+                r2 := mod(r2, p)
 
                 // lr = l * r (Ext3 mul)
                 let lrt := addmod(mulmod(l1, r2, p), mulmod(l2, r1, p), p)
@@ -242,6 +275,11 @@ library WhirLinearAlgebra {
         uint256 start,
         uint256 count
     ) internal pure returns (GoldilocksExt3.Ext3[] memory weights) {
+        // SECURITY: Bounds check — without this, the assembly loop reads arr[start+idx]
+        // for idx in [0, count), which accesses beyond arr.length when start+count > arr.length.
+        // Out-of-bounds reads return garbage from adjacent EVM memory, corrupting eq_weights
+        // and thus the polynomial commitment check: dotProduct(eqWeights, evaluations).
+        require(start + count <= arr.length, "WhirLinearAlgebra: eqWeightsFrom out of bounds");
         uint256 size = 1 << count;
         weights = new GoldilocksExt3.Ext3[](size);
         // Allocate all Ext3 structs upfront
@@ -262,6 +300,10 @@ library WhirLinearAlgebra {
                 let ri0 := mload(riPtr)
                 let ri1 := mload(add(riPtr, 0x20))
                 let ri2 := mload(add(riPtr, 0x40))
+                // SECURITY: Normalize ri components before negating.
+                ri0 := mod(ri0, p)
+                ri1 := mod(ri1, p)
+                ri2 := mod(ri2, p)
                 // oneMinusRi
                 let omr0 := addmod(1, sub(p, ri0), p)
                 let omr1 := sub(p, ri1)
@@ -317,6 +359,10 @@ library WhirLinearAlgebra {
                 let ri0 := mload(riPtr)
                 let ri1 := mload(add(riPtr, 0x20))
                 let ri2 := mload(add(riPtr, 0x40))
+                // SECURITY: Normalize ri components before negating.
+                ri0 := mod(ri0, p)
+                ri1 := mod(ri1, p)
+                ri2 := mod(ri2, p)
                 let omr0 := addmod(1, sub(p, ri0), p)
                 let omr1 := sub(p, ri1)
                 let omr2 := sub(p, ri2)
@@ -349,11 +395,16 @@ library WhirLinearAlgebra {
         GoldilocksExt3.Ext3[] memory a,
         GoldilocksExt3.Ext3[] memory b
     ) internal pure returns (GoldilocksExt3.Ext3 memory result) {
+        // SECURITY: require length equality. Silent truncation to min(len_a, len_b) allows a
+        // prover to supply a shorter evaluations array, making the verifier sum fewer terms and
+        // treating the missing ones as zero. This breaks the polynomial commitment check.
+        require(a.length == b.length, "WhirLinearAlgebra: dotProduct length mismatch");
         assembly {
             let p := P
             let aLen := mload(a)
             let bLen := mload(b)
             let n := aLen
+            // Length equality enforced above; keep min as defensive fallback.
             if lt(bLen, aLen) { n := bLen }
 
             let r0 := 0

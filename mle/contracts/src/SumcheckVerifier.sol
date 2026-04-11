@@ -105,22 +105,11 @@ library SumcheckVerifier {
                 fullProduct := mulmod(fullProduct, mload(add(scratchStart, mul(j, 0x20))), p)
             }
 
-            // If fullProduct == 0, point equals some node j — handled above
-            // But as a safety check:
-            if iszero(fullProduct) {
-                // This shouldn't happen given the check above, but handle gracefully
-                // Find the matching node
-                for { let j := 0 } lt(j, d) { j := add(j, 1) } {
-                    if iszero(mload(add(scratchStart, mul(j, 0x20)))) {
-                        result := mload(add(evalsPtr, mul(j, 0x20)))
-                        // Can't easily break in Yul, but we'll overwrite result
-                    }
-                }
-                // Skip the main computation
-                mstore(0x40, add(scratchStart, mul(d, 0x20))) // update free memory ptr
-            }
-
-            if gt(fullProduct, 0) {
+            // fullProduct == 0 is unreachable here: the `point < d` check at line 86
+            // already handles all integer-node cases by returning evals[point] directly.
+            // No distinct point x with x >= d can equal any node j in {0..d-1}, so
+            // all diffs are nonzero, making fullProduct nonzero. The branch is removed.
+            {
                 result := 0
 
                 for { let i := 0 } lt(i, d) { i := add(i, 1) } {

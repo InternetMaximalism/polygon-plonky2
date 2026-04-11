@@ -349,6 +349,15 @@ library SpongefishWhirVerify {
         WhirParams memory params,
         VerifyState memory vs
     ) private pure returns (GoldilocksExt3.Ext3[] memory finalVector) {
+        // SECURITY: Validate that finalSize == 2^finalSumcheckRounds.
+        // If not, _foldEval silently discards trailing elements (finalSize too large) or
+        // reads past the allocated array (finalSize too small). Either case means the prover
+        // can embed extra codeword elements that shift the Merkle root without affecting
+        // the final claim check, weakening commitment binding.
+        require(
+            params.finalSize == (uint256(1) << params.finalSumcheckRounds),
+            "SpongefishWhirVerify: finalSize must equal 2^finalSumcheckRounds"
+        );
         finalVector = new GoldilocksExt3.Ext3[](params.finalSize);
         for (uint256 i = 0; i < params.finalSize; i++) {
             (uint64 c0, uint64 c1, uint64 c2) = SpongefishWhir.proverMessageField64x3(ts, transcript);
@@ -535,6 +544,12 @@ library SpongefishWhirVerify {
             return indices;
         }
 
+        // SECURITY: WHIR codeword lengths must be a power of 2 for uniform index sampling.
+        // If numLeaves is not a power of 2, val % numLeaves is biased toward lower indices,
+        // weakening the soundness proof which assumes uniformly random query positions.
+        require(numLeaves & (numLeaves - 1) == 0, "SpongefishWhirVerify: numLeaves must be a power of 2");
+        uint256 mask = numLeaves - 1; // safe bitmask for power-of-2
+
         uint256 sizeBytes = _ceilDiv(_log2(numLeaves), 8);
         uint256 totalBytes = count * sizeBytes;
 
@@ -549,7 +564,34 @@ library SpongefishWhirVerify {
             for (uint256 j = 0; j < sizeBytes; j++) {
                 val = (val << 8) | uint256(uint8(entropy[i * sizeBytes + j]));
             }
-            indices[i] = val % numLeaves;
+            indices[i] = val & mask; // bitmask is unbiased for power-of-2 numLeaves
+        }
+    }
+
+    /// @dev Verify that every original (pre-dedup) leaf hash matches the Merkle-verified
+    ///      hash for its index. Call after Merkle verification with the pre-sort originals.
+    ///      Prevents a malicious prover from injecting arbitrary data at duplicate indices:
+    ///      the dedup keeps the first occurrence's hash for Merkle proof, but without this
+    ///      check the second occurrence's data is used unverified in rowOffset computations.
+    function _verifyLeafHashConsistency(
+        uint256[] memory origIndices,
+        bytes32[] memory origHashes,
+        uint256[] memory sortedIndices,
+        bytes32[] memory sortedHashes,
+        uint256 count
+    ) private pure {
+        uint256 dedupLen = sortedIndices.length;
+        for (uint256 i = 0; i < count; i++) {
+            uint256 idx = origIndices[i];
+            for (uint256 k = 0; k < dedupLen; k++) {
+                if (sortedIndices[k] == idx) {
+                    require(
+                        origHashes[i] == sortedHashes[k],
+                        "SpongefishWhirVerify: leaf hash mismatch for duplicate index"
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -803,6 +845,17 @@ library SpongefishWhirVerify {
                 ts.hintPos += o.rowBytes;
             }
 
+            // SECURITY: Save original indices and hashes before _sortAndDedupWithHashes
+            // mutates rawIndices and rawLeafHashes in-place. This is needed to verify
+            // that duplicate indices (after dedup) have consistent leaf data — without
+            // this check a malicious prover can inject arbitrary bytes at duplicate positions.
+            uint256[] memory origIndices = new uint256[](rawCount);
+            bytes32[] memory origHashes  = new bytes32[](rawCount);
+            for (uint256 i = 0; i < rawCount; i++) {
+                origIndices[i] = rawIndices[i];
+                origHashes[i]  = rawLeafHashes[i];
+            }
+
             GoldilocksExt3.Ext3[] memory inDomainEvalPoints = _computeEvalPoints(
                 rawIndices, rawCount, o.domainGen, o.numCosets, o.cosetSize
             );
@@ -813,6 +866,12 @@ library SpongefishWhirVerify {
             ts.hintPos = SpongefishMerkle.verify(
                 vs.prevRoot, o.md, sortedIndices, sortedHashes, hints, ts.hintPos
             );
+
+            // SECURITY: For every raw sample, verify its leaf hash matches the
+            // Merkle-verified hash for that index. This prevents a prover from injecting
+            // different data at the second (and later) positions of a colliding index.
+            // Without this check, unverified rowOffset data feeds directly into theSum.
+            _verifyLeafHashConsistency(origIndices, origHashes, sortedIndices, sortedHashes, rawCount);
 
             _addConstraintValues(ts, hints, params, vs, round, rawCount, roundOodAnswers,
                 roundOodPoints, rowOffsets, inDomainEvalPoints, o.numCols, o.isBaseField);
@@ -847,9 +906,14 @@ library SpongefishWhirVerify {
                 ts.hintPos += o.rowBytes;
             }
 
-            // Copy indices for Merkle verification (sort mutates the array)
+            // Copy indices for Merkle verification (sort mutates the array).
+            // Also keep original hashes for the duplicate-index consistency check.
             uint256[] memory idxCopy = new uint256[](rawCount);
-            for (uint256 i = 0; i < rawCount; i++) idxCopy[i] = rawIndices[i];
+            bytes32[] memory hashCopy = new bytes32[](rawCount);
+            for (uint256 i = 0; i < rawCount; i++) {
+                idxCopy[i]  = rawIndices[i];
+                hashCopy[i] = rawLeafHashes[i];
+            }
 
             (uint256[] memory sortedIndices, bytes32[] memory sortedHashes) =
                 _sortAndDedupWithHashes(idxCopy, rawLeafHashes);
@@ -857,6 +921,9 @@ library SpongefishWhirVerify {
             ts.hintPos = SpongefishMerkle.verify(
                 vs.initialRoots[c], o.md, sortedIndices, sortedHashes, hints, ts.hintPos
             );
+
+            // SECURITY: Verify leaf hash consistency for duplicate indices.
+            _verifyLeafHashConsistency(rawIndices, hashCopy, sortedIndices, sortedHashes, rawCount);
         }
 
         GoldilocksExt3.Ext3[] memory inDomainEvalPoints = _computeEvalPoints(

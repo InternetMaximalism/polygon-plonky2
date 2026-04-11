@@ -47,6 +47,11 @@ library Keccak256Chain {
     function squeeze(Sponge memory s, uint256 n) internal pure returns (bytes memory output) {
         output = new bytes(n);
         uint256 counter = uint256(s.squeezeCounter);
+        // SECURITY: Prevent squeezeCounter overflow. Each 32-byte block increments the
+        // counter by 1. If the counter wraps, subsequent squeezes reuse earlier counter
+        // values, producing repeated challenge bytes and breaking Fiat-Shamir security.
+        uint256 blocksNeeded = (n + 31) / 32;
+        require(counter + blocksNeeded <= type(uint64).max, "Keccak256Chain: squeeze counter overflow");
         bytes32 st = s.state;
         assembly {
             let scratch := mload(0x40)
@@ -77,6 +82,8 @@ library Keccak256Chain {
     function squeezeByte(Sponge memory s) internal pure returns (uint8 b) {
         bytes32 st = s.state;
         uint256 counter = uint256(s.squeezeCounter);
+        // SECURITY: Prevent squeezeCounter overflow on single-byte squeeze.
+        require(counter < type(uint64).max, "Keccak256Chain: squeeze counter overflow");
         assembly {
             let scratch := mload(0x40)
             mstore(scratch, st)
