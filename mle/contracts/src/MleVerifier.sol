@@ -92,6 +92,11 @@ contract MleVerifier {
         SumcheckVerifier.SumcheckProof memory sc = _copySumcheckProof(proof.combinedProof);
         (uint256[] memory r, uint256 finalEval) = SumcheckVerifier.verify(sc, 0, degreeBits, ts);
 
+        // SECURITY: Override evaluationPoint with sumcheck output r.
+        // The caller-supplied evaluationPoint is untrusted.
+        whirParams.evaluationPoint = _deriveEvalPoint(r);
+        require(whirEvals.length == 3, "whirEvals len");
+
         // Batch consistency
         TranscriptLib.domainSeparate(ts, "pcs-eval");
         require(_computeBatchedEval(proof.preprocessedIndividualEvals, proof.preprocessedBatchR) == proof.preprocessedEvalValue, "pre batch");
@@ -134,6 +139,17 @@ contract MleVerifier {
                 result := addmod(result, mulmod(rPow, v, p), p)
                 rPow := mulmod(rPow, batchR, p)
             }
+        }
+    }
+
+    /// @dev Derive WHIR evaluationPoint from sumcheck output r.
+    /// Each r[i] (Goldilocks base field) is embedded as Ext3(r[i], 0, 0).
+    /// SECURITY: The PCS evaluation point MUST be the sumcheck output point,
+    /// not an external parameter — this is the binding described in paper §4.4.
+    function _deriveEvalPoint(uint256[] memory r) private pure returns (GoldilocksExt3.Ext3[] memory pt) {
+        pt = new GoldilocksExt3.Ext3[](r.length);
+        for (uint256 i = 0; i < r.length; i++) {
+            pt[i] = GoldilocksExt3.Ext3(uint64(r[i]), 0, 0);
         }
     }
 

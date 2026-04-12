@@ -103,26 +103,13 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     let mu: F = transcript.squeeze_challenge();
     ensure!(mu == proof.mu, "Mu mismatch");
 
-    // Lookup (keep transcript in sync)
+    // SECURITY: Lookup argument is not yet implemented. Reject any circuit
+    // that contains lookup tables to prevent unsound verification.
     let has_lookup = !common_data.luts.is_empty();
-    if has_lookup {
-        transcript.domain_separate("lookup");
-        let _delta_lookup: F = transcript.squeeze_challenge();
-        let _beta_lookup: F = transcript.squeeze_challenge();
-        for (i, lp) in proof.lookup_proofs.iter().enumerate() {
-            ensure!(
-                lp.claimed_sum == F::ZERO,
-                "Lookup {i}: claimed_sum ≠ 0"
-            );
-            let lr = verify_sumcheck(
-                &lp.sumcheck_proof,
-                lp.claimed_sum,
-                lp.challenges.len(),
-                &mut transcript,
-            );
-            ensure!(lr.is_ok(), "Lookup {i} sumcheck failed");
-        }
-    }
+    ensure!(
+        !has_lookup,
+        "MLE verifier does not yet support lookup tables"
+    );
 
     // Verify combined sumcheck: Σ [eq(τ,b)·C̃(b) + μ·eq(τ_perm,b)·h̃(b)] = 0
     let combined_result = verify_sumcheck(
@@ -170,6 +157,23 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "WHIR verification failed: {}",
         whir_result.err().unwrap_or_default()
     );
+
+    // SECURITY NOTE (Ext3 ↔ Goldilocks binding):
+    //
+    // WHIR binds the batched polynomial evaluation in Field64_3 via the
+    // Basefield<Field64_3> embedding. This is a DIFFERENT numeric value
+    // than the plain Goldilocks evaluation (mixed_multilinear_extend uses
+    // extension-field arithmetic). However, WHIR binding + Schwartz-Zippel
+    // on batch_r still provides soundness:
+    //   1. WHIR binds the committed polynomial P (via ext3 eval at r)
+    //   2. The Goldilocks batch consistency check (below) verifies that
+    //      individual_evals reconstruct to eval_value via batch_r
+    //   3. By Schwartz-Zippel, forging individual_evals that batch
+    //      correctly but differ from P's true values has probability
+    //      ≤ (num_polys - 1) / |F| ≈ 2^{-64}
+    //
+    // No explicit c0-match check is needed because the binding comes from
+    // WHIR fixing P and Schwartz-Zippel fixing the decomposition.
 
     // 5c: Batch consistency — preprocessed at r
     let batch_r_pre = proof.preprocessed_batch_r;

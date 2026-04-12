@@ -42,6 +42,7 @@ pub fn compute_permutation_numerator<F: Field>(
 
     for row in 0..degree {
         let mut sum = F::ZERO;
+        let mut has_zero_denom = false;
         for j in 0..num_routed_wires {
             let w = if j < wire_values.len() {
                 wire_values[j][row]
@@ -66,14 +67,18 @@ pub fn compute_permutation_numerator<F: Field>(
             // large field, this happens with negligible probability.
             if denom_id == F::ZERO || denom_sigma == F::ZERO {
                 // If denominator is zero, the permutation argument is unsound.
-                // Set h to a non-zero value to ensure rejection.
+                // Set h to a non-zero value to ensure rejection, then break
+                // out of the wire loop so that h[row] is NOT overwritten.
                 h[row] = F::ONE;
-                continue;
+                has_zero_denom = true;
+                break;
             }
 
             sum = sum + denom_id.inverse() - denom_sigma.inverse();
         }
-        h[row] = sum;
+        if !has_zero_denom {
+            h[row] = sum;
+        }
     }
 
     h

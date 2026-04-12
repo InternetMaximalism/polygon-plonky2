@@ -319,16 +319,15 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     transcript.domain_separate("combined-sumcheck");
     let mu: F = transcript.squeeze_challenge();
 
-    // Lookup (TODO)
+    // SECURITY: Lookup argument is not yet implemented. Fail-fast to prevent
+    // silently accepting circuits with lookup tables (which would be unsound).
     let has_lookup = !common_data.luts.is_empty();
-    let lookup_proofs = if has_lookup {
-        transcript.domain_separate("lookup");
-        let _delta_lookup: F = transcript.squeeze_challenge();
-        let _beta_lookup: F = transcript.squeeze_challenge();
-        Vec::new()
-    } else {
-        Vec::new()
-    };
+    anyhow::ensure!(
+        !has_lookup,
+        "Lookup tables not yet supported in MLE prover ({} LUTs present)",
+        common_data.luts.len()
+    );
+    let lookup_proofs = Vec::new();
 
     // ═══════════════════════════════════════════════════════════════════
     // Phase 5: Combined sumcheck

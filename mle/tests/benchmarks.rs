@@ -48,10 +48,9 @@ fn bench_circuit(
     let whir_proof_bytes =
         proof.whir_eval_proof.narg_string.len() + proof.whir_eval_proof.hints.len();
     let sumcheck_bytes: usize = proof
-        .constraint_proof
+        .combined_proof
         .round_polys
         .iter()
-        .chain(proof.permutation_proof.sumcheck_proof.round_polys.iter())
         .map(|rp| rp.evaluations.len() * 8)
         .sum();
     let individual_evals_bytes =
