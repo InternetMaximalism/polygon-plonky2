@@ -4,8 +4,9 @@ Now I have the full picture. Here is the analysis.
 
 ---
 
-~~## 1. Unverified Merkle Leaf Data When Challenge Indices Collide~~
+~~## 1. [HIGH] Unverified Merkle Leaf Data When Challenge Indices Collide~~
 > Fixed in round 1
+> **Severity: HIGH — Collision probability O(k²/N); exploitable only for small domains. Structural weakness in security argument but not a reliable exploit vector.**
 
 **Description.** `_sortAndDedupWithHashes` removes duplicate entries by index, keeping only the first occurrence's hash. Merkle verification then covers only those deduplicated hashes. However, `rowOffsets` is populated sequentially from `hints` *before* deduplication and is never deduplicated. When two challenge indices collide, both row offsets are used in the in-domain evaluation sum, but only the first occurrence's hash is Merkle-verified. The data read at the second row offset is completely unconstrained.
 
@@ -31,8 +32,9 @@ Alternatively, deduplicate `rowOffsets` alongside `rawLeafHashes` (combining the
 
 ---
 
-~~## 2. `finalSize` Not Validated to Equal `2^finalSumcheckRounds`~~
+~~## 2. [HIGH] `finalSize` Not Validated to Equal `2^finalSumcheckRounds`~~
 > Fixed in round 1
+> **Severity: HIGH — Exploitable only if params are prover-influenced rather than fixed in VK; enables polynomial commitment substitution.**
 
 **Description.** `_phaseFinalVectorAndMerkle` reads exactly `params.finalSize` elements into `finalVector` from the transcript (lines 352–356). `_foldEval` then folds that vector using `params.finalSumcheckRounds` rounds of halving (line 1040: `let half := shr(1, size)`). If `finalSize` is not exactly `2^finalSumcheckRounds`, the fold is incorrect: if `finalSize` is larger, trailing elements are silently discarded; if it is odd at any fold step, the last element is dropped without contributing to the output; if `finalSize < 2^finalSumcheckRounds`, the fold reads past the allocated array into adjacent memory.
 
@@ -49,8 +51,9 @@ require(params.finalSize == (1 << params.finalSumcheckRounds),
 
 ---
 
-~~## 3. Modular Bias in Challenge Index Sampling for Non-Power-of-2 Leaf Counts~~
+~~## 3. [HIGH] Modular Bias in Challenge Index Sampling for Non-Power-of-2 Leaf Counts~~
 > Fixed in round 1
+> **Severity: HIGH — Statistical degradation of security parameter; not a direct exploit but weakens the proximity test's guarantees.**
 
 **Description.** `_challengeIndicesUnsorted` (lines 527–554) computes `sizeBytes = ceil(log2(numLeaves) / 8)` and squeezes `count * sizeBytes` bytes, then maps each chunk to an index via `val % numLeaves`. When `numLeaves` is not a power of 2, the value space `[0, 256^sizeBytes)` does not divide evenly by `numLeaves`, so the resulting distribution is non-uniform. Lower-indexed leaves are more likely to be queried.
 
@@ -70,8 +73,9 @@ Alternatively, enforce `require(numLeaves & (numLeaves - 1) == 0, "numLeaves mus
 
 ---
 
-~~## 4. Missing Range Check on Prover-Supplied Field Elements Allows Non-Canonical Inputs~~
+~~## 4. [CRITICAL] Missing Range Check on Prover-Supplied Field Elements Allows Non-Canonical Inputs~~
 > Fixed in round 1
+> **Severity: CRITICAL — Part of confirmed exploit chain: entry point for non-canonical values into WHIR verification. Prover sends uint64 >= P via proverMessageField64x3 → corrupts GoldilocksExt3 arithmetic. See GoldilocksExt3 #1.**
 
 **Description.** The Goldilocks prime is `GL_P = 2^64 − 2^32 + 1 = 0xFFFFFFFF00000001`. Valid field elements must be in `[0, GL_P)`. `proverMessageField64x3` reads three `uint64` values (lines 210–212, 245–248, 329–331, 354–355). A uint64 can hold values in `[GL_P, 2^64 − 1]`, which are non-canonical representations of elements already in `[0, GL_P − 1]`. None of the prover-message reading paths check that received values are `< GL_P`.
 

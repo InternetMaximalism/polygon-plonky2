@@ -1,6 +1,6 @@
 # Keccak256Chain.sol — Soundness Report
 
-~~## 1. Domain Separation Failure: `absorb` Collides With `ratchet`~~
+~~## 1. [HIGH] Domain Separation Failure: `absorb` Collides With `ratchet`~~
 > Skipped in round 1: Domain separation change requires synchronized update to the external spongefish Rust library to maintain cross-language compatibility; exploitable only with specially-crafted 7-byte proof elements which cannot occur in valid WHIR proofs (all proof elements are 8, 24, or 32 bytes)
 
 **Description:**
@@ -15,7 +15,7 @@ If the prover supplies a 7-byte proof element equal to `"ratchet"`, absorbing it
 
 ---
 
-~~## 2. Domain Separation Failure: `absorb` Collides With `squeeze`~~
+~~## 2. [HIGH] Domain Separation Failure: `absorb` Collides With `squeeze`~~
 > Skipped in round 1: Same domain separation rationale as Issue 1; requires 15-byte crafted input which never occurs in valid WHIR proof messages
 
 **Description:**
@@ -36,7 +36,7 @@ A prover supplying a 15-byte field element that equals `"squeeze" || counter_byt
 
 ---
 
-~~## 3. `absorb` Copy Loop Over-Reads Input by Up to 31 Bytes~~
+~~## 3. [HIGH] `absorb` Copy Loop Over-Reads Input by Up to 31 Bytes~~
 > Skipped in round 1: Not functionally exploitable when all callers use Solidity-allocated bytes (ABI padding is zeroed); no behavioral change needed
 
 **Description:**
@@ -51,7 +51,7 @@ Not directly exploitable in normal Solidity-ABI usage because the padding is zer
 
 ---
 
-~~## 4. `squeezeCounter` Silently Wraps on Overflow~~
+~~## 4. [HIGH] `squeezeCounter` Silently Wraps on Overflow~~
 > Fixed in round 1
 
 **Description:**
@@ -68,7 +68,7 @@ Reused counter values produce reused squeeze outputs, meaning the verifier's cha
 
 ---
 
-~~## 5. `squeeze` Last Block Writes 32 Bytes Past `output.length`~~
+~~## 5. [HIGH] `squeeze` Last Block Writes 32 Bytes Past `output.length`~~
 > Skipped in round 1: Not a soundness concern; the function is pure and the overwrite targets unallocated padding that is never read
 
 **Description:**

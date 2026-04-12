@@ -4,7 +4,7 @@ Now I have enough context. Here is my analysis of `SpongefishWhir.sol`:
 
 ---
 
-~~## 1. `verifySumcheck` Operates Over the Base Field Instead of the Extension Field~~
+~~## 1. [HIGH] `verifySumcheck` Operates Over the Base Field Instead of the Extension Field~~
 > Skipped in round 1: verifySumcheck is dead code not called anywhere; full Ext3 refactor would be a significant protocol change; risk of introducing new bugs outweighs fixing unused code
 
 **Description:** The function signature (line 263) accepts `uint64 sum` and returns `uint64 newSum`, meaning sumcheck is performed entirely in the 64-bit base field GF(p). However, WHIR operates over the cubic extension GF(p³). The sumcheck polynomial, its coefficients, and the running sum are all extension field elements. The actual verification in `SpongefishWhirVerify._phaseSumcheck` confirms this: it reads `c0`, `c2` as `Ext3` triples (lines 245–246), and propagates `theSum` as an `Ext3` value.
@@ -17,7 +17,7 @@ Now I have enough context. Here is my analysis of `SpongefishWhir.sol`:
 
 ---
 
-~~## 2. Proof-of-Work Verification Is Silently Omitted~~
+~~## 2. [HIGH] Proof-of-Work Verification Is Silently Omitted~~
 > Skipped in round 1: PoW verification requires protocol-level coordination with the Rust WHIR prover to determine the pow_bits configuration; cannot be implemented without knowing the exact PoW scheme used
 
 **Description:** Lines 275–276 explicitly skip the PoW check with a `// TODO` comment. In WHIR and related FRI-based protocols, PoW provides additional soundness bits — typically 20–30 bits of grinding security. Without it, an adversary can attempt transcript manipulations that would otherwise be computationally infeasible.
@@ -30,7 +30,7 @@ Now I have enough context. Here is my analysis of `SpongefishWhir.sol`:
 
 ---
 
-~~## 3. Challenge Index Byte Assembly Is Big-Endian; Rust Uses Little-Endian~~
+~~## 3. [HIGH] Challenge Index Byte Assembly Is Big-Endian; Rust Uses Little-Endian~~
 > Skipped in round 1: Cannot safely change byte-assembly order from BE to LE without cross-validating against the Rust prover convention; most existing test fixtures use sizeBytes=1 where the issue is invisible; risk of breaking valid test vectors
 
 **Description:** In `challengeIndices` (lines 188–194), the squeezed bytes are assembled into an index value using left-shift accumulation:
@@ -55,8 +55,9 @@ for (uint256 j = 0; j < sizeBytes; j++) {
 
 ---
 
-~~## 4. Non-Canonical Field Element Encodings Are Silently Reduced~~
+~~## 4. [HIGH] Non-Canonical Field Element Encodings Are Silently Reduced~~
 > Fixed in round 1
+> **Severity: HIGH — Fiat-Shamir malleability; prover can choose between canonical/non-canonical encodings to bias transcript hash. Part of broader non-canonical input surface.**
 
 **Description:** `proverMessageField64` (lines 81–94) and `proverMessageField64x3` (lines 117–125) decode prover-supplied field elements and apply `mod GL_P` without first checking whether the raw decoded value is in canonical range `[0, GL_P)`. In the 8-byte LE encoding, GL_P = `0xFFFFFFFF00000001` fits exactly in 64 bits. A prover can encode the value `0` as the 8 bytes `[0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]` (= GL_P in LE), which reduces to 0 but causes a different byte pattern to be absorbed into the Fiat-Shamir sponge.
 
@@ -74,8 +75,9 @@ For the assembly path in `proverMessageField64`, add a bounds check after the by
 
 ---
 
-~~## 5. Dead Code with Incorrect `2^256 mod P` Placeholder Reveals Dangerous Developer Confusion~~
+~~## 5. [HIGH] Dead Code with Incorrect `2^256 mod P` Placeholder Reveals Dangerous Developer Confusion~~
 > Fixed in round 1
+> **Severity: HIGH — Dead code; no current impact but latent vulnerability if wired into live path.**
 
 **Description:** Inside `_leModReduce64` (line 312), a local variable is declared but never used:
 
@@ -93,8 +95,9 @@ uint256 pow256modP = uint256(2) ** 64; // Simplified — need exact value
 
 ---
 
-~~## 6. `_sortAndDedup` Writes Into Free Memory Without Updating the Free Memory Pointer~~
+~~## 6. [HIGH] `_sortAndDedup` Writes Into Free Memory Without Updating the Free Memory Pointer~~
 > Fixed in round 1
+> **Severity: HIGH — Latent memory corruption; not exploitable in current call graph but any future allocation between sort and return corrupts challenge indices.**
 
 **Description:** The inline assembly quicksort (lines 384–456) allocates a scratch stack by reading the current free memory pointer (`mload(0x40)`) and using that address as the stack base. It grows the stack upward by pushing lo/hi pairs (64 bytes each) but never updates the EVM free memory pointer at `0x40` before or after use.
 

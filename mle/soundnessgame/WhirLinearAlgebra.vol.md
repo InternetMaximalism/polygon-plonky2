@@ -4,8 +4,9 @@ Now I have enough context. The `Ext3` struct stores components as `uint64`, mean
 
 ---
 
-~~## 1. `sub(p, r)` Underflows for Unreduced `uint64` Field Components, Corrupting All Arithmetic~~
+~~## 1. [CRITICAL] `sub(p, r)` Underflows for Unreduced `uint64` Field Components, Corrupting All Arithmetic~~
 > Fixed in round 1
+> **Severity: CRITICAL — Part of confirmed exploit chain: prover-supplied non-canonical Ext3 values corrupt eq weight computation → polynomial check → WHIR soundness. See GoldilocksExt3 #1.**
 
 **Description**
 
@@ -53,8 +54,9 @@ Or add an explicit range check at the Solidity level before calling any assembly
 
 ---
 
-~~## 2. Silent Length Truncation in `dotProduct`, `mleEvaluateEq`, and Related Functions Allows Partial-Check Bypass~~
+~~## 2. [CRITICAL] Silent Length Truncation in `dotProduct`, `mleEvaluateEq`, and Related Functions Allows Partial-Check Bypass~~
 > Fixed in round 1
+> **Severity: CRITICAL — Confirmed exploitable. Prover supplies short evaluation array → verifier sums only partial inner product → proof for polynomial satisfying constraints on subset of domain passes verification.**
 
 **Description**
 
@@ -92,8 +94,9 @@ The same guard must be added to `mleEvaluateEq`, `mleEvaluateUnivariateFrom`, an
 
 ---
 
-~~## 3. `eqWeightsFrom` Reads Out-of-Bounds Memory When `start + count > arr.length`~~
+~~## 3. [HIGH] `eqWeightsFrom` Reads Out-of-Bounds Memory When `start + count > arr.length`~~
 > Fixed in round 1
+> **Severity: HIGH — Exploitable only if caller passes unchecked start+count from proof data; corrupts eq weights with garbage memory.**
 
 **Description**
 
@@ -130,8 +133,9 @@ function eqWeightsFrom(
 
 ---
 
-~~## 4. `mleEvaluateUnivariateFrom` Iterates Points in Reverse — Potential Prover/Verifier Mismatch~~
+~~## 4. [HIGH] `mleEvaluateUnivariateFrom` Iterates Points in Reverse — Potential Prover/Verifier Mismatch~~
 > Fixed in round 1
+> **Severity: HIGH — Not exploitable if Rust prover uses the same reversed convention; fix added documentation comment to prevent future mismatch.**
 
 **Description**
 

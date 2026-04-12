@@ -4,8 +4,9 @@ Here is my security analysis of `SpongefishMerkle.sol`:
 
 ---
 
-~~## 1. No Enforcement of Sorted and Deduplicated Indices~~
+~~## 1. [CRITICAL] No Enforcement of Sorted and Deduplicated Indices~~
 > Fixed in round 1
+> **Severity: CRITICAL — Confirmed exploitable. Allows direct Merkle proof forgery bypassing WHIR proximity test without needing to break Fiat-Shamir.**
 
 **Description:** The function comment and `@param` doc (lines 8, 18) state that `indices` must be sorted and deduplicated, but no on-chain validation enforces this invariant. The verification logic at line 80 (`curIndices[i + 1] == (a ^ 1)`) only detects siblings when they are *adjacent* in the array. If indices arrive unsorted, legitimately paired siblings fail to merge and are instead each processed as lone nodes, each consuming a prover-supplied hint.
 
@@ -25,8 +26,9 @@ This converts an implicit, unverified assumption into an enforced invariant.
 
 ---
 
-~~## 2. `loneCount * 32` Can Overflow in `unchecked` Block~~
+~~## 2. [HIGH] `loneCount * 32` Can Overflow in `unchecked` Block~~
 > Fixed in round 1
+> **Severity: HIGH — Requires indices.length ≈ 2^251, not practically achievable due to gas costs.**
 
 **Description:** Lines 44–48 compute `newHintOffset` inside an `unchecked` block:
 
@@ -53,8 +55,9 @@ newHintOffset += loneCount * 32;
 
 ---
 
-~~## 3. Hint Offset Is Tracked Externally to Actual Consumption~~
+~~## 3. [HIGH] Hint Offset Is Tracked Externally to Actual Consumption~~
 > Fixed in round 1
+> **Severity: HIGH — Formula is currently correct; vulnerability only materializes if _processLayerInto is modified. Defense-in-depth fix.**
 
 **Description:** `_processLayerInto` internally advances `newHintOff` by 32 bytes for each lone node (line 103) but never returns the updated offset. The caller (`verify`, lines 44–47) re-derives how many bytes were consumed using `loneCount = nextLen * 2 - curLen`. While this formula is mathematically equivalent to the internal count *under the current code*, the two bookkeeping paths are completely decoupled. No assertion or return value links them.
 
@@ -79,8 +82,9 @@ Then in `verify`:
 
 ---
 
-~~## 4. Assembly Scratch Buffer Uses Free Pointer Without Advancing It~~
+~~## 4. [HIGH] Assembly Scratch Buffer Uses Free Pointer Without Advancing It~~
 > Fixed in round 1
+> **Severity: HIGH — Not exploitable in current code; latent vulnerability if future refactor introduces heap allocation between writes and hash.**
 
 **Description:** In both `_processLayerInto` hash computations (lines 87–92 and 110–115), 64 bytes are written to `mload(0x40)` (the Solidity free memory pointer) without updating the pointer:
 

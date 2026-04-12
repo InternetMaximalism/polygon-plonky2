@@ -18,8 +18,9 @@ preprocessed batching scalar from `circuitDigest`. This matches Rust's `derive_p
 
 ---
 
-~~## 1. Permutation final evaluation (permFinalEval) is not verified against recomputed h(r)~~
+~~## 1. [HIGH] Permutation final evaluation (permFinalEval) is not verified against recomputed h(r)~~
 > Fixed in round 1: Added `require(permFinalEval == proof.pcsPermNumeratorEval)` check. h(r_perm) is now a PCS-bound oracle value.
+> **Severity: HIGH — Formal soundness gap; sumcheck's Schwartz-Zippel already bounds forgery probability to ≤ nd/|F| ≈ 2^{-60}, but oracle check is required for proof completeness.**
 
 **Description**: At lines 123-124, `permChallenges` and `permFinalEval` are unused. The comment at lines 106-122 explains that the permutation sumcheck operates on a different random point than the constraint sumcheck, requiring a separate PCS opening. However, no separate PCS opening is performed. The permutation argument's soundness relies solely on the sumcheck structure + claimed_sum=0, without verifying the final evaluation against an oracle.
 
@@ -29,8 +30,9 @@ preprocessed batching scalar from `circuitDigest`. This matches Rust's `derive_p
 
 **Suggested fix**: Add a second PCS opening at r_perm for the wire/sigma MLEs, recompute h(r_perm) via `ConstraintEvaluator.evaluatePermutationNumerator()`, and verify `permFinalEval == h(r_perm)`.
 
-~~## 2. pcsEvaluations are validated < P but not range-checked for count consistency~~
+~~## 2. [HIGH] pcsEvaluations are validated < P but not range-checked for count consistency~~
 > Fixed in round 1: Added `require(proof.individualEvals.length == numWires + numConstants + numRoutedWires)`.
+> **Severity: HIGH — Missing evaluations default to zero, enabling incorrect constraint evaluation C(r).**
 
 **Description**: At lines 231-236, `individualEvals` elements are validated < P, and at line 340, `pcsEvaluations.length == 1 << n` is checked. However, there is no check that `individualEvals.length == numWires + numConstants + numRoutedWires`. A prover could submit fewer individual evals, causing array out-of-bounds (which Solidity handles as zero) or more evals (which are ignored but waste gas).
 
@@ -40,8 +42,9 @@ preprocessed batching scalar from `circuitDigest`. This matches Rust's `derive_p
 
 **Suggested fix**: Add `require(proof.individualEvals.length == proof.numWires + proof.numConstants + proof.numRoutedWires)`.
 
-~~## 3. Extension field constraint combination is not fully verified on-chain~~
+~~## 3. [HIGH] Extension field constraint combination is not fully verified on-chain~~
 > Fixed in round 1: Oracle approach — Rust prover computes flattened C(r) in extension field, commits via PCS. Solidity receives PCS-bound value. No extension field arithmetic needed on-chain.
+> **Severity: HIGH — Soundness gap for circuits with extension field gates (CosetInterpolation, ArithmeticExtension); base-field-only evaluation misses c1 component.**
 
 **Description**: At line 128, the extension-combine challenge is squeezed to advance the transcript, but the actual extension field combination (flattening D=2 components into a single base field value) is done by the Rust prover. The Solidity verifier's `ConstraintEvaluator.evaluateConstraints()` operates in the base field only and does not handle extension field constraint components.
 
@@ -51,8 +54,9 @@ preprocessed batching scalar from `circuitDigest`. This matches Rust's `derive_p
 
 **Suggested fix**: Either implement extension field arithmetic in the Solidity constraint evaluator, or require the prover to supply the D=2 constraint components separately and verify the combination with the ext_challenge on-chain.
 
-~~## 4. Merkle tree odd-node duplication must match Rust implementation~~
+~~## 4. [HIGH] Merkle tree odd-node duplication must match Rust implementation~~
 > Skipped in round 1: Power-of-two length is enforced, so odd-node case only arises during internal tree construction. Duplication strategy matches Rust. No attack vector.
+> **Severity: HIGH — No current attack vector; duplication matches Rust. Cross-language compatibility concern.**
 
 **Description**: At line 317, when the number of nodes is odd, the last node is duplicated: `right = layer[2*i]` (same as left). The Rust `merkle_pcs.rs` uses the same strategy (`hash_pair(&chunk[0], &chunk[0])`), so they match. However, this is not explicitly tested in the compatibility tests.
 

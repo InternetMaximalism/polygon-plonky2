@@ -4,8 +4,9 @@ Now I have enough context. Let me write the analysis.
 
 ---
 
-~~## 1. `inv` Silently Returns Zero for a Zero Element — No Revert~~
+~~## 1. [CRITICAL] `inv` Silently Returns Zero for a Zero Element — No Revert~~
 > Fixed in round 1
+> **Severity: CRITICAL — Part of confirmed exploit chain: non-canonical zero (c0=P) bypasses isZero guard → inv(0)=0 → linearFormRlc=0 → WHIR final check trivially passes. Combined with issues #2, #3, #5 and SpongefishWhirVerify #4.**
 
 **Description.** The `inv` function computes the inverse via Fermat's little theorem applied to the norm. If the input is the zero element, `norm = 0`, and the loop computes `0^(P-2) mod P = 0`, so `normInv = 0`. The function returns `(0, 0, 0)` — the zero element — instead of reverting.
 
@@ -35,8 +36,9 @@ Or, inside the assembly block, revert if `norm == 0` after computing it.
 
 ---
 
-~~## 2. `isZero` and `eq` Use Bitwise Comparison, Not Field Equality~~
+~~## 2. [CRITICAL] `isZero` and `eq` Use Bitwise Comparison, Not Field Equality~~
 > Fixed in round 1
+> **Severity: CRITICAL — Part of confirmed exploit chain: enables non-canonical zero (c0=P) to bypass isZero guard before inv(). See #1.**
 
 **Description.** Both functions compare the raw `uint64` slot values:
 
@@ -66,8 +68,9 @@ Better: enforce that all `Ext3` values produced or accepted are already in canon
 
 ---
 
-~~## 3. `fromBase` Accepts Out-of-Range `uint64` Values Without Canonicalization~~
+~~## 3. [CRITICAL] `fromBase` Accepts Out-of-Range `uint64` Values Without Canonicalization~~
 > Fixed in round 1
+> **Severity: CRITICAL — Part of confirmed exploit chain: entry point for non-canonical values [P, 2^64-1] into Ext3 arithmetic. See #1.**
 
 **Description.** `fromBase` stores the raw `uint64` argument directly without checking `x < P`:
 
@@ -96,8 +99,9 @@ function fromBase(uint64 x) internal pure returns (Ext3 memory r) {
 
 ---
 
-~~## 4. `evalL0` Silently Returns Zero When `degreeBits >= 64` (Unsafe `uint64` Truncation)~~
+~~## 4. [HIGH] `evalL0` Silently Returns Zero When `degreeBits >= 64` (Unsafe `uint64` Truncation)~~
 > Fixed in round 1
+> **Severity: HIGH — Currently dead code; exploitable only if a future caller passes degreeBits >= 64.**
 
 **Description.** The denominator scalar `n` is computed as a `uint256`, then truncated to `uint64`:
 
@@ -123,8 +127,9 @@ Also add an explicit `inv` zero-check (Issue 1) so a zero denominator (when `x =
 
 ---
 
-~~## 5. `sub` Underflows in 256-bit Space for Non-Canonical Second Operands~~
+~~## 5. [CRITICAL] `sub` Underflows in 256-bit Space for Non-Canonical Second Operands~~
 > Fixed in round 1
+> **Severity: CRITICAL — Part of confirmed exploit chain: non-canonical inputs produce (a - b + 2^32 - 1) mod P instead of (a - b) mod P, corrupting all downstream WHIR verification arithmetic. See #1.**
 
 **Description.** The subtraction is implemented as:
 
