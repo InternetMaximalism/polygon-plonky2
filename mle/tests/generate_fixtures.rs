@@ -88,8 +88,12 @@ fn build_recursive_circuit() -> (
     let outer_data = outer_builder.build::<C>();
 
     let mut outer_pw = PartialWitness::new();
-    outer_pw.set_proof_with_pis_target(&proof_t, &inner_proof);
-    outer_pw.set_verifier_data_target(&vd_t, &inner_data.verifier_only);
+    outer_pw
+        .set_proof_with_pis_target(&proof_t, &inner_proof)
+        .unwrap();
+    outer_pw
+        .set_verifier_data_target(&vd_t, &inner_data.verifier_only)
+        .unwrap();
     (outer_data, outer_pw)
 }
 

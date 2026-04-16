@@ -212,8 +212,12 @@ fn benchmark_all_circuits() {
 
         let t4 = Instant::now();
         let mut outer_pw = PartialWitness::new();
-        outer_pw.set_proof_with_pis_target(&proof_t, &inner_proof);
-        outer_pw.set_verifier_data_target(&vd_t, &inner_data.verifier_only);
+        outer_pw
+            .set_proof_with_pis_target(&proof_t, &inner_proof)
+            .unwrap();
+        outer_pw
+            .set_verifier_data_target(&vd_t, &inner_data.verifier_only)
+            .unwrap();
         results.push(bench_circuit("recursive_verify", &outer_data, outer_pw));
         println!("  [5] mle_prove+verify:     {:?}", t4.elapsed());
         println!("  [TOTAL] recursive:        {:?}", t0.elapsed());
@@ -265,8 +269,12 @@ fn benchmark_recursive_only() {
 
     let t3 = Instant::now();
     let mut outer_pw = PartialWitness::new();
-    outer_pw.set_proof_with_pis_target(&proof_t, &inner_proof);
-    outer_pw.set_verifier_data_target(&vd_t, &inner_data.verifier_only);
+    outer_pw
+        .set_proof_with_pis_target(&proof_t, &inner_proof)
+        .unwrap();
+    outer_pw
+        .set_verifier_data_target(&vd_t, &inner_data.verifier_only)
+        .unwrap();
 
     let mut timing = TimingTree::default();
     let proof = mle_prove::<F, C, D>(

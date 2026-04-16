@@ -460,7 +460,7 @@ mod test {
             &fri_instances,
             &fri_openings,
             &fri_challenges,
-            &[merkle_cap.clone()],
+            std::slice::from_ref(&merkle_cap),
             &proof,
             &fri_params,
         )?;

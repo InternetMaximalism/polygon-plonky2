@@ -670,8 +670,12 @@ fn test_recursive_circuit_constraints_zero() {
 
     // Set the outer witness
     let mut outer_pw = PartialWitness::new();
-    outer_pw.set_proof_with_pis_target(&proof_t, &inner_proof);
-    outer_pw.set_verifier_data_target(&verifier_data_t, &inner_data.verifier_only);
+    outer_pw
+        .set_proof_with_pis_target(&proof_t, &inner_proof)
+        .unwrap();
+    outer_pw
+        .set_verifier_data_target(&verifier_data_t, &inner_data.verifier_only)
+        .unwrap();
 
     // Extract evaluation tables from the outer (recursive) circuit
     let mut timing = TimingTree::default();
@@ -733,8 +737,10 @@ fn test_recursive_circuit_constraints_zero() {
     // ── Full E2E: MLE prove + verify on the recursive circuit ──
     let outer_pw2 = {
         let mut pw = PartialWitness::new();
-        pw.set_proof_with_pis_target(&proof_t, &inner_proof);
-        pw.set_verifier_data_target(&verifier_data_t, &inner_data.verifier_only);
+        pw.set_proof_with_pis_target(&proof_t, &inner_proof)
+            .unwrap();
+        pw.set_verifier_data_target(&verifier_data_t, &inner_data.verifier_only)
+            .unwrap();
         pw
     };
 
