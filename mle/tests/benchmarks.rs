@@ -92,7 +92,7 @@ fn benchmark_all_circuits() {
         builder.register_public_input(cur);
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
-        pw.set_target(x, F::from_canonical_u64(2));
+        pw.set_target(x, F::from_canonical_u64(2)).unwrap();
         results.push(bench_circuit("mul_chain_5", &circuit, pw));
     }
 
@@ -108,7 +108,7 @@ fn benchmark_all_circuits() {
         builder.register_public_input(cur);
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
-        pw.set_target(x, F::from_canonical_u64(2));
+        pw.set_target(x, F::from_canonical_u64(2)).unwrap();
         results.push(bench_circuit("mul_chain_50", &circuit, pw));
     }
 
@@ -124,7 +124,7 @@ fn benchmark_all_circuits() {
         builder.register_public_input(cur);
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
-        pw.set_target(x, F::from_canonical_u64(2));
+        pw.set_target(x, F::from_canonical_u64(2)).unwrap();
         results.push(bench_circuit("mul_chain_200", &circuit, pw));
     }
 
@@ -141,7 +141,7 @@ fn benchmark_all_circuits() {
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
         for (i, &inp) in inputs.iter().enumerate() {
-            pw.set_target(inp, F::from_canonical_u64(i as u64 + 1));
+            pw.set_target(inp, F::from_canonical_u64(i as u64 + 1)).unwrap();
         }
         results.push(bench_circuit("poseidon_hash", &circuit, pw));
     }
@@ -183,8 +183,8 @@ fn benchmark_all_circuits() {
 
         let t1 = Instant::now();
         let mut inner_pw = PartialWitness::new();
-        inner_pw.set_target(x, F::from_canonical_u64(3));
-        inner_pw.set_target(y, F::from_canonical_u64(7));
+        inner_pw.set_target(x, F::from_canonical_u64(3)).unwrap();
+        inner_pw.set_target(y, F::from_canonical_u64(7)).unwrap();
         let inner_proof = inner_data.prove(inner_pw).unwrap();
         println!("  [2] inner plonky2 prove: {:?}", t1.elapsed());
 
@@ -239,8 +239,8 @@ fn benchmark_recursive_only() {
 
     let t1 = Instant::now();
     let mut inner_pw = PartialWitness::new();
-    inner_pw.set_target(x, F::from_canonical_u64(3));
-    inner_pw.set_target(y, F::from_canonical_u64(7));
+    inner_pw.set_target(x, F::from_canonical_u64(3)).unwrap();
+    inner_pw.set_target(y, F::from_canonical_u64(7)).unwrap();
     let inner_proof = inner_data.prove(inner_pw).unwrap();
     println!("  [2] inner plonky2 prove: {:?}", t1.elapsed());
 

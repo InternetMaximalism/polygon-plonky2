@@ -268,8 +268,8 @@ mod tests {
         let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
 
         let mut pw = PartialWitness::new();
-        pw.set_target(x, F::from_canonical_u64(3));
-        pw.set_target(y, F::from_canonical_u64(7));
+        pw.set_target(x, F::from_canonical_u64(3)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(7)).unwrap();
 
         let mut timing = TimingTree::default();
         let proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
@@ -284,8 +284,8 @@ mod tests {
         let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
 
         let mut pw = PartialWitness::new();
-        pw.set_target(x, F::from_canonical_u64(5));
-        pw.set_target(y, F::from_canonical_u64(11));
+        pw.set_target(x, F::from_canonical_u64(5)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(11)).unwrap();
 
         let mut timing = TimingTree::default();
         let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
@@ -312,8 +312,8 @@ mod tests {
         let vk_b = mle_setup::<F, C, D>(&circuit_b.prover_only, &circuit_b.common);
 
         let mut pw_a = PartialWitness::new();
-        pw_a.set_target(x_a, F::from_canonical_u64(3));
-        pw_a.set_target(y_a, F::from_canonical_u64(7));
+        pw_a.set_target(x_a, F::from_canonical_u64(3)).unwrap();
+        pw_a.set_target(y_a, F::from_canonical_u64(7)).unwrap();
 
         let mut timing = TimingTree::default();
         let proof_a =

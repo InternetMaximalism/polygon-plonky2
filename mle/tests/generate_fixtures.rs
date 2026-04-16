@@ -32,7 +32,7 @@ fn build_mul_chain_circuit(
     builder.register_public_input(current);
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(x, F::from_canonical_u64(2));
+    pw.set_target(x, F::from_canonical_u64(2)).unwrap();
     (circuit, pw)
 }
 
@@ -51,7 +51,7 @@ fn build_hash_circuit() -> (
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
     for (i, &input) in inputs.iter().enumerate() {
-        pw.set_target(input, F::from_canonical_u64(i as u64 + 1));
+        pw.set_target(input, F::from_canonical_u64(i as u64 + 1)).unwrap();
     }
     (circuit, pw)
 }
@@ -70,8 +70,8 @@ fn build_recursive_circuit() -> (
     let inner_data = inner_builder.build::<C>();
 
     let mut inner_pw = PartialWitness::new();
-    inner_pw.set_target(x, F::from_canonical_u64(3));
-    inner_pw.set_target(y, F::from_canonical_u64(7));
+    inner_pw.set_target(x, F::from_canonical_u64(3)).unwrap();
+    inner_pw.set_target(y, F::from_canonical_u64(7)).unwrap();
     let inner_proof = inner_data.prove(inner_pw).unwrap();
 
     // Outer: verify inner proof
