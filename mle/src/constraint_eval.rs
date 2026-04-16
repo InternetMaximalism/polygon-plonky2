@@ -226,7 +226,8 @@ mod tests {
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
         for (i, &input) in inputs.iter().enumerate() {
-            pw.set_target(input, F::from_canonical_u64(i as u64 + 1)).unwrap();
+            pw.set_target(input, F::from_canonical_u64(i as u64 + 1))
+                .unwrap();
         }
 
         let mut timing = TimingTree::default();

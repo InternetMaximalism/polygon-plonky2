@@ -141,7 +141,8 @@ fn benchmark_all_circuits() {
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
         for (i, &inp) in inputs.iter().enumerate() {
-            pw.set_target(inp, F::from_canonical_u64(i as u64 + 1)).unwrap();
+            pw.set_target(inp, F::from_canonical_u64(i as u64 + 1))
+                .unwrap();
         }
         results.push(bench_circuit("poseidon_hash", &circuit, pw));
     }

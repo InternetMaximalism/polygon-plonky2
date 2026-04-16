@@ -199,7 +199,8 @@ fn test_poseidon_gate_constraints_zero() {
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
     for (i, &input) in inputs.iter().enumerate() {
-        pw.set_target(input, F::from_canonical_u64(i as u64 + 1)).unwrap();
+        pw.set_target(input, F::from_canonical_u64(i as u64 + 1))
+            .unwrap();
     }
 
     let mut timing = TimingTree::default();
@@ -247,7 +248,8 @@ fn test_poseidon_circuit_prove_verify() {
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
     for (i, &input) in inputs.iter().enumerate() {
-        pw.set_target(input, F::from_canonical_u64(i as u64 + 10)).unwrap();
+        pw.set_target(input, F::from_canonical_u64(i as u64 + 10))
+            .unwrap();
     }
 
     let mut timing = TimingTree::default();
