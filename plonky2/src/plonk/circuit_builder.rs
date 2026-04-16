@@ -5,11 +5,13 @@ use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::cmp::max;
 use core::mem::take;
 #[cfg(feature = "std")]
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc};
 
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools;
 use log::{debug, info, warn, Level};
+#[cfg(feature = "timing")]
+use web_time::Instant;
 
 use crate::field::cosets::get_unique_coset_shifts;
 use crate::field::extension::{Extendable, FieldExtension};
@@ -530,6 +532,13 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             .push(CopyConstraint::new((x, y), self.context_log.open_stack()));
     }
 
+    /// Enforces that the underlying values of two [`Target`] arrays are equal.
+    pub fn connect_array<const N: usize>(&mut self, x: [Target; N], y: [Target; N]) {
+        for i in 0..N {
+            self.connect(x[i], y[i]);
+        }
+    }
+
     /// Enforces that two [`ExtensionTarget<D>`] underlying values are equal.
     pub fn connect_extension(&mut self, src: ExtensionTarget<D>, dst: ExtensionTarget<D>) {
         for i in 0..D {
@@ -543,6 +552,18 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let diff = self.sub(x, y);
         let constr = self.mul(condition, diff);
         self.connect(constr, zero);
+    }
+
+    /// If `condition`, enforces that two `ExtensionTarget<D>` values are equal.
+    pub fn conditional_assert_eq_ext(
+        &mut self,
+        condition: Target,
+        x: ExtensionTarget<D>,
+        y: ExtensionTarget<D>,
+    ) {
+        for i in 0..D {
+            self.conditional_assert_eq(condition, x.0[i], y.0[i]);
+        }
     }
 
     /// Enforces that a routable `Target` value is 0, using Plonk's permutation argument.
@@ -1072,7 +1093,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     ) -> (CircuitData<F, C, D>, bool) {
         let mut timing = TimingTree::new("preprocess", Level::Trace);
 
-        #[cfg(feature = "std")]
+        #[cfg(feature = "timing")]
         let start = Instant::now();
 
         // Execute all hooks
@@ -1320,7 +1341,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         };
 
         timing.print();
-        #[cfg(feature = "std")]
+        #[cfg(feature = "timing")]
         debug!("Building circuit took {}s", start.elapsed().as_secs_f32());
         (
             CircuitData {
