@@ -3,6 +3,8 @@
 
 This repository was originally for Plonky2, a SNARK implementation based on techniques from PLONK and FRI. It has since expanded to include tools such as Starky, a highly performant STARK implementation.
 
+Periodic auditing and maintenance of this fork repository, including the MLE/WHIR proving system, is conducted by the Intmax team.
+
 
 ## Documentation
 
