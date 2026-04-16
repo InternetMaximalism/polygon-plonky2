@@ -484,7 +484,7 @@ where
     let quotient_degree = common_data.quotient_degree();
     let degree = common_data.degree();
 
-    set_lookup_wires(prover_data, common_data, &mut partition_witness);
+    set_lookup_wires(prover_data, common_data, &mut partition_witness)?;
 
     let public_inputs = partition_witness.get_targets(&prover_data.public_inputs);
     let public_inputs_hash = C::InnerHasher::hash_no_pad(&public_inputs);

@@ -59,7 +59,7 @@ pub fn verify_merkle_proof_to_cap<F: RichField, H: Hasher<F>>(
     proof: &MerkleProof<F, H>,
 ) -> Result<()> {
     verify_batch_merkle_proof_to_cap(
-        &[leaf_data.clone()],
+        core::slice::from_ref(&leaf_data),
         &[proof.siblings.len()],
         leaf_index,
         merkle_cap,
