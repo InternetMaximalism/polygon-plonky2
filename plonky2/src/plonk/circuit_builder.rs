@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::cmp::max;
+use core::mem::take;
 #[cfg(feature = "std")]
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -49,6 +50,7 @@ use crate::plonk::copy_constraint::CopyConstraint;
 use crate::plonk::permutation_argument::Forest;
 use crate::plonk::plonk_common::PlonkOracle;
 use crate::timed;
+use crate::util::builder_hook::BuilderHookRef;
 use crate::util::context_tree::ContextTree;
 use crate::util::partial_products::num_partial_products;
 use crate::util::timing::TimingTree;
@@ -167,6 +169,9 @@ pub struct CircuitBuilder<F: RichField + Extendable<D>, const D: usize> {
     /// Generators used to generate the witness.
     generators: Vec<WitnessGeneratorRef<F, D>>,
 
+    /// Hooks constrained at the beginning of the circuit build
+    hooks: HashMap<&'static str, BuilderHookRef<F, D>>,
+
     constants_to_targets: HashMap<F, Target>,
     targets_to_constants: HashMap<Target, F>,
 
@@ -218,6 +223,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             copy_constraints: Vec::new(),
             context_log: ContextTree::new(),
             generators: Vec::new(),
+            hooks: HashMap::new(),
             constants_to_targets: HashMap::new(),
             targets_to_constants: HashMap::new(),
             base_arithmetic_results: HashMap::new(),
@@ -593,6 +599,18 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     pub fn add_simple_generator<G: SimpleGenerator<F, D>>(&mut self, generator: G) {
         self.generators
             .push(WitnessGeneratorRef::new(generator.adapter()));
+    }
+
+    pub fn add_hook(&mut self, key: &'static str, hook: BuilderHookRef<F, D>) {
+        self.hooks.insert(key, hook);
+    }
+
+    pub fn get_hook(&self, key: &'static str) -> Option<&BuilderHookRef<F, D>> {
+        self.hooks.get(key)
+    }
+
+    pub fn get_hook_mut(&mut self, key: &'static str) -> Option<&mut BuilderHookRef<F, D>> {
+        self.hooks.get_mut(key)
     }
 
     /// Returns a routable target with a value of 0.
@@ -1078,6 +1096,15 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         #[cfg(feature = "timing")]
         let start = Instant::now();
 
+        // Execute all hooks
+        let hooks = take(&mut self.hooks);
+        let mut hook_keys = hooks.keys().cloned().collect::<Vec<_>>();
+        hook_keys.sort(); // Sort the keys to ensure deterministic order.
+        for key in hook_keys {
+            let hook = hooks.get(&key).unwrap();
+            hook.0.constrain(&mut self);
+        }
+
         let rate_bits = self.config.fri_config.rate_bits;
         let cap_height = self.config.fri_config.cap_height;
         // Total number of LUTs.
@@ -1178,6 +1205,11 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         // Precompute FFT roots.
         let max_fft_points = 1 << (degree_bits + max(rate_bits, log2_ceil(quotient_degree_factor)));
         let fft_root_table = fft_root_table(max_fft_points);
+
+        // Preserve raw constant evaluations (transposed to row-major) before
+        // they are consumed by the FRI commitment. These are needed by
+        // alternative proving backends (e.g., multilinear).
+        let constant_evals = transpose_poly_values(constant_vecs.clone());
 
         let constants_sigmas_commitment = if commit_to_sigma {
             let constants_sigmas_vecs = [constant_vecs, sigma_vecs.clone()].concat();
@@ -1293,6 +1325,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             generator_indices_by_watches,
             constants_sigmas_commitment,
             sigmas: transpose_poly_values(sigma_vecs),
+            constant_evals,
             subgroup,
             public_inputs: self.public_inputs,
             representative_map: forest.parents,

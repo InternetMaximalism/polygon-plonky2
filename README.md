@@ -3,11 +3,7 @@
 
 This repository was originally for Plonky2, a SNARK implementation based on techniques from PLONK and FRI. It has since expanded to include tools such as Starky, a highly performant STARK implementation.
 
-## ⚠️ Plonky2 Deprecation Notice
-
-Plonky2 is being deprecated and will no longer receive updates or support.
-
-Please consider using **[Plonky3](https://github.com/Plonky3/Plonky3)** instead, Polygon's next-generation ZK proving system.
+Periodic auditing and maintenance of this fork repository, including the MLE/WHIR proving system, is conducted by the Intmax team.
 
 ## Documentation
 

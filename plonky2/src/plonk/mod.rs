@@ -13,6 +13,6 @@ pub mod plonk_common;
 pub mod proof;
 pub mod prover;
 mod validate_shape;
-pub(crate) mod vanishing_poly;
+pub mod vanishing_poly;
 pub mod vars;
 pub mod verifier;

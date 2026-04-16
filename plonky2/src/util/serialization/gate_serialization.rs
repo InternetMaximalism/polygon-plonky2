@@ -80,7 +80,7 @@ macro_rules! impl_gate_serializer {
 
         fn write_gate(
             &self,
-            buf: &mut $crate::util::serialization::gate_serialization::Vec<u8>,
+            buf: &mut Vec<u8>,
             gate: &$crate::gates::gate::GateRef<F, D>,
             common: &$crate::plonk::circuit_data::CommonCircuitData<F, D>,
         ) -> $crate::util::serialization::IoResult<()> {
@@ -94,6 +94,9 @@ macro_rules! impl_gate_serializer {
 }
 
 pub mod default {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+
     use plonky2_field::extension::Extendable;
 
     use crate::gates::arithmetic_base::ArithmeticGate;

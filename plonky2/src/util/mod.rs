@@ -10,6 +10,7 @@ pub use plonky2_util::*;
 use crate::field::polynomial::PolynomialValues;
 use crate::field::types::Field;
 
+pub mod builder_hook;
 pub(crate) mod context_tree;
 pub(crate) mod partial_products;
 pub mod reducing;

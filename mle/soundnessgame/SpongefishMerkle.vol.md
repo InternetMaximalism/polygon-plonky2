@@ -1,0 +1,110 @@
+# SpongefishMerkle.sol — Soundness Report
+
+Here is my security analysis of `SpongefishMerkle.sol`:
+
+---
+
+~~## 1. [CRITICAL] No Enforcement of Sorted and Deduplicated Indices~~
+> Fixed in round 1
+> **Severity: CRITICAL — Confirmed exploitable. Allows direct Merkle proof forgery bypassing WHIR proximity test without needing to break Fiat-Shamir.**
+
+**Description:** The function comment and `@param` doc (lines 8, 18) state that `indices` must be sorted and deduplicated, but no on-chain validation enforces this invariant. The verification logic at line 80 (`curIndices[i + 1] == (a ^ 1)`) only detects siblings when they are *adjacent* in the array. If indices arrive unsorted, legitimately paired siblings fail to merge and are instead each processed as lone nodes, each consuming a prover-supplied hint.
+
+**Affected code:** Lines 78–120 (`_processLayerInto`), specifically line 80.
+
+**Why this is a soundness concern:** With unsorted indices, a malicious prover can force any two nodes—even true siblings—to be treated as lone nodes. For each "lone" node the prover supplies an arbitrary sibling hash from the `hints` buffer. The prover now controls both sibling inputs for the parent hash computation. In combination, this lets a prover fabricate an arbitrarily deep intermediate sub-tree, requiring only that the final computed value equals `root`. While keccak256 preimage resistance prevents casual exploitation, the proof of security now depends entirely on that one property rather than on the structural invariant of the protocol. Additionally, with *duplicate* indices (e.g., `[0, 0]`), the formula `loneCount = nextLen * 2 - curLen` still accounts correctly for hint bytes consumed, so hint offsets do not misalign—but the duplicate entries cause `curIndices.length > 1` at the final check, which causes *legitimate* multi-leaf proofs to fail if any external code reorders or repeats indices.
+
+**Suggested fix:** Add a strict ascending-order check at the start of `verify`:
+
+```solidity
+for (uint256 i = 1; i < indices.length; i++) {
+    require(indices[i] > indices[i - 1], "indices must be strictly increasing");
+}
+```
+
+This converts an implicit, unverified assumption into an enforced invariant.
+
+---
+
+~~## 2. [HIGH] `loneCount * 32` Can Overflow in `unchecked` Block~~
+> Fixed in round 1
+> **Severity: HIGH — Requires indices.length ≈ 2^251, not practically achievable due to gas costs.**
+
+**Description:** Lines 44–48 compute `newHintOffset` inside an `unchecked` block:
+
+```solidity
+unchecked {
+    uint256 curLen = curIndices.length;
+    uint256 loneCount = nextLen * 2 > curLen ? (nextLen * 2) - curLen : 0;
+    newHintOffset += loneCount * 32;
+}
+```
+
+`loneCount` is at most `curLen ≤ indices.length`. If `indices.length` is close to `2^251`, then `loneCount * 32` wraps to a small value, silently advancing `newHintOffset` by far less than the number of hints actually consumed. On the next layer, `_processLayerInto` is called with a `hintOff` that points into already-consumed hint bytes. This lets a prover craft an over-large proof where recycled hint values from an earlier layer satisfy the verification in a later one.
+
+**Affected code:** Lines 44–48.
+
+**Why this is a soundness concern:** A wrapped `newHintOffset` causes subsequent layers to read hint bytes from incorrect (earlier) positions. A crafted proof could place a valid root-reaching hash at the recycled position, allowing a layer to verify against a hash value that was intended for a different layer and a different position in the tree.
+
+**Suggested fix:** Remove `unchecked` and add an explicit bound check, or guard with:
+
+```solidity
+require(loneCount <= type(uint256).max / 32, "hint offset overflow");
+newHintOffset += loneCount * 32;
+```
+
+---
+
+~~## 3. [HIGH] Hint Offset Is Tracked Externally to Actual Consumption~~
+> Fixed in round 1
+> **Severity: HIGH — Formula is currently correct; vulnerability only materializes if _processLayerInto is modified. Defense-in-depth fix.**
+
+**Description:** `_processLayerInto` internally advances `newHintOff` by 32 bytes for each lone node (line 103) but never returns the updated offset. The caller (`verify`, lines 44–47) re-derives how many bytes were consumed using `loneCount = nextLen * 2 - curLen`. While this formula is mathematically equivalent to the internal count *under the current code*, the two bookkeeping paths are completely decoupled. No assertion or return value links them.
+
+**Affected code:** Lines 41–47 (`verify`), line 75/103 (`_processLayerInto`).
+
+**Why this is a soundness concern:** If `_processLayerInto` is ever modified—e.g., to handle an edge case or add a new branch that reads an extra hint—the external formula in `verify` will silently remain wrong. The mismatch causes all subsequent layers to read hints from shifted positions, which is a class of vulnerability (cross-layer hint reuse) that is very difficult to detect via testing because proofs generated by an honest prover will still succeed; only crafted adversarial proofs would exploit the gap.
+
+**Suggested fix:** Have `_processLayerInto` return the updated hint offset as a second return value, removing the duplicate accounting:
+
+```solidity
+function _processLayerInto(...) private pure returns (uint256 nextLen, uint256 newHintOff) {
+    newHintOff = hintOff;
+    // ... existing logic, already tracking newHintOff correctly ...
+}
+```
+
+Then in `verify`:
+```solidity
+(nextLen, newHintOffset) = _processLayerInto(..., newHintOffset);
+// Remove the unchecked loneCount block entirely.
+```
+
+---
+
+~~## 4. [HIGH] Assembly Scratch Buffer Uses Free Pointer Without Advancing It~~
+> Fixed in round 1
+> **Severity: HIGH — Not exploitable in current code; latent vulnerability if future refactor introduces heap allocation between writes and hash.**
+
+**Description:** In both `_processLayerInto` hash computations (lines 87–92 and 110–115), 64 bytes are written to `mload(0x40)` (the Solidity free memory pointer) without updating the pointer:
+
+```solidity
+let scratch := mload(0x40)
+mstore(scratch, left)
+mstore(add(scratch, 32), right)
+parentHash := keccak256(scratch, 64)
+```
+
+**Affected code:** Lines 87–92, 110–115.
+
+**Why this is a soundness concern:** The current code is safe only because no Solidity memory allocation occurs between the `mstore` calls and the `keccak256` call within the same assembly block. However, if a future refactor introduces *any* heap allocation (e.g., a `new` array, a function call that allocates) between the writes and the hash, the scratch region will be silently overwritten with irrelevant data before hashing. The resulting wrong hash would be stored as a parent node and could allow an adversary who controls the inserted allocation to craft `left`/`right` values that hash to a desired intermediate value. This is a latent soundness hazard.
+
+**Suggested fix:** Use the EVM's dedicated scratch space (0x00–0x3f) for short-lived 64-byte hashes, which is safe and idiomatic:
+
+```solidity
+mstore(0x00, left)
+mstore(0x20, right)
+parentHash := keccak256(0x00, 64)
+```
+
+This avoids touching the heap entirely and removes the dependency on free-pointer state.

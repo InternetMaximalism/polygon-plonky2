@@ -19,7 +19,7 @@ use core::ops::{Range, RangeFrom};
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::circuit_builder::LookupWire;
 use crate::field::extension::Extendable;
@@ -36,7 +36,7 @@ use crate::gates::gate::GateRef;
 use crate::gates::lookup::Lookup;
 use crate::gates::lookup_table::LookupTable;
 use crate::gates::selectors::SelectorsInfo;
-use crate::hash::hash_types::{HashOutTarget, MerkleCapTarget, RichField};
+use crate::hash::hash_types::{HashOut, HashOutTarget, MerkleCapTarget, RichField};
 use crate::hash::merkle_tree::MerkleCap;
 use crate::iop::ext_target::ExtensionTarget;
 use crate::iop::generator::{generate_partial_witness, WitnessGeneratorRef};
@@ -151,7 +151,7 @@ pub struct MockCircuitData<F: RichField + Extendable<D>, C: GenericConfig<D, F =
 impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
     MockCircuitData<F, C, D>
 {
-    pub fn generate_witness(&self, inputs: PartialWitness<F>) -> PartitionWitness<F> {
+    pub fn generate_witness(&self, inputs: PartialWitness<F>) -> PartitionWitness<'_, F> {
         generate_partial_witness::<F, C, D>(inputs, &self.prover_only, &self.common).unwrap()
     }
 }
@@ -349,6 +349,10 @@ pub struct ProverOnlyCircuitData<
     pub constants_sigmas_commitment: PolynomialBatch<F, C, D>,
     /// The transpose of the list of sigma polynomials.
     pub sigmas: Vec<Vec<F>>,
+    /// Raw constant polynomial evaluations (transposed): `constant_evals[row][col]`.
+    /// Includes selector polynomials, lookup selectors, and gate constants.
+    /// Preserved for use by alternative proving backends (e.g., multilinear).
+    pub constant_evals: Vec<Vec<F>>,
     /// Subgroup of order `degree`.
     pub subgroup: Vec<F>,
     /// Targets to be made public.
@@ -664,11 +668,46 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
     }
 }
 
+/// Raw evaluation tables extracted from a Plonky2 circuit for use by alternative proving
+/// backends (e.g., multilinear extension + sumcheck + WHIR).
+///
+/// These tables contain the pre-interpolation field element values that would normally be
+/// converted to univariate polynomials and committed via FRI. By extracting them before
+/// that step, a multilinear prover can place them on `{0,1}^n` as MLEs instead.
+#[derive(Debug)]
+pub struct EvaluationTables<F: Field> {
+    /// Wire values: `wire_values[wire_col][gate_row]`.
+    /// Each inner vector has `degree` elements.
+    pub wire_values: Vec<Vec<F>>,
+    /// Constant evaluations (row-major): `constant_values[row][const_col]`.
+    /// Includes selector polynomials, lookup selectors, and gate constants.
+    pub constant_values: Vec<Vec<F>>,
+    /// Sigma permutation values (row-major): `sigma_values[row][routed_wire_col]`.
+    /// Encodes the copy-constraint routing as `k_is[target_col] * subgroup[target_row]`.
+    pub sigma_values: Vec<Vec<F>>,
+    /// Public input values.
+    pub public_inputs: Vec<F>,
+    /// Hash of public inputs (used in Fiat-Shamir).
+    pub public_inputs_hash: HashOut<F>,
+    /// Number of wires per gate (total, including non-routed).
+    pub num_wires: usize,
+    /// Number of routed wires (participating in copy constraints).
+    pub num_routed_wires: usize,
+    /// Coset shift elements for the permutation argument.
+    pub k_is: Vec<F>,
+    /// Evaluation domain subgroup of order `degree`.
+    pub subgroup: Vec<F>,
+    /// Number of gates (rows) in the circuit.
+    pub degree: usize,
+    /// `log2(degree)`.
+    pub degree_bits: usize,
+}
+
 /// The `Target` version of `VerifierCircuitData`, for use inside recursive circuits. Note that this
 /// is intentionally missing certain fields, such as `CircuitConfig`, because we support only a
 /// limited form of dynamic inner circuits. We can't practically make things like the wire count
 /// dynamic, at least not without setting a maximum wire count and paying for the worst case.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerifierCircuitTarget {
     /// A commitment to each constant polynomial and each permutation polynomial.
     pub constants_sigmas_cap: MerkleCapTarget,

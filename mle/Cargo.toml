@@ -1,0 +1,39 @@
+[package]
+name = "plonky2_mle"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["cryptography", "SNARK", "multilinear", "sumcheck", "WHIR"]
+categories = ["cryptography"]
+
+[dependencies]
+plonky2_field = { path = "../field", default-features = false }
+plonky2 = { path = "../plonky2", default-features = false }
+plonky2_maybe_rayon = { path = "../maybe_rayon" }
+plonky2_util = { path = "../util", default-features = false }
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+keccak-hash = "0.8.0"
+
+# WHIR polynomial commitment scheme (arkworks-based)
+# leohio/whir main: phased split-commit API (commit_single + prove_phased)
+# Keccak256-chain transcript compatible with the spongefish Solidity verifier contracts.
+whir = { git = "https://github.com/leohio/whir", branch = "main", features = ["parallel"] }
+ark-ff = "0.5"
+ark-std = "0.5"
+ark-serialize = "0.5"
+blake3 = { version = "=1.8.3", features = ["digest", "traits-preview"] }
+digest = "0.10"
+sha3 = "0.10"
+ciborium = "0.2"
+
+[dev-dependencies]
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[features]
+default = ["std"]
+std = ["plonky2/default", "anyhow/std"]

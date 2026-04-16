@@ -86,7 +86,7 @@ mod tests {
 
         let value_targets = values
             .iter()
-            .map(|&v| (builder.constant_extension(v)))
+            .map(|&v| builder.constant_extension(v))
             .collect::<Vec<_>>();
 
         let zt = builder.constant_extension(z);

@@ -20,7 +20,7 @@ where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
 {
-    validate_batch_fri_proof_shape::<F, C, D>(proof, &[instance.clone()], params)
+    validate_batch_fri_proof_shape::<F, C, D>(proof, core::slice::from_ref(instance), params)
 }
 
 pub(crate) fn validate_batch_fri_proof_shape<F, C, const D: usize>(

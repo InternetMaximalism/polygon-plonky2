@@ -32,7 +32,7 @@ impl<F: RichField, H: Hasher<F>> MerkleProof<F, H> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MerkleProofTarget {
     /// The Merkle digest of each sibling subtree, staying from the bottommost layer.
     pub siblings: Vec<HashOutTarget>,
@@ -59,7 +59,7 @@ pub fn verify_merkle_proof_to_cap<F: RichField, H: Hasher<F>>(
     proof: &MerkleProof<F, H>,
 ) -> Result<()> {
     verify_batch_merkle_proof_to_cap(
-        &[leaf_data.clone()],
+        core::slice::from_ref(&leaf_data),
         &[proof.siblings.len()],
         leaf_index,
         merkle_cap,

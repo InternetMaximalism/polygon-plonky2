@@ -8,3 +8,13 @@ pgo-data.profdata
 
 # MacOS nuisances
 .DS_Store
+
+CLAUDE.md
+.claude
+
+# Foundry build artifacts
+mle/contracts/out/
+mle/contracts/cache/
+
+#Claude
+mle/contracts/out/

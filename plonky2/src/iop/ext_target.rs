@@ -2,6 +2,8 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 use crate::field::extension::algebra::ExtensionAlgebra;
 use crate::field::extension::{Extendable, FieldExtension, OEF};
 use crate::field::types::Field;
@@ -9,13 +11,74 @@ use crate::hash::hash_types::RichField;
 use crate::iop::target::Target;
 use crate::plonk::circuit_builder::CircuitBuilder;
 
+mod arrays {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+    use core::convert::TryInto;
+    use core::marker::PhantomData;
+
+    use serde::de::{SeqAccess, Visitor};
+    use serde::ser::SerializeTuple;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S: Serializer, T: Serialize, const N: usize>(
+        data: &[T; N],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut s = ser.serialize_tuple(N)?;
+        for item in data {
+            s.serialize_element(item)?;
+        }
+        s.end()
+    }
+
+    struct ArrayVisitor<T, const N: usize>(PhantomData<T>);
+
+    impl<'de, T, const N: usize> Visitor<'de> for ArrayVisitor<T, N>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = [T; N];
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+            formatter.write_str("an array of length N")
+        }
+
+        #[inline]
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            // can be optimized using MaybeUninit
+            let mut data = Vec::with_capacity(N);
+            for _ in 0..N {
+                match (seq.next_element())? {
+                    Some(val) => data.push(val),
+                    None => return Err(serde::de::Error::invalid_length(N, &self)),
+                }
+            }
+            match data.try_into() {
+                Ok(arr) => Ok(arr),
+                Err(_) => unreachable!(),
+            }
+        }
+    }
+    pub fn deserialize<'de, D, T, const N: usize>(deserializer: D) -> Result<[T; N], D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        deserializer.deserialize_tuple(N, ArrayVisitor::<T, N>(PhantomData))
+    }
+}
+
 /// `Target`s representing an element of an extension field.
 ///
 /// This is typically used in recursion settings, where the outer circuit must verify
 /// a proof satisfying an inner circuit's statement, which is verified using arithmetic
 /// in an extension of the base field.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct ExtensionTarget<const D: usize>(pub [Target; D]);
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct ExtensionTarget<const D: usize>(#[serde(with = "arrays")] pub [Target; D]);
 
 impl<const D: usize> Default for ExtensionTarget<D> {
     fn default() -> Self {

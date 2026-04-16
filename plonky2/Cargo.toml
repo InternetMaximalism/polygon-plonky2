@@ -12,7 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["gate_testing", "parallel", "rand_chacha", "std", "timing"]
+default = []
+# default = ["gate_testing", "parallel", "rand_chacha", "std", "timing"]
 gate_testing = []
 parallel = ["hashbrown/rayon", "plonky2_maybe_rayon/parallel"]
 std = ["anyhow/std", "rand/std", "itertools/use_std"]
@@ -37,6 +38,7 @@ web-time = { version = "1.0.0", optional = true }
 plonky2_field = { version = "1.0.0", path = "../field", default-features = false }
 plonky2_maybe_rayon = { version = "1.0.0", path = "../maybe_rayon", default-features = false }
 plonky2_util = { version = "1.0.0", path = "../util", default-features = false }
+serde_with = "3.15.0"
 
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

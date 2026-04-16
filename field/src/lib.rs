@@ -4,6 +4,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(missing_debug_implementations)]
 #![feature(specialization)]
+// stdarch_x86_avx512 was stabilized in Rust 1.89.0; allow on newer toolchains.
+#![allow(stable_features)]
 #![cfg_attr(target_arch = "x86_64", feature(stdarch_x86_avx512))]
 #![cfg_attr(not(test), no_std)]
 
