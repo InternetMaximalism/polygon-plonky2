@@ -940,8 +940,7 @@ mod tests {
             .collect();
 
         // Prove at sumcheck output point
-        let (eval_proof, per_point_evals) =
-            pcs.prove_split_with_eval(commit_data, &[&eval_point]);
+        let (eval_proof, per_point_evals) = pcs.prove_split_with_eval(commit_data, &[&eval_point]);
         assert_eq!(per_point_evals.len(), 1); // 1 point
         assert_eq!(per_point_evals[0].len(), 2); // 2 vectors
 
@@ -983,8 +982,7 @@ mod tests {
             .collect();
 
         // Prove at both points
-        let (eval_proof, per_point_evals) =
-            pcs.prove_split_with_eval(commit_data, &[&r, &r_perm]);
+        let (eval_proof, per_point_evals) = pcs.prove_split_with_eval(commit_data, &[&r, &r_perm]);
         assert_eq!(per_point_evals.len(), 2); // 2 points
         assert_eq!(per_point_evals[0].len(), 2); // 2 vectors each
 
@@ -1004,7 +1002,11 @@ mod tests {
             &[&r, &r_perm],
             2, // num_vectors
         );
-        assert!(result.is_ok(), "Two-point split verify failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Two-point split verify failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]

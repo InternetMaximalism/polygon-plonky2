@@ -186,8 +186,8 @@ fn generate_and_verify_all_fixtures() {
         for (i, rp) in fixture.combined_proof.round_polys.iter().enumerate() {
             for (j, s) in rp.iter().enumerate() {
                 let parsed = parse_field_string(s);
-                let original = proof.combined_proof.round_polys[i].evaluations[j]
-                    .to_canonical_u64();
+                let original =
+                    proof.combined_proof.round_polys[i].evaluations[j].to_canonical_u64();
                 assert_eq!(
                     parsed, original,
                     "{name}: combined round[{i}][{j}] fixture mismatch: {parsed} != {original}"

@@ -515,8 +515,8 @@ mod tests {
         for (i, rp) in fixture.combined_proof.round_polys.iter().enumerate() {
             for (j, s) in rp.iter().enumerate() {
                 let parsed = parse_field_string(s);
-                let original = proof.combined_proof.round_polys[i].evaluations[j]
-                    .to_canonical_u64();
+                let original =
+                    proof.combined_proof.round_polys[i].evaluations[j].to_canonical_u64();
                 assert_eq!(parsed, original, "combined round[{i}][{j}] mismatch");
             }
         }

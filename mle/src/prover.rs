@@ -249,7 +249,8 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     );
     transcript.domain_separate("extension-combine");
     let ext_challenge: F = transcript.squeeze_challenge();
-    let mut padded_constraints = flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
+    let mut padded_constraints =
+        flatten_extension_constraints::<F, D>(&combined_ext, ext_challenge);
     padded_constraints.resize(1 << degree_bits, F::ZERO);
 
     // Compute h̃ (permutation numerator MLE)

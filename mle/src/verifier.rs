@@ -55,7 +55,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
 
     transcript.domain_separate("batch-commit-witness");
     let batch_r_wit: F = transcript.squeeze_challenge();
-    ensure!(batch_r_wit == proof.witness_batch_r, "Witness batch_r mismatch");
+    ensure!(
+        batch_r_wit == proof.witness_batch_r,
+        "Witness batch_r mismatch"
+    );
     transcript.absorb_bytes(&proof.witness_root);
 
     // ═══════════════════════════════════════════════════════════════════
@@ -112,14 +115,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // Verify combined sumcheck: Σ [eq(τ,b)·C̃(b) + μ·eq(τ_perm,b)·h̃(b)] = 0
-    let combined_result = verify_sumcheck(
-        &proof.combined_proof,
-        F::ZERO,
-        degree_bits,
-        &mut transcript,
-    );
-    let (sumcheck_challenges, final_eval) = combined_result
-        .map_err(|e| anyhow::anyhow!("Combined sumcheck failed: {}", e))?;
+    let combined_result =
+        verify_sumcheck(&proof.combined_proof, F::ZERO, degree_bits, &mut transcript);
+    let (sumcheck_challenges, final_eval) =
+        combined_result.map_err(|e| anyhow::anyhow!("Combined sumcheck failed: {}", e))?;
 
     // ═══════════════════════════════════════════════════════════════════
     // Step 5: Verify WHIR proofs + batch consistency
@@ -183,7 +182,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         expected_pre += r_pow * eval;
         r_pow *= batch_r_pre;
     }
-    ensure!(expected_pre == proof.preprocessed_eval_value, "Preprocessed batch mismatch");
+    ensure!(
+        expected_pre == proof.preprocessed_eval_value,
+        "Preprocessed batch mismatch"
+    );
 
     // 5d: Batch consistency — witness at r
     let mut expected_wit = F::ZERO;
@@ -192,7 +194,10 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         expected_wit += r_pow * eval;
         r_pow *= batch_r_wit;
     }
-    ensure!(expected_wit == proof.witness_eval_value, "Witness batch mismatch");
+    ensure!(
+        expected_wit == proof.witness_eval_value,
+        "Witness batch mismatch"
+    );
 
     // ═══════════════════════════════════════════════════════════════════
     // Step 6: Final evaluation check
@@ -325,6 +330,9 @@ mod tests {
         let vk2 = mle_setup::<F, C, D>(&prover_data, &common_data);
 
         assert_eq!(vk1.circuit_digest, vk2.circuit_digest);
-        assert_eq!(vk1.preprocessed_commitment_root, vk2.preprocessed_commitment_root);
+        assert_eq!(
+            vk1.preprocessed_commitment_root,
+            vk2.preprocessed_commitment_root
+        );
     }
 }
