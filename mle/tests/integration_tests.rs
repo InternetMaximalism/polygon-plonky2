@@ -342,8 +342,8 @@ fn test_randomized_arithmetic_circuits() {
         let b_val = F::from_canonical_u64(rng.gen_range(1..1000));
 
         let mut pw = PartialWitness::new();
-        pw.set_target(a, a_val);
-        pw.set_target(b, b_val);
+        pw.set_target(a, a_val).unwrap();
+        pw.set_target(b, b_val).unwrap();
 
         let mut timing = TimingTree::default();
         let proof =
@@ -547,8 +547,8 @@ fn test_fibonacci_circuit_prove_verify() {
 
     let circuit = builder.build::<C>();
     let mut pw = PartialWitness::new();
-    pw.set_target(targets[0], F::ONE);
-    pw.set_target(targets[1], F::ONE);
+    pw.set_target(targets[0], F::ONE).unwrap();
+    pw.set_target(targets[1], F::ONE).unwrap();
 
     let mut timing = TimingTree::default();
     let proof =

@@ -159,8 +159,8 @@ fn benchmark_all_circuits() {
         builder.register_public_input(*targets.last().unwrap());
         let circuit = builder.build::<C>();
         let mut pw = PartialWitness::new();
-        pw.set_target(targets[0], F::ONE);
-        pw.set_target(targets[1], F::ONE);
+        pw.set_target(targets[0], F::ONE).unwrap();
+        pw.set_target(targets[1], F::ONE).unwrap();
         results.push(bench_circuit("fibonacci_20", &circuit, pw));
     }
 
