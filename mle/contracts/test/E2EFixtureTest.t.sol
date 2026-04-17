@@ -180,7 +180,7 @@ contract E2EFixtureTest {
         TranscriptLib.init(verifyT);
 
         uint256 g = gasleft();
-        SumcheckVerifier.verify(proof, 100, numRounds, verifyT);
+        SumcheckVerifier.verify(proof, 100, numRounds, 1, verifyT);
         gasUsed = g - gasleft();
     }
 

@@ -84,6 +84,68 @@ pub fn compute_permutation_numerator<F: Field>(
     h
 }
 
+/// Compute the v2 inverse-helper tables `A_j(b)` and `B_j(b)` over the hypercube.
+///
+/// For each routed wire `j` and each row `b`:
+///
+/// ```text
+///   A_j(b) := 1 / ( β + W_j(b) + γ · ID_j(b) )
+///   B_j(b) := 1 / ( β + W_j(b) + γ · σ_j(b) )
+/// ```
+///
+/// These commit-and-bind the logUp denominators so that the row-wise predicate
+/// `A_j(b) · D_j^id(b) − 1 = 0` (and similarly for `B_j`) can be enforced via
+/// a constant-degree zero-check sumcheck, eliminating the `1/x` non-linearity
+/// that otherwise breaks MLE-commutation in the verifier's terminal check.
+/// See `mle/paper/plonky2_mle_paper_v2.md` §4.2.
+///
+/// On a zero denominator (which occurs only with negligible probability over
+/// random `β, γ` for an honest witness), this returns an `Err`. The caller
+/// (the prover) should propagate as a hard failure.
+#[allow(clippy::type_complexity)]
+pub fn compute_inverse_helpers<F: Field>(
+    wire_values: &[Vec<F>],
+    sigma_values: &[Vec<F>],
+    id_values: &[Vec<F>],
+    beta: F,
+    gamma: F,
+    num_routed_wires: usize,
+    degree: usize,
+) -> Result<(Vec<Vec<F>>, Vec<Vec<F>>), &'static str> {
+    let mut a_tables = vec![vec![F::ZERO; degree]; num_routed_wires];
+    let mut b_tables = vec![vec![F::ZERO; degree]; num_routed_wires];
+
+    for j in 0..num_routed_wires {
+        for row in 0..degree {
+            let w = if j < wire_values.len() {
+                wire_values[j][row]
+            } else {
+                F::ZERO
+            };
+            let id_val = if row < id_values.len() && j < id_values[row].len() {
+                id_values[row][j]
+            } else {
+                F::ZERO
+            };
+            let sigma_val = if row < sigma_values.len() && j < sigma_values[row].len() {
+                sigma_values[row][j]
+            } else {
+                F::ZERO
+            };
+
+            let denom_id = beta + w + gamma * id_val;
+            let denom_sigma = beta + w + gamma * sigma_val;
+            if denom_id == F::ZERO || denom_sigma == F::ZERO {
+                return Err("logup inverse helper: zero denominator");
+            }
+            a_tables[j][row] = denom_id.inverse();
+            b_tables[j][row] = denom_sigma.inverse();
+        }
+    }
+
+    Ok((a_tables, b_tables))
+}
+
 /// Compute identity permutation values: `id[row][col] = k_is[col] * subgroup[row]`.
 pub fn compute_identity_values<F: Field>(
     k_is: &[F],

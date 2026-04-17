@@ -120,18 +120,39 @@ library SpongefishWhir {
 
     /// @dev Read a Field64_3 (cubic extension) from transcript: 3 × 8 = 24 bytes.
     ///      Each 8-byte chunk is LE-encoded Field64.
+    /// SECURITY: Reads RAW LE u64 values BEFORE any modular reduction so that
+    /// non-canonical encodings (raw >= GL_P) are detected. Previously this used
+    /// _leModReduce64 which reduced mod GL_P, making the < GL_P check vacuous and
+    /// allowing transcript malleability via dual encodings of the same field value.
     function proverMessageField64x3(
         TranscriptState memory ts,
         bytes memory transcript
     ) internal pure returns (uint64 c0, uint64 c1, uint64 c2) {
         bytes memory data = proverMessage(ts, transcript, 24);
-        c0 = _leModReduce64(data, 0, 8);
-        c1 = _leModReduce64(data, 8, 8);
-        c2 = _leModReduce64(data, 16, 8);
-        // SECURITY: Reject non-canonical field element encodings. The sponge absorbed
-        // the raw bytes above. A prover who sends a non-canonical value (e.g. GL_P for zero)
-        // uses a different byte pattern that steers Fiat-Shamir challenge derivation.
-        require(c0 < GL_P && c1 < GL_P && c2 < GL_P, "SpongefishWhir: non-canonical field element");
+        uint256 raw0;
+        uint256 raw1;
+        uint256 raw2;
+        assembly {
+            let base := add(data, 0x20)
+            // Read 3 × 8-byte LE chunks via byte-swap of high 8 bytes of each loaded word.
+            function readU64LE(ptr) -> v {
+                v := shr(192, mload(ptr))
+                v := or(shl(32, and(v, 0x00000000FFFFFFFF)), shr(32, and(v, 0xFFFFFFFF00000000)))
+                v := or(shl(16, and(v, 0x0000FFFF0000FFFF)), shr(16, and(v, 0xFFFF0000FFFF0000)))
+                v := or(shl(8,  and(v, 0x00FF00FF00FF00FF)), shr(8,  and(v, 0xFF00FF00FF00FF00)))
+            }
+            raw0 := readU64LE(base)
+            raw1 := readU64LE(add(base, 8))
+            raw2 := readU64LE(add(base, 16))
+        }
+        // SECURITY: enforce canonical encoding on RAW values (before any reduction).
+        // The sponge already absorbed the raw bytes via proverMessage above; if any
+        // raw >= GL_P, the prover is using a non-canonical byte pattern to steer
+        // Fiat-Shamir challenge derivation while still claiming an in-field value.
+        require(raw0 < GL_P && raw1 < GL_P && raw2 < GL_P, "SpongefishWhir: non-canonical field element");
+        c0 = uint64(raw0);
+        c1 = uint64(raw1);
+        c2 = uint64(raw2);
     }
 
     /// @dev Squeeze a Field64_3: 3 × (8 + 32) = 120 bytes.

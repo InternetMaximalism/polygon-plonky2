@@ -6,5 +6,6 @@ solc_version = "0.8.29"
 via_ir = true
 evm_version = "prague"
 optimizer = true
-optimizer_runs = 200
+# Runtime-heavy verifier: optimize aggressively for execution cost, not deploy size.
+optimizer_runs = 4294967295
 fs_permissions = [{ access = "read", path = "./" }]

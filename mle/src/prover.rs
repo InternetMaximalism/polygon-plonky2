@@ -21,7 +21,10 @@ use crate::constraint_eval::{compute_combined_constraints, flatten_extension_con
 use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtension};
 use crate::eq_poly;
 use crate::proof::{MleProof, MleVerificationKey};
-use crate::sumcheck::prover::prove_sumcheck_combined;
+use crate::sumcheck::prover::{
+    prove_sumcheck_combined, prove_sumcheck_gate_zerocheck, prove_sumcheck_inv_zerocheck,
+    prove_sumcheck_plain,
+};
 use crate::transcript::Transcript;
 
 /// Derive the deterministic batching scalar for preprocessed polynomials.
@@ -228,14 +231,92 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     eprintln!("[prover] phase1 commit: {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
-    // Phase 2: Derive challenges + compute C̃ and h̃
+    // Phase 2a: Squeeze β, γ (logUp denominators).
     // ═══════════════════════════════════════════════════════════════════
     transcript.domain_separate("challenges");
     let beta: F = transcript.squeeze_challenge();
     let gamma: F = transcript.squeeze_challenge();
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 2b (v2 logUp): Build inverse helpers A_j, B_j and commit.
+    //
+    // SECURITY (Issue R2-#2): A_j(b) = 1/(β + W_j(b) + γ·ID_j(b)) and B_j(b)
+    // = 1/(β + W_j(b) + γ·σ_j(b)) are committed AFTER β, γ are squeezed
+    // (so the inverses depend on the challenges) and bound by two sumchecks
+    // (Φ_inv zero-check + Φ_h linear) — see paper §4.2 in
+    // mle/paper/plonky2_mle_paper_v2.md. The terminal checks operate on
+    // multilinear quantities only; no 1/x is evaluated by the verifier.
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    let id_values_for_inv = crate::permutation::logup::compute_identity_values(
+        &tables.k_is,
+        &tables.subgroup,
+        num_routed_wires,
+        degree,
+    );
+    let (a_tables, b_tables) = crate::permutation::logup::compute_inverse_helpers(
+        &tables.wire_values,
+        &tables.sigma_values,
+        &id_values_for_inv,
+        beta,
+        gamma,
+        num_routed_wires,
+        degree,
+    )
+    .map_err(|e| anyhow::anyhow!("v2 logUp inverse build: {e}"))?;
+
+    transcript.domain_separate("inverse-helpers-batch-r");
+    let inv_helpers_batch_r: F = transcript.squeeze_challenge();
+
+    // Batch all 2·W_R inverse-helper MLEs into a single P_inv polynomial
+    // committed via WHIR's split-commit (vector 3, after preprocessed/witness).
+    let n_rows = 1 << degree_bits;
+    let mut p_inv_evals = vec![F::ZERO; n_rows];
+    let mut r_pow = F::ONE;
+    for a_table in a_tables.iter().take(num_routed_wires) {
+        for (row, &v) in a_table.iter().enumerate() {
+            if row < n_rows {
+                p_inv_evals[row] += r_pow * v;
+            }
+        }
+        r_pow *= inv_helpers_batch_r;
+    }
+    for b_table in b_tables.iter().take(num_routed_wires) {
+        for (row, &v) in b_table.iter().enumerate() {
+            if row < n_rows {
+                p_inv_evals[row] += r_pow * v;
+            }
+        }
+        r_pow *= inv_helpers_batch_r;
+    }
+    let p_inv_ark = plonky2_vec_to_ark(
+        &p_inv_evals
+            .iter()
+            .map(|&f| {
+                plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                    f.to_canonical_u64(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let inverse_helpers_root = whir_pcs.commit_additional(&mut commit_data, &p_inv_ark);
+    transcript.absorb_bytes(&inverse_helpers_root);
+    eprintln!(
+        "[prover] phase2b inverse-helpers commit: {:?}",
+        _t.elapsed()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 2c: Squeeze remaining challenges (α, τ, τ_perm + v2 challenges)
+    // ═══════════════════════════════════════════════════════════════════
     let alpha: F = transcript.squeeze_challenge();
     let tau: Vec<F> = transcript.squeeze_challenges(degree_bits);
     let tau_perm: Vec<F> = transcript.squeeze_challenges(degree_bits);
+    transcript.domain_separate("v2-logup-challenges");
+    let lambda_inv: F = transcript.squeeze_challenge();
+    let mu_inv: F = transcript.squeeze_challenge();
+    let lambda_h: F = transcript.squeeze_challenge();
+    let tau_inv: Vec<F> = transcript.squeeze_challenges(degree_bits);
 
     // Compute C̃ (constraint MLE)
     let _t = std::time::Instant::now();
@@ -356,6 +437,144 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     eprintln!("[prover] phase5 combined sumcheck: {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
+    // Phase 5.5 (v2 logUp): Φ_inv zero-check sumcheck.
+    //   Σ_b eq(τ_inv, b)·Σ_j λ^j·(A_j·D_j^id − 1 + μ_inv·(B_j·D_j^σ − 1)) = 0
+    // Round-poly degree 3.   → r_inv, S_n_inv (claimed = 0).
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    transcript.domain_separate("v2-inv-zerocheck");
+    let mut eq_inv_mle = DenseMultilinearExtension::new(eq_poly::eq_evals(&tau_inv));
+    let mut a_inv_mles: Vec<DenseMultilinearExtension<F>> = a_tables
+        .iter()
+        .map(|t| {
+            let mut padded = t.clone();
+            padded.resize(n_rows, F::ZERO);
+            DenseMultilinearExtension::new(padded)
+        })
+        .collect();
+    let mut b_inv_mles: Vec<DenseMultilinearExtension<F>> = b_tables
+        .iter()
+        .map(|t| {
+            let mut padded = t.clone();
+            padded.resize(n_rows, F::ZERO);
+            DenseMultilinearExtension::new(padded)
+        })
+        .collect();
+    // Working copies of W, σ, g_sub (the prover-internal sumcheck consumes them).
+    let mut w_inv_mles: Vec<DenseMultilinearExtension<F>> =
+        wire_mles.iter().take(num_routed_wires).cloned().collect();
+    let mut sigma_inv_mles: Vec<DenseMultilinearExtension<F>> =
+        sigma_mles.iter().take(num_routed_wires).cloned().collect();
+    let mut g_sub_padded = tables.subgroup.clone();
+    g_sub_padded.resize(n_rows, F::ZERO);
+    let mut g_sub_mle = DenseMultilinearExtension::new(g_sub_padded);
+
+    let (inv_sumcheck_proof, inv_sumcheck_challenges) = prove_sumcheck_inv_zerocheck::<F>(
+        &mut eq_inv_mle,
+        &mut a_inv_mles,
+        &mut b_inv_mles,
+        &mut w_inv_mles,
+        &mut sigma_inv_mles,
+        &mut g_sub_mle,
+        &tables.k_is,
+        beta,
+        gamma,
+        lambda_inv,
+        mu_inv,
+        &mut transcript,
+    );
+    eprintln!("[prover] phase5.5 Φ_inv: {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 5.7 (v2 logUp): Φ_h linear sumcheck.
+    //   Σ_b H(b) = 0,  H(b) = Σ_j λ_h^j · (A_j(b) − B_j(b))
+    // Round-poly degree 1 (linear in each variable).
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    transcript.domain_separate("v2-h-linear");
+    // SECURITY: H is the *unweighted* sum Σ_j (A_j − B_j). Only the unweighted
+    // sum telescopes via logUp (Σ_b Σ_j (1/D_id − 1/D_σ) = 0); per-j sums do
+    // not vanish in general, so a λ_h^j weighting would NOT have a zero
+    // claimed sum on an honest prover.
+    let mut h_combined = vec![F::ZERO; n_rows];
+    for jj in 0..num_routed_wires {
+        for row in 0..n_rows {
+            let a_v = if row < a_tables[jj].len() {
+                a_tables[jj][row]
+            } else {
+                F::ZERO
+            };
+            let b_v = if row < b_tables[jj].len() {
+                b_tables[jj][row]
+            } else {
+                F::ZERO
+            };
+            h_combined[row] += a_v - b_v;
+        }
+    }
+    let mut h_combined_mle = DenseMultilinearExtension::new(h_combined);
+    let (h_sumcheck_proof, h_sumcheck_challenges) =
+        prove_sumcheck_plain::<F>(&mut h_combined_mle, &mut transcript);
+    eprintln!("[prover] phase5.7 Φ_h: {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 5.8 (v2 gate binding — Issue R2-#1, paper §7.3):
+    //
+    // Run the Φ_gate zero-check sumcheck that binds the ACTUAL Plonky2 gate
+    // formula evaluated at a random point to the sumcheck output, rather
+    // than relying on the legacy `aux_constraint_eval` oracle (which did
+    // not close the MLE-commutativity gap for gates of degree ≥ 2).
+    //
+    //   Φ_gate(x) := eq(τ_gate, x) · flatten_ext(
+    //                    Σ_j α^j · c_j( lift(W_k(x)), lift(const_k(x)) ),
+    //                    ext_challenge
+    //                )
+    // claimed sum = 0.
+    //
+    // SECURITY: τ_gate is squeezed AFTER all wire/const commitments and
+    // all prior transcript content. α and ext_challenge are the same
+    // scalars used for `compute_combined_constraints` /
+    // `flatten_extension_constraints`, so the row-wise value equals C̃
+    // on the Boolean hypercube (honest prover).
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    transcript.domain_separate("v2-gate-challenges");
+    let tau_gate: Vec<F> = transcript.squeeze_challenges(degree_bits);
+
+    transcript.domain_separate("v2-gate-zerocheck");
+    // Φ_gate degree per variable: 1 (eq) + max filtered-constraint degree.
+    // Plonky2 bounds the filtered constraint degree by `quotient_degree_factor + 1`
+    // when selector_polynomials produces multiple groups (many_selector = true).
+    // Use the safe upper bound qdf + 2 so the round poly captures the full
+    // polynomial regardless of how gates were grouped.
+    let max_round_degree_gate = 2 + common_data.quotient_degree_factor;
+
+    let mut eq_gate_mle = DenseMultilinearExtension::new(eq_poly::eq_evals(&tau_gate));
+    // Ensure the wire/const MLE vectors match exactly what the gate evaluator
+    // expects (pad with zero-MLEs if the prover did not build all columns).
+    let mut wire_gate_mles: Vec<DenseMultilinearExtension<F>> = wire_mles.clone();
+    while wire_gate_mles.len() < common_data.config.num_wires {
+        wire_gate_mles.push(DenseMultilinearExtension::new(vec![F::ZERO; n_rows]));
+    }
+    let mut const_gate_mles: Vec<DenseMultilinearExtension<F>> = const_mles.clone();
+    while const_gate_mles.len() < common_data.num_constants {
+        const_gate_mles.push(DenseMultilinearExtension::new(vec![F::ZERO; n_rows]));
+    }
+
+    let (gate_sumcheck_proof, gate_sumcheck_challenges) = prove_sumcheck_gate_zerocheck::<F, D>(
+        common_data,
+        &mut wire_gate_mles,
+        &mut const_gate_mles,
+        &mut eq_gate_mle,
+        alpha,
+        ext_challenge,
+        &tables.public_inputs_hash,
+        max_round_degree_gate,
+        &mut transcript,
+    );
+    eprintln!("[prover] phase5.8 Φ_gate: {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
     // Phase 6: Evaluate at sumcheck output point r
     // ═══════════════════════════════════════════════════════════════════
     let _t = std::time::Instant::now();
@@ -393,28 +612,152 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     eprintln!("[prover] phase6 evals: {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
-    // Phase 7: WHIR prove — main split at r, auxiliary at r
+    // Phase 6.5 (v2 logUp): Per-point individual evaluations needed for
+    // terminal checks at r_inv and r_h.
     // ═══════════════════════════════════════════════════════════════════
-    let _t = std::time::Instant::now();
-    let r_gl: Vec<plonky2_field::goldilocks_field::GoldilocksField> = sumcheck_challenges
+    // At r_inv: w_j, σ_j, a_j, b_j, g_sub
+    let witness_individual_evals_at_r_inv: Vec<F> = wire_mles
         .iter()
-        .map(|&f| {
-            plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
-                f.to_canonical_u64(),
-            )
-        })
+        .map(|m| m.evaluate(&inv_sumcheck_challenges))
+        .collect();
+    // Preprocessed individual evals at r_inv (full layout: const || sigma).
+    let preprocessed_individual_evals_at_r_inv_full: Vec<F> = preprocessed_mles
+        .iter()
+        .map(|m| m.evaluate(&inv_sumcheck_challenges))
+        .collect();
+    let inverse_helpers_evals_at_r_inv: Vec<F> = {
+        let a_evals: Vec<F> = a_tables
+            .iter()
+            .map(|t| {
+                let mut padded = t.clone();
+                padded.resize(n_rows, F::ZERO);
+                DenseMultilinearExtension::new(padded).evaluate(&inv_sumcheck_challenges)
+            })
+            .collect();
+        let b_evals: Vec<F> = b_tables
+            .iter()
+            .map(|t| {
+                let mut padded = t.clone();
+                padded.resize(n_rows, F::ZERO);
+                DenseMultilinearExtension::new(padded).evaluate(&inv_sumcheck_challenges)
+            })
+            .collect();
+        a_evals.into_iter().chain(b_evals).collect()
+    };
+    let g_sub_eval_at_r_inv: F = {
+        let mut g_padded = tables.subgroup.clone();
+        g_padded.resize(n_rows, F::ZERO);
+        DenseMultilinearExtension::new(g_padded).evaluate(&inv_sumcheck_challenges)
+    };
+
+    // At r_gate_v2: witness (wires) and full preprocessed (const||sigma) are
+    // needed so the verifier can (i) run the Plonky2 gate evaluator at
+    // `r_gate_v2` and (ii) reconstruct the batched Goldilocks sum for WHIR
+    // consistency.
+    let witness_individual_evals_at_r_gate_v2: Vec<F> = wire_mles
+        .iter()
+        .map(|m| m.evaluate(&gate_sumcheck_challenges))
+        .collect();
+    let preprocessed_individual_evals_at_r_gate_v2_full: Vec<F> = preprocessed_mles
+        .iter()
+        .map(|m| m.evaluate(&gate_sumcheck_challenges))
         .collect();
 
-    // Single WHIR proof for all 3 vectors at r (phased split-commit)
-    // commit_data now contains [preprocessed, witness, auxiliary]
-    let (whir_eval_proof, whir_per_point_evals) =
-        whir_pcs.prove_split_with_eval(commit_data, &[&r_gl]);
-    // whir_per_point_evals[0] = [P_pre(r), P_wit(r), P_aux(r)]
+    let mut witness_eval_value_at_r_gate_v2 = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &witness_individual_evals_at_r_gate_v2 {
+        witness_eval_value_at_r_gate_v2 += r_pow * eval;
+        r_pow *= batch_r_wit;
+    }
+    let mut preprocessed_eval_value_at_r_gate_v2 = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &preprocessed_individual_evals_at_r_gate_v2_full {
+        preprocessed_eval_value_at_r_gate_v2 += r_pow * eval;
+        r_pow *= batch_r_pre;
+    }
+
+    // At r_h: only inverse-helper evals are needed for terminal check.
+    let inverse_helpers_evals_at_r_h: Vec<F> = {
+        let a_evals: Vec<F> = a_tables
+            .iter()
+            .map(|t| {
+                let mut padded = t.clone();
+                padded.resize(n_rows, F::ZERO);
+                DenseMultilinearExtension::new(padded).evaluate(&h_sumcheck_challenges)
+            })
+            .collect();
+        let b_evals: Vec<F> = b_tables
+            .iter()
+            .map(|t| {
+                let mut padded = t.clone();
+                padded.resize(n_rows, F::ZERO);
+                DenseMultilinearExtension::new(padded).evaluate(&h_sumcheck_challenges)
+            })
+            .collect();
+        a_evals.into_iter().chain(b_evals).collect()
+    };
+
+    // Batched Goldilocks evaluations (for batch consistency in verifier).
+    let mut witness_eval_value_at_r_inv = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &witness_individual_evals_at_r_inv {
+        witness_eval_value_at_r_inv += r_pow * eval;
+        r_pow *= batch_r_wit;
+    }
+    let mut preprocessed_eval_value_at_r_inv = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &preprocessed_individual_evals_at_r_inv_full {
+        preprocessed_eval_value_at_r_inv += r_pow * eval;
+        r_pow *= batch_r_pre;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 7: Multi-point WHIR prove — open all 4 vectors at 3 points.
+    // Vectors: [preprocessed, witness, aux, inverse_helpers]
+    // Points : [r_gate, r_inv, r_h]
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    let to_gl = |fs: &[F]| -> Vec<plonky2_field::goldilocks_field::GoldilocksField> {
+        fs.iter()
+            .map(|&f| {
+                plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                    f.to_canonical_u64(),
+                )
+            })
+            .collect()
+    };
+    let r_gate_gl = to_gl(&sumcheck_challenges);
+    let r_inv_gl = to_gl(&inv_sumcheck_challenges);
+    let r_h_gl = to_gl(&h_sumcheck_challenges);
+    let r_gate_v2_gl = to_gl(&gate_sumcheck_challenges);
+
+    let (whir_eval_proof, whir_per_point_evals) = whir_pcs.prove_split_with_eval(
+        commit_data,
+        &[&r_gate_gl, &r_inv_gl, &r_h_gl, &r_gate_v2_gl],
+    );
+
+    // Layout: per_point_evals[point_idx] = [pre, wit, aux, inv]
     let pre_eval_ext3 = whir_per_point_evals[0][0];
     let wit_eval_ext3 = whir_per_point_evals[0][1];
     let aux_whir_eval_ext3 = whir_per_point_evals[0][2];
+    let inverse_helpers_whir_eval_at_r_gate_ext3 = whir_per_point_evals[0][3];
 
-    eprintln!("[prover] phase7 WHIR prove: {:?}", _t.elapsed());
+    let preprocessed_whir_eval_at_r_inv_ext3 = whir_per_point_evals[1][0];
+    let witness_whir_eval_at_r_inv_ext3 = whir_per_point_evals[1][1];
+    let aux_whir_eval_at_r_inv_ext3 = whir_per_point_evals[1][2];
+    let inverse_helpers_whir_eval_at_r_inv_ext3 = whir_per_point_evals[1][3];
+
+    let preprocessed_whir_eval_at_r_h_ext3 = whir_per_point_evals[2][0];
+    let witness_whir_eval_at_r_h_ext3 = whir_per_point_evals[2][1];
+    let aux_whir_eval_at_r_h_ext3 = whir_per_point_evals[2][2];
+    let inverse_helpers_whir_eval_at_r_h_ext3 = whir_per_point_evals[2][3];
+
+    let preprocessed_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][0];
+    let witness_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][1];
+    let aux_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][2];
+    let inverse_helpers_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][3];
+
+    eprintln!("[prover] phase7 WHIR prove (4-point): {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
     // Phase 8: Proof assembly
@@ -461,6 +804,67 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         num_wires: tables.num_wires,
         num_routed_wires,
         num_constants: common_data.num_constants,
+        // Issue #2: expose VK-bound permutation context so the Solidity verifier can
+        // bind h̃(r) to the actual permutation numerator computed from witness/sigma
+        // evaluations.
+        k_is: tables.k_is.clone(),
+        subgroup_gen_powers: {
+            // g^{2^i} for i in 0..degree_bits.
+            // tables.subgroup[1] = g (the primitive 2^degree_bits-th root of unity used
+            // by the prover when constructing the subgroup vector).
+            let g: F = if tables.subgroup.len() >= 2 {
+                tables.subgroup[1]
+            } else {
+                F::ONE
+            };
+            let mut powers = Vec::with_capacity(degree_bits);
+            let mut cur = g;
+            for _ in 0..degree_bits {
+                powers.push(cur);
+                cur = cur * cur;
+            }
+            powers
+        },
+        // ── v2 logUp soundness fix (Issue R2-#2) ────────────────────────
+        inverse_helpers_root,
+        inverse_helpers_batch_r: inv_helpers_batch_r,
+        inv_sumcheck_challenges,
+        inv_sumcheck_proof,
+        h_sumcheck_challenges,
+        h_sumcheck_proof,
+        lambda_inv,
+        mu_inv,
+        lambda_h,
+        tau_inv,
+        inverse_helpers_evals_at_r_inv,
+        inverse_helpers_evals_at_r_h,
+        inverse_helpers_whir_eval_at_r_inv_ext3,
+        inverse_helpers_whir_eval_at_r_h_ext3,
+        witness_individual_evals_at_r_inv,
+        preprocessed_individual_evals_at_r_inv: preprocessed_individual_evals_at_r_inv_full,
+        g_sub_eval_at_r_inv,
+        witness_whir_eval_at_r_inv_ext3,
+        preprocessed_whir_eval_at_r_inv_ext3,
+        witness_eval_value_at_r_inv,
+        preprocessed_eval_value_at_r_inv,
+        aux_whir_eval_at_r_inv_ext3,
+        aux_whir_eval_at_r_h_ext3,
+        witness_whir_eval_at_r_h_ext3,
+        preprocessed_whir_eval_at_r_h_ext3,
+        inverse_helpers_whir_eval_at_r_gate_ext3,
+        // ── v2 gate binding fix (Issue R2-#1) ──────────────────────────
+        ext_challenge,
+        tau_gate,
+        gate_sumcheck_proof,
+        gate_sumcheck_challenges,
+        witness_individual_evals_at_r_gate_v2,
+        preprocessed_individual_evals_at_r_gate_v2: preprocessed_individual_evals_at_r_gate_v2_full,
+        witness_eval_value_at_r_gate_v2,
+        preprocessed_eval_value_at_r_gate_v2,
+        witness_whir_eval_at_r_gate_v2_ext3,
+        preprocessed_whir_eval_at_r_gate_v2_ext3,
+        aux_whir_eval_at_r_gate_v2_ext3,
+        inverse_helpers_whir_eval_at_r_gate_v2_ext3,
     })
 }
 

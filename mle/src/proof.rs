@@ -112,4 +112,141 @@ pub struct MleProof<F: Field> {
     pub num_wires: usize,
     pub num_routed_wires: usize,
     pub num_constants: usize,
+
+    // ── Permutation argument context (Issue #2) ────────────────────────
+    /// Coset shifts k_is from Plonky2's permutation routing
+    /// (id[row][col] = k_is[col] * subgroup[row]). VK-bound public data.
+    pub k_is: Vec<F>,
+    /// Powers g^{2^i} of the multiplicative subgroup generator g,
+    /// for i = 0..degree_bits. Used to evaluate the subgroup MLE at the
+    /// sumcheck point r via Π_i ((1 - r_i) + r_i · g^{2^i}). VK-bound public data.
+    pub subgroup_gen_powers: Vec<F>,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // v2 logUp soundness fix — Issue R2-#2 (paper §4.2)
+    //
+    // Auxiliary inverse helpers A_j(b) = 1/D_j^id(b), B_j(b) = 1/D_j^σ(b)
+    // are committed via WHIR (commit_additional, after β,γ are squeezed)
+    // and bound via two sumchecks:
+    //   Φ_inv: zero-check on A_j·D_j^id − 1 = 0 and B_j·D_j^σ − 1 = 0  (deg 3)
+    //   Φ_h:   linear sumcheck on H = Σ_j λ_h^j (A_j − B_j),  claimed sum = 0
+    //
+    // The terminal checks reconstruct predictions from PCS-bound values
+    // a_j(r_inv), b_j(r_inv), w_j(r_inv), σ_j(r_inv), g_sub(r_inv) for Φ_inv,
+    // and a_j(r_h), b_j(r_h) for Φ_h. No 1/x is evaluated by the verifier.
+    // ═══════════════════════════════════════════════════════════════════
+    /// Commitment root for the inverse-helper batched MLE
+    /// `P_inv = A_0 + r_inv_batch · A_1 + … + r_inv_batch^{2W_R-1} · B_{W_R-1}`.
+    /// Committed *after* (β, γ) are squeezed.
+    pub inverse_helpers_root: Vec<u8>,
+    /// Schwartz-Zippel batching scalar for the inverse-helper batched MLE.
+    pub inverse_helpers_batch_r: F,
+    /// Φ_inv sumcheck challenge point (length = degree_bits).
+    pub inv_sumcheck_challenges: Vec<F>,
+    /// Φ_inv sumcheck proof (round polys of degree ≤ 3).
+    pub inv_sumcheck_proof: SumcheckProof<F>,
+    /// Φ_h sumcheck challenge point (length = degree_bits).
+    pub h_sumcheck_challenges: Vec<F>,
+    /// Φ_h sumcheck proof (round polys of degree 1).
+    pub h_sumcheck_proof: SumcheckProof<F>,
+    /// Fiat-Shamir challenges for the v2 logUp protocol.
+    pub lambda_inv: F,
+    pub mu_inv: F,
+    pub lambda_h: F,
+    pub tau_inv: Vec<F>,
+    /// Inverse helper individual evals at r_inv (length = 2 · num_routed_wires,
+    /// laid out as `[a_0, a_1, …, a_{W_R-1}, b_0, …, b_{W_R-1}]`).
+    pub inverse_helpers_evals_at_r_inv: Vec<F>,
+    /// Inverse helper individual evals at r_h (same layout).
+    pub inverse_helpers_evals_at_r_h: Vec<F>,
+    /// Inverse helper batched WHIR evaluation at r_inv (Ext3).
+    pub inverse_helpers_whir_eval_at_r_inv_ext3: Field64_3,
+    /// Inverse helper batched WHIR evaluation at r_h (Ext3).
+    pub inverse_helpers_whir_eval_at_r_h_ext3: Field64_3,
+    /// Witness individual evals at r_inv (needed for Φ_inv terminal check).
+    pub witness_individual_evals_at_r_inv: Vec<F>,
+    /// Full preprocessed individual evals at r_inv (needed for batch
+    /// consistency with `preprocessed_eval_value_at_r_inv` ↔ WHIR Ext3 eval).
+    /// Layout `[const_0 .. const_{C-1}, sigma_0 .. sigma_{R-1}]`.
+    /// The sigma subset (indices `[num_constants..num_constants+num_routed]`)
+    /// feeds the Φ_inv terminal check; the const subset is unused there but
+    /// required by the batch identity Σ batch_r_pre^i · eval_i.
+    pub preprocessed_individual_evals_at_r_inv: Vec<F>,
+    /// Subgroup MLE g_sub(r_inv) — verifier recomputes this from
+    /// `subgroup_gen_powers` and checks consistency.
+    pub g_sub_eval_at_r_inv: F,
+    /// Witness batched WHIR evaluation at r_inv (Ext3) — proves the
+    /// `witness_individual_evals_at_r_inv` are PCS-bound.
+    pub witness_whir_eval_at_r_inv_ext3: Field64_3,
+    /// Preprocessed batched WHIR evaluation at r_inv (Ext3) — proves
+    /// `sigma_individual_evals_at_r_inv` (and unused const evals) PCS-bound.
+    pub preprocessed_whir_eval_at_r_inv_ext3: Field64_3,
+    /// Witness batch eval (Goldilocks) at r_inv, for batch consistency.
+    pub witness_eval_value_at_r_inv: F,
+    /// Preprocessed batch eval (Goldilocks) at r_inv, for batch consistency.
+    pub preprocessed_eval_value_at_r_inv: F,
+    /// Auxiliary batched WHIR evaluation at r_inv (Ext3). Not used by the
+    /// terminal check but produced by the multi-point WHIR proof.
+    pub aux_whir_eval_at_r_inv_ext3: Field64_3,
+    /// Auxiliary, witness, preprocessed WHIR evals at r_h (Ext3). Used to
+    /// satisfy the multi-point WHIR contract; only inverse-helper values are
+    /// consumed by Φ_h terminal check.
+    pub aux_whir_eval_at_r_h_ext3: Field64_3,
+    pub witness_whir_eval_at_r_h_ext3: Field64_3,
+    pub preprocessed_whir_eval_at_r_h_ext3: Field64_3,
+    /// Inverse-helpers WHIR eval at r_gate (Ext3). Not used by terminal checks
+    /// but required to satisfy the multi-point WHIR verification contract.
+    pub inverse_helpers_whir_eval_at_r_gate_ext3: Field64_3,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // v2 gate binding fix — Issue R2-#1 (paper §7.3)
+    //
+    // A standalone Φ_gate zero-check sumcheck closes the gap where the
+    // legacy `aux_constraint_eval` oracle is not the polynomially-correct
+    // evaluation of the gate constraint formula at a random point. Instead
+    // of trusting C̃(r) via a single WHIR commit, we run:
+    //
+    //   Φ_gate(x) := eq(τ_gate, x) · flatten_ext(
+    //                    Σ_j α^j · c_j( lift(W_k(x)), lift(const_k(x)) ),
+    //                    ext_challenge
+    //                )
+    //
+    // claimed sum = 0. The verifier terminal check calls the Plonky2 gate
+    // evaluator at `r_gate_v2` with PCS-bound individual wire/const evals.
+    // All quantities are multilinear or polynomial over base field points,
+    // so no MLE-non-commutativity gap remains.
+    // ═══════════════════════════════════════════════════════════════════
+    /// Extension-combine challenge — re-derived in the verifier but stored
+    /// here so fixture consumers (Solidity) can absorb it deterministically.
+    pub ext_challenge: F,
+    /// Fiat-Shamir point `τ_gate` for the Φ_gate zero-check.
+    pub tau_gate: Vec<F>,
+    /// Φ_gate sumcheck proof (round polys of degree
+    /// `1 + common_data.quotient_degree_factor`).
+    pub gate_sumcheck_proof: SumcheckProof<F>,
+    /// Φ_gate sumcheck output point `r_gate_v2` (length = degree_bits).
+    pub gate_sumcheck_challenges: Vec<F>,
+    /// Witness individual evals at `r_gate_v2` — one per wire column,
+    /// required by the terminal check (`evaluate_gate_constraints`).
+    pub witness_individual_evals_at_r_gate_v2: Vec<F>,
+    /// Full preprocessed individual evals at `r_gate_v2`: layout
+    /// `[const_0..const_{C-1}, sigma_0..sigma_{R-1}]`. The constants subset
+    /// feeds the Φ_gate terminal check; the sigma subset is unused there
+    /// but required for batch consistency with the WHIR Ext3 eval.
+    pub preprocessed_individual_evals_at_r_gate_v2: Vec<F>,
+    /// Witness batch eval (Goldilocks) at `r_gate_v2`.
+    pub witness_eval_value_at_r_gate_v2: F,
+    /// Preprocessed batch eval (Goldilocks) at `r_gate_v2`.
+    pub preprocessed_eval_value_at_r_gate_v2: F,
+    /// Witness batched WHIR Ext3 evaluation at `r_gate_v2`.
+    pub witness_whir_eval_at_r_gate_v2_ext3: Field64_3,
+    /// Preprocessed batched WHIR Ext3 evaluation at `r_gate_v2`.
+    pub preprocessed_whir_eval_at_r_gate_v2_ext3: Field64_3,
+    /// Auxiliary batched WHIR Ext3 evaluation at `r_gate_v2`. Not consumed
+    /// by any terminal check but required to satisfy the multi-point WHIR
+    /// verification contract (all committed vectors opened at all points).
+    pub aux_whir_eval_at_r_gate_v2_ext3: Field64_3,
+    /// Inverse-helpers batched WHIR Ext3 evaluation at `r_gate_v2`. Same
+    /// comment as above — not consumed by a terminal check, contract only.
+    pub inverse_helpers_whir_eval_at_r_gate_v2_ext3: Field64_3,
 }

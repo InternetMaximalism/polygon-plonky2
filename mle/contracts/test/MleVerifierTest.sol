@@ -120,7 +120,7 @@ contract MleVerifierTest {
         TranscriptLib.init(transcript);
 
         (uint256[] memory challenges, uint256 finalEval) =
-            SumcheckVerifier.verify(proof, 7, 1, transcript);
+            SumcheckVerifier.verify(proof, 7, 1, 1, transcript);
 
         require(challenges.length == 1, "Should have 1 challenge");
         // finalEval = g(r) = 2 + (5-2)*r = 2 + 3r, for whatever r was squeezed
@@ -237,7 +237,7 @@ contract MleVerifierTest {
         TranscriptLib.init(verifyTranscript);
 
         uint256 g = gasleft();
-        SumcheckVerifier.verify(proof, 100, numRounds, verifyTranscript);
+        SumcheckVerifier.verify(proof, 100, numRounds, 1, verifyTranscript);
         gasUsed = g - gasleft();
     }
 

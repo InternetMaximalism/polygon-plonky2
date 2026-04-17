@@ -58,6 +58,11 @@ library SpongefishWhirVerify {
         // If empty, single-point mode (numLinearForms = 1).
         // With dual bridge, this is the sumcheck-derived point r₂ for gζ.
         GoldilocksExt3.Ext3[] evaluationPoint2;
+        // Additional evaluation points (multi-point support beyond 2).
+        // Used for the v2 logUp soundness fix which opens at 3 points
+        // (r_gate, r_inv, r_h). Each entry is an evaluation point of
+        // length numVariables. Empty for legacy 1- or 2-point usage.
+        GoldilocksExt3.Ext3[][] additionalEvaluationPoints;
         // Per-round params (array of length numRounds)
         RoundParams[] rounds;
     }
@@ -518,11 +523,19 @@ library SpongefishWhirVerify {
                 expectedRlc = expectedRlc.add(vs.initialConstraintRlc[1].mul(eqVal2));
             }
 
-            // Handle any additional linear forms beyond 2 (future-proof)
+            // Multi-point linear forms beyond 2 — used by v2 logUp fix
+            // (r_gate, r_inv, r_h ⇒ numLinearForms = 3, additional point at index 0).
             for (uint256 i = 2; i < vs.numLinearForms; i++) {
-                // Additional linear forms would need additional evaluation points
-                // For now, this path is unused
-                revert("more than 2 linear forms not yet supported");
+                require(
+                    params.additionalEvaluationPoints.length >= i - 1,
+                    "FinalClaim: missing additional evaluation point"
+                );
+                GoldilocksExt3.Ext3[] memory ptI = params.additionalEvaluationPoints[i - 2];
+                require(ptI.length > 0, "FinalClaim: empty additional evaluation point");
+                GoldilocksExt3.Ext3 memory eqValI = WhirLinearAlgebra.mleEvaluateEq(
+                    ptI, vs.allFoldingRandomness
+                );
+                expectedRlc = expectedRlc.add(vs.initialConstraintRlc[i].mul(eqValI));
             }
         }
 

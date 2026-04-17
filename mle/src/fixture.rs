@@ -10,6 +10,9 @@
 ///   JSON num:  18089690094123470848  (off by 686!)
 ///   As string: "18089690094123470162" (exact)
 use ark_ff::{Field as ArkField, PrimeField as ArkPrimeField};
+use plonky2::hash::hash_types::RichField;
+use plonky2::plonk::circuit_data::CommonCircuitData;
+use plonky2_field::extension::Extendable;
 use plonky2_field::types::PrimeField64;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -75,6 +78,71 @@ pub struct ProofFixture {
     pub num_constants: usize,
     pub degree_bits: usize,
 
+    // ── Permutation argument context (Issue #2) ────────────────────────
+    /// Coset shifts k_is: id_col(b) = k_is[col] · subgroup[b] in field encoding.
+    pub k_is: Vec<String>,
+    /// Powers g^{2^i} of the subgroup generator, length = degree_bits.
+    /// Used to evaluate subgroup_MLE(r) = Π_i ((1-r_i) + r_i · g^{2^i}).
+    pub subgroup_gen_powers: Vec<String>,
+
+    // ── v2 logUp soundness fix (Issue R2-#2) ───────────────────────────
+    pub inverse_helpers_commitment_root: String,
+    pub inverse_helpers_batch_r: String,
+    pub inv_sumcheck_challenges: Vec<String>,
+    pub inv_sumcheck_proof: SumcheckFixture,
+    pub h_sumcheck_challenges: Vec<String>,
+    pub h_sumcheck_proof: SumcheckFixture,
+    pub lambda_inv: String,
+    pub mu_inv: String,
+    pub lambda_h: String,
+    pub tau_inv: Vec<String>,
+    pub inverse_helpers_evals_at_r_inv: Vec<String>,
+    pub inverse_helpers_evals_at_r_h: Vec<String>,
+    pub inverse_helpers_whir_eval_at_r_inv: Ext3Fixture,
+    pub inverse_helpers_whir_eval_at_r_h: Ext3Fixture,
+    pub inverse_helpers_whir_eval_at_r_gate: Ext3Fixture,
+    pub witness_individual_evals_at_r_inv: Vec<String>,
+    /// Full preprocessed evals at r_inv `[const_0..const_C, sigma_0..sigma_R]`.
+    pub preprocessed_individual_evals_at_r_inv: Vec<String>,
+    pub g_sub_eval_at_r_inv: String,
+    pub witness_whir_eval_at_r_inv: Ext3Fixture,
+    pub preprocessed_whir_eval_at_r_inv: Ext3Fixture,
+    pub witness_eval_value_at_r_inv: String,
+    pub preprocessed_eval_value_at_r_inv: String,
+    pub aux_whir_eval_at_r_inv: Ext3Fixture,
+    pub aux_whir_eval_at_r_h: Ext3Fixture,
+    pub witness_whir_eval_at_r_h: Ext3Fixture,
+    pub preprocessed_whir_eval_at_r_h: Ext3Fixture,
+
+    // ── v2 gate binding fix (Issue R2-#1) ──────────────────────────────
+    pub ext_challenge: String,
+    pub tau_gate: Vec<String>,
+    pub gate_sumcheck_challenges: Vec<String>,
+    pub gate_sumcheck_proof: SumcheckFixture,
+    pub witness_individual_evals_at_r_gate_v2: Vec<String>,
+    pub preprocessed_individual_evals_at_r_gate_v2: Vec<String>,
+    pub witness_eval_value_at_r_gate_v2: String,
+    pub preprocessed_eval_value_at_r_gate_v2: String,
+    pub witness_whir_eval_at_r_gate_v2: Ext3Fixture,
+    pub preprocessed_whir_eval_at_r_gate_v2: Ext3Fixture,
+    pub aux_whir_eval_at_r_gate_v2: Ext3Fixture,
+    pub inverse_helpers_whir_eval_at_r_gate_v2: Ext3Fixture,
+
+    // ── Circuit metadata for Φ_gate terminal check (Issue R2-#1) ───────
+    /// Public inputs hash (4 Goldilocks elements, Poseidon digest).
+    pub public_inputs_hash: Vec<String>,
+    /// Number of selector columns.
+    pub num_selectors: usize,
+    /// Upper bound on the filtered gate-constraint polynomial degree
+    /// (`common_data.quotient_degree_factor`). Φ_gate round-poly degree
+    /// per variable = `quotient_degree_factor + 2`.
+    pub quotient_degree_factor: usize,
+    /// Total number of gate-constraint slots (`common_data.num_gate_constraints`).
+    pub num_gate_constraints: usize,
+    /// Per-gate metadata (same order as `common_data.gates`, which plonky2
+    /// sorts ascending by gate.degree()).
+    pub gates: Vec<GateInfoFixture>,
+
     // ── WHIR config ─────────────────────────────────────────────────────
     /// WHIR protocol ID (hex, 0x-prefixed, 64 bytes).
     pub whir_protocol_id: String,
@@ -90,6 +158,56 @@ pub struct Ext3Fixture {
     pub c0: String,
     pub c1: String,
     pub c2: String,
+}
+
+/// Per-gate metadata needed by the Solidity Φ_gate terminal check.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GateInfoFixture {
+    /// Human-readable gate id string (`gate.id()`). Not consumed by the
+    /// on-chain verifier — retained as diagnostic context so fixtures
+    /// remain self-describing.
+    pub name: String,
+    /// Classifier consumed by Plonky2GateEvaluator.sol:
+    ///   0 = NoopGate, 1 = ConstantGate, 2 = PublicInputGate,
+    ///   3 = ArithmeticGate, 4 = PoseidonGate,
+    ///   5 = PoseidonMdsGate, 6 = ArithmeticExtensionGate,
+    ///   7 = MulExtensionGate, 8 = ExponentiationGate,
+    ///   9 = BaseSumGate, 10 = ReducingGate, 11 = ReducingExtensionGate,
+    ///   12 = RandomAccessGate, 13 = CosetInterpolationGate,
+    ///   255 = unsupported.
+    pub gate_id: u8,
+    /// Which selector column drives this gate (index into
+    /// `preprocessed_individual_evals_at_r_gate_v2[0..num_selectors]`).
+    pub selector_index: u8,
+    /// Start of the gate's selector group (inclusive).
+    pub group_start: u8,
+    /// End of the gate's selector group (exclusive).
+    pub group_end: u8,
+    /// Row index of this gate inside `common_data.gates` (ascending by degree).
+    pub gate_row_index: u8,
+    /// `gate.num_constraints()` — how many slots this gate's eval writes to.
+    pub num_constraints: u16,
+    /// Primary gate-specific parameter:
+    ///   ArithmeticGate / ArithmeticExtensionGate / MulExtensionGate: `num_ops`
+    ///   ConstantGate: `num_consts`
+    ///   BaseSumGate: `num_limbs`
+    ///   ReducingGate / ReducingExtensionGate: `num_coeffs`
+    ///   ExponentiationGate: `num_power_bits`
+    ///   RandomAccessGate: `bits`
+    ///   CosetInterpolationGate: `subgroup_bits`
+    ///   Else: 0
+    pub num_or_consts: u16,
+    /// Secondary gate-specific parameter:
+    ///   BaseSumGate: `B` (base) — not currently exposed via `gate.id()`, so
+    ///     we hardcode 2 for `BaseSumGate<2>` occurrences (only one in scope).
+    ///   RandomAccessGate: `num_copies`
+    ///   Else: 0
+    pub param2: u16,
+    /// Tertiary gate-specific parameter:
+    ///   RandomAccessGate: `num_extra_constants`
+    ///   Else: 0
+    pub param3: u16,
 }
 
 /// WHIR protocol parameters for Solidity verifier.
@@ -325,11 +443,101 @@ fn extract_whir_params(degree_bits: usize) -> (WhirParamsFixture, Vec<u8>, Vec<u
     (params_fixture, protocol_id, split_session_id)
 }
 
+/// Classify a plonky2 gate by its `gate.id()` string and return the
+/// (gate_id, num_or_consts, param2, param3) tuple consumed by Plonky2GateEvaluator.sol.
+fn classify_gate(id: &str) -> (u8, u16, u16, u16) {
+    fn num_after(id: &str, key: &str) -> u16 {
+        id.split(key)
+            .nth(1)
+            .and_then(|s| {
+                s.trim()
+                    .trim_end_matches('}')
+                    .trim_end_matches(',')
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+            })
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0)
+    }
+
+    if id == "NoopGate" {
+        (0, 0, 0, 0)
+    } else if id.starts_with("ConstantGate") {
+        (1, num_after(id, "num_consts:"), 0, 0)
+    } else if id == "PublicInputGate" {
+        (2, 0, 0, 0)
+    } else if id.starts_with("ArithmeticGate") && !id.starts_with("ArithmeticExtensionGate") {
+        (3, num_after(id, "num_ops:"), 0, 0)
+    } else if id.starts_with("PoseidonGate") {
+        (4, 0, 0, 0)
+    } else if id.starts_with("PoseidonMdsGate") {
+        (5, 0, 0, 0)
+    } else if id.starts_with("ArithmeticExtensionGate") {
+        (6, num_after(id, "num_ops:"), 0, 0)
+    } else if id.starts_with("MulExtensionGate") {
+        (7, num_after(id, "num_ops:"), 0, 0)
+    } else if id.starts_with("ExponentiationGate") {
+        (8, num_after(id, "num_power_bits:"), 0, 0)
+    } else if id.starts_with("BaseSumGate") {
+        // BaseSumGate<B> { num_limbs: N }; `B` is the type param, visible
+        // after "+ Base: B" in the id string.
+        let num_limbs = num_after(id, "num_limbs:");
+        let base = num_after(id, "+ Base:").max(2); // default 2 if not present
+        (9, num_limbs, base, 0)
+    } else if id.starts_with("ReducingExtensionGate") {
+        (11, num_after(id, "num_coeffs:"), 0, 0)
+    } else if id.starts_with("ReducingGate") {
+        (10, num_after(id, "num_coeffs:"), 0, 0)
+    } else if id.starts_with("RandomAccessGate") {
+        let bits = num_after(id, "bits:");
+        let num_copies = num_after(id, "num_copies:");
+        let num_extra = num_after(id, "num_extra_constants:");
+        (12, bits, num_copies, num_extra)
+    } else if id.starts_with("CosetInterpolationGate") {
+        (13, num_after(id, "subgroup_bits:"), 0, 0)
+    } else {
+        (255, 0, 0, 0)
+    }
+}
+
+fn collect_gate_metadata<F: RichField + Extendable<D>, const D: usize>(
+    common_data: &CommonCircuitData<F, D>,
+) -> Vec<GateInfoFixture> {
+    let si = &common_data.selectors_info;
+    common_data
+        .gates
+        .iter()
+        .enumerate()
+        .map(|(row, gate)| {
+            let id = gate.0.id();
+            let (gate_id, num_or_consts, param2, param3) = classify_gate(&id);
+            let sel_idx = si.selector_indices[row];
+            let group = &si.groups[sel_idx];
+            GateInfoFixture {
+                name: id,
+                gate_id,
+                selector_index: sel_idx as u8,
+                group_start: group.start as u8,
+                group_end: group.end as u8,
+                gate_row_index: row as u8,
+                num_constraints: gate.0.num_constraints() as u16,
+                num_or_consts,
+                param2,
+                param3,
+            }
+        })
+        .collect()
+}
+
 /// Convert an MleProof to a ProofFixture for JSON serialization.
 ///
 /// Generates the unified WHIR proof fixture format with single
 /// transcript + hints covering both preprocessed and witness vectors.
-pub fn proof_to_fixture<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize) -> ProofFixture {
+pub fn proof_to_fixture<F: RichField + Extendable<D> + PrimeField64, const D: usize>(
+    proof: &MleProof<F>,
+    common_data: &CommonCircuitData<F, D>,
+    degree_bits: usize,
+) -> ProofFixture {
     let (whir_params, protocol_id, split_session_id) = extract_whir_params(degree_bits);
 
     // Commitment roots
@@ -395,12 +603,95 @@ pub fn proof_to_fixture<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize
         whir_protocol_id: hex_encode(&protocol_id),
         whir_split_session_id: hex_encode(&split_session_id),
         whir_params,
+        // Issue #2: permutation argument context
+        k_is: field_vec_to_strings(&proof.k_is),
+        subgroup_gen_powers: field_vec_to_strings(&proof.subgroup_gen_powers),
+
+        // v2 logUp soundness fix (Issue R2-#2)
+        inverse_helpers_commitment_root: hex_encode(&proof.inverse_helpers_root),
+        inverse_helpers_batch_r: field_to_string(proof.inverse_helpers_batch_r),
+        inv_sumcheck_challenges: field_vec_to_strings(&proof.inv_sumcheck_challenges),
+        inv_sumcheck_proof: sumcheck_to_fixture(&proof.inv_sumcheck_proof),
+        h_sumcheck_challenges: field_vec_to_strings(&proof.h_sumcheck_challenges),
+        h_sumcheck_proof: sumcheck_to_fixture(&proof.h_sumcheck_proof),
+        lambda_inv: field_to_string(proof.lambda_inv),
+        mu_inv: field_to_string(proof.mu_inv),
+        lambda_h: field_to_string(proof.lambda_h),
+        tau_inv: field_vec_to_strings(&proof.tau_inv),
+        inverse_helpers_evals_at_r_inv: field_vec_to_strings(&proof.inverse_helpers_evals_at_r_inv),
+        inverse_helpers_evals_at_r_h: field_vec_to_strings(&proof.inverse_helpers_evals_at_r_h),
+        inverse_helpers_whir_eval_at_r_inv: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_inv_ext3,
+        ),
+        inverse_helpers_whir_eval_at_r_h: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_h_ext3,
+        ),
+        inverse_helpers_whir_eval_at_r_gate: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_gate_ext3,
+        ),
+        witness_individual_evals_at_r_inv: field_vec_to_strings(
+            &proof.witness_individual_evals_at_r_inv,
+        ),
+        preprocessed_individual_evals_at_r_inv: field_vec_to_strings(
+            &proof.preprocessed_individual_evals_at_r_inv,
+        ),
+        g_sub_eval_at_r_inv: field_to_string(proof.g_sub_eval_at_r_inv),
+        witness_whir_eval_at_r_inv: ext3_to_fixture(&proof.witness_whir_eval_at_r_inv_ext3),
+        preprocessed_whir_eval_at_r_inv: ext3_to_fixture(
+            &proof.preprocessed_whir_eval_at_r_inv_ext3,
+        ),
+        witness_eval_value_at_r_inv: field_to_string(proof.witness_eval_value_at_r_inv),
+        preprocessed_eval_value_at_r_inv: field_to_string(proof.preprocessed_eval_value_at_r_inv),
+        aux_whir_eval_at_r_inv: ext3_to_fixture(&proof.aux_whir_eval_at_r_inv_ext3),
+        aux_whir_eval_at_r_h: ext3_to_fixture(&proof.aux_whir_eval_at_r_h_ext3),
+        witness_whir_eval_at_r_h: ext3_to_fixture(&proof.witness_whir_eval_at_r_h_ext3),
+        preprocessed_whir_eval_at_r_h: ext3_to_fixture(&proof.preprocessed_whir_eval_at_r_h_ext3),
+
+        // Issue R2-#1: v2 gate binding fix
+        ext_challenge: field_to_string(proof.ext_challenge),
+        tau_gate: field_vec_to_strings(&proof.tau_gate),
+        gate_sumcheck_challenges: field_vec_to_strings(&proof.gate_sumcheck_challenges),
+        gate_sumcheck_proof: sumcheck_to_fixture(&proof.gate_sumcheck_proof),
+        witness_individual_evals_at_r_gate_v2: field_vec_to_strings(
+            &proof.witness_individual_evals_at_r_gate_v2,
+        ),
+        preprocessed_individual_evals_at_r_gate_v2: field_vec_to_strings(
+            &proof.preprocessed_individual_evals_at_r_gate_v2,
+        ),
+        witness_eval_value_at_r_gate_v2: field_to_string(proof.witness_eval_value_at_r_gate_v2),
+        preprocessed_eval_value_at_r_gate_v2: field_to_string(
+            proof.preprocessed_eval_value_at_r_gate_v2,
+        ),
+        witness_whir_eval_at_r_gate_v2: ext3_to_fixture(&proof.witness_whir_eval_at_r_gate_v2_ext3),
+        preprocessed_whir_eval_at_r_gate_v2: ext3_to_fixture(
+            &proof.preprocessed_whir_eval_at_r_gate_v2_ext3,
+        ),
+        aux_whir_eval_at_r_gate_v2: ext3_to_fixture(&proof.aux_whir_eval_at_r_gate_v2_ext3),
+        inverse_helpers_whir_eval_at_r_gate_v2: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_gate_v2_ext3,
+        ),
+
+        // Circuit metadata for Φ_gate terminal check
+        public_inputs_hash: proof
+            .public_inputs_hash
+            .elements
+            .iter()
+            .map(|e| field_to_string(*e))
+            .collect(),
+        num_selectors: common_data.selectors_info.num_selectors(),
+        quotient_degree_factor: common_data.quotient_degree_factor,
+        num_gate_constraints: common_data.num_gate_constraints,
+        gates: collect_gate_metadata::<F, D>(common_data),
     }
 }
 
 /// Serialize an MleProof to a JSON string (all field elements as strings).
-pub fn proof_to_json<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize) -> String {
-    let fixture = proof_to_fixture(proof, degree_bits);
+pub fn proof_to_json<F: RichField + Extendable<D> + PrimeField64, const D: usize>(
+    proof: &MleProof<F>,
+    common_data: &CommonCircuitData<F, D>,
+    degree_bits: usize,
+) -> String {
+    let fixture = proof_to_fixture(proof, common_data, degree_bits);
     serde_json::to_string_pretty(&fixture).expect("Failed to serialize proof fixture")
 }
 
@@ -476,7 +767,7 @@ mod tests {
             mle_prove::<F, C, D>(&circuit.prover_only, &circuit.common, pw, &mut timing).unwrap();
 
         // Serialize to JSON
-        let json = proof_to_json(&proof, circuit.common.degree_bits());
+        let json = proof_to_json::<F, D>(&proof, &circuit.common, circuit.common.degree_bits());
 
         // Verify unified WHIR format
         assert!(
