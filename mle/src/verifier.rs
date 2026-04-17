@@ -10,7 +10,9 @@
 use anyhow::{ensure, Result};
 use plonky2::hash::hash_types::RichField;
 use plonky2::plonk::circuit_data::CommonCircuitData;
-use plonky2_field::extension::Extendable;
+use plonky2::plonk::vanishing_poly::evaluate_gate_constraints;
+use plonky2::plonk::vars::EvaluationVars;
+use plonky2_field::extension::{Extendable, FieldExtension};
 use plonky2_field::types::Field;
 
 use crate::commitment::whir_pcs::{WhirPCS, WHIR_SESSION_SPLIT};
@@ -97,7 +99,11 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     ensure!(tau_inv == proof.tau_inv, "tau_inv mismatch");
 
     transcript.domain_separate("extension-combine");
-    let _ext_challenge: F = transcript.squeeze_challenge();
+    let ext_challenge: F = transcript.squeeze_challenge();
+    ensure!(
+        ext_challenge == proof.ext_challenge,
+        "ext_challenge mismatch"
+    );
 
     // ═══════════════════════════════════════════════════════════════════
     // Step 3: Auxiliary commitment verification
@@ -189,6 +195,44 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
 
     // ═══════════════════════════════════════════════════════════════════
+    // Step 4.8 (v2 gate binding — Issue R2-#1, paper §7.3):
+    //   Verify the Φ_gate zero-check sumcheck.
+    //     Φ_gate(x) := eq(τ_gate, x) · flatten_ext(
+    //                      Σ_j α^j · c_j(lift(W_k(x)), lift(const_k(x))),
+    //                      ext_challenge
+    //                  )
+    //   claimed sum = 0. Round-poly degree bound: 1 + quotient_degree_factor.
+    // ═══════════════════════════════════════════════════════════════════
+    transcript.domain_separate("v2-gate-challenges");
+    let tau_gate: Vec<F> = transcript.squeeze_challenges(degree_bits);
+    ensure!(tau_gate == proof.tau_gate, "tau_gate mismatch");
+
+    transcript.domain_separate("v2-gate-zerocheck");
+    // Matches the prover: Φ_gate has degree ≤ qdf + 2 per variable (1 for eq,
+    // up to qdf + 1 for the filtered gate constraint formula).
+    let max_round_degree_gate = 2 + common_data.quotient_degree_factor;
+    for (i, rp) in proof.gate_sumcheck_proof.round_polys.iter().enumerate() {
+        ensure!(
+            rp.evaluations.len() == max_round_degree_gate + 1,
+            "Φ_gate round {i}: expected {} evaluations (degree {max_round_degree_gate}), got {}",
+            max_round_degree_gate + 1,
+            rp.evaluations.len()
+        );
+    }
+    let gate_result = verify_sumcheck(
+        &proof.gate_sumcheck_proof,
+        F::ZERO,
+        degree_bits,
+        &mut transcript,
+    );
+    let (gate_challenges, gate_final_eval) =
+        gate_result.map_err(|e| anyhow::anyhow!("Φ_gate sumcheck failed: {}", e))?;
+    ensure!(
+        gate_challenges == proof.gate_sumcheck_challenges,
+        "Φ_gate sumcheck challenges mismatch"
+    );
+
+    // ═══════════════════════════════════════════════════════════════════
     // Step 5: Verify WHIR proofs + batch consistency
     // ═══════════════════════════════════════════════════════════════════
     transcript.domain_separate("pcs-eval");
@@ -224,9 +268,18 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
             )
         })
         .collect();
+    let r_gate_v2_gl: Vec<plonky2_field::goldilocks_field::GoldilocksField> = proof
+        .gate_sumcheck_challenges
+        .iter()
+        .map(|&f| {
+            plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                f.to_canonical_u64(),
+            )
+        })
+        .collect();
 
     let whir_eval_values: Vec<_> = vec![
-        // Point 0 (r_gate): pre, wit, aux, inv
+        // Point 0 (r_gate, combined sumcheck output): pre, wit, aux, inv
         proof.preprocessed_whir_eval_ext3,
         proof.witness_whir_eval_ext3,
         proof.aux_whir_eval_ext3,
@@ -241,13 +294,18 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         proof.witness_whir_eval_at_r_h_ext3,
         proof.aux_whir_eval_at_r_h_ext3,
         proof.inverse_helpers_whir_eval_at_r_h_ext3,
+        // Point 3 (r_gate_v2, Φ_gate sumcheck output): pre, wit, aux, inv
+        proof.preprocessed_whir_eval_at_r_gate_v2_ext3,
+        proof.witness_whir_eval_at_r_gate_v2_ext3,
+        proof.aux_whir_eval_at_r_gate_v2_ext3,
+        proof.inverse_helpers_whir_eval_at_r_gate_v2_ext3,
     ];
     let whir_result = whir_pcs.verify_split(
         degree_bits,
         &proof.whir_eval_proof,
         &whir_eval_values,
         WHIR_SESSION_SPLIT,
-        &[&r_gl, &r_inv_gl, &r_h_gl],
+        &[&r_gl, &r_inv_gl, &r_h_gl, &r_gate_v2_gl],
         4, // num_vectors: preprocessed + witness + auxiliary + inverse_helpers
     );
     ensure!(
@@ -357,6 +415,39 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         r_pow *= proof.inverse_helpers_batch_r;
     }
     let _ = expected_inv_at_r_inv; // silence unused-binding warnings (used via WHIR)
+
+    // 5j: Batch consistency — witness at r_gate_v2 (Issue R2-#1).
+    ensure!(
+        proof.witness_individual_evals_at_r_gate_v2.len() == proof.num_wires,
+        "witness_individual_evals_at_r_gate_v2 has wrong length"
+    );
+    let mut expected_wit_at_r_gate_v2 = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.witness_individual_evals_at_r_gate_v2 {
+        expected_wit_at_r_gate_v2 += r_pow * eval;
+        r_pow *= batch_r_wit;
+    }
+    ensure!(
+        expected_wit_at_r_gate_v2 == proof.witness_eval_value_at_r_gate_v2,
+        "Witness batch mismatch at r_gate_v2"
+    );
+
+    // 5k: Batch consistency — preprocessed at r_gate_v2.
+    let expected_pre_len_v2 = proof.num_constants + proof.num_routed_wires;
+    ensure!(
+        proof.preprocessed_individual_evals_at_r_gate_v2.len() == expected_pre_len_v2,
+        "preprocessed_individual_evals_at_r_gate_v2 has wrong length"
+    );
+    let mut expected_pre_at_r_gate_v2 = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.preprocessed_individual_evals_at_r_gate_v2 {
+        expected_pre_at_r_gate_v2 += r_pow * eval;
+        r_pow *= batch_r_pre;
+    }
+    ensure!(
+        expected_pre_at_r_gate_v2 == proof.preprocessed_eval_value_at_r_gate_v2,
+        "Preprocessed batch mismatch at r_gate_v2"
+    );
 
     // 5i: g_sub(r_inv) consistency — verifier recomputes from VK-bound powers.
     let mut expected_g_sub_at_r_inv = F::ONE;
@@ -471,6 +562,85 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     );
     let _ = lambda_h; // retained as transcript challenge for future per-j folding
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Step 9 (v2 gate binding — Issue R2-#1): Φ_gate terminal check.
+    //
+    //   gate_final_eval ?= eq(τ_gate, r_gate_v2) · flatten_ext(
+    //       Σ_j α^j · c_j(lift(W_k(r_gate_v2)), lift(const_k(r_gate_v2))),
+    //       ext_challenge
+    //   )
+    //
+    // The Plonky2 gate evaluator is invoked at the sumcheck output point
+    // with PCS-bound wire/const evaluations. Because all inputs are
+    // multilinear extensions and the gate formula is a polynomial with
+    // the same coefficients at Boolean inputs and at arbitrary field
+    // points, this check binds the commitment to the ACTUAL gate formula
+    // and not merely to the MLE of its row-wise values. This closes the
+    // soundness gap for gates of degree ≥ 2 (ArithmeticGate, PoseidonGate,
+    // …) that made the legacy `aux_constraint_eval` oracle insufficient.
+    //
+    // SECURITY:
+    //   - α, ext_challenge, τ_gate are Fiat-Shamir challenges squeezed
+    //     after all wire/const commitments.
+    //   - Wire/const individual evals at r_gate_v2 are WHIR-bound
+    //     (Ext3 evals at r_gate_v2 + Schwartz-Zippel on batch_r).
+    //   - public_inputs_hash is absorbed into the transcript at the very
+    //     start and constitutes a bound public value.
+    // ═══════════════════════════════════════════════════════════════════
+    ensure!(
+        proof.witness_individual_evals_at_r_gate_v2.len() == proof.num_wires,
+        "witness_individual_evals_at_r_gate_v2 has wrong length for gate evaluator"
+    );
+    ensure!(
+        proof.preprocessed_individual_evals_at_r_gate_v2.len()
+            >= common_data.num_constants,
+        "preprocessed_individual_evals_at_r_gate_v2 missing constants for gate evaluator"
+    );
+    let local_wires_ext: Vec<F::Extension> = proof
+        .witness_individual_evals_at_r_gate_v2
+        .iter()
+        .take(common_data.config.num_wires)
+        .map(|&f| F::Extension::from_basefield(f))
+        .collect();
+    let local_constants_ext: Vec<F::Extension> = proof
+        .preprocessed_individual_evals_at_r_gate_v2
+        .iter()
+        .take(common_data.num_constants)
+        .map(|&f| F::Extension::from_basefield(f))
+        .collect();
+
+    let vars = EvaluationVars {
+        local_constants: &local_constants_ext,
+        local_wires: &local_wires_ext,
+        public_inputs_hash: &proof.public_inputs_hash,
+    };
+    let constraint_values = evaluate_gate_constraints(common_data, vars);
+
+    let alpha_ext = F::Extension::from_basefield(alpha);
+    let mut combined_ext = F::Extension::ZERO;
+    let mut alpha_pow = F::Extension::ONE;
+    for &cv in &constraint_values {
+        combined_ext += alpha_pow * cv;
+        alpha_pow *= alpha_ext;
+    }
+
+    // Flatten extension components with ext_challenge powers.
+    let components = combined_ext.to_basefield_array();
+    let mut flat = F::ZERO;
+    let mut ext_pow = F::ONE;
+    for &c in components.iter() {
+        flat += ext_pow * c;
+        ext_pow *= ext_challenge;
+    }
+
+    let eq_at_r_gate_v2 = eq_poly::eq_eval(&tau_gate, &gate_challenges);
+    let pred = eq_at_r_gate_v2 * flat;
+    ensure!(
+        pred == gate_final_eval,
+        "Φ_gate terminal check failed — wire/const evals at r_gate_v2 are \
+         not consistent with the gate constraint formula"
+    );
+
     Ok(())
 }
 
@@ -566,6 +736,98 @@ mod tests {
 
         let result = mle_verify::<F, D>(&common_data_a, &vk_b, &proof_a);
         assert!(result.is_err(), "Cross-circuit proof should be rejected");
+    }
+
+    /// Issue R2-#1: tampering with the witness individual evals at `r_gate_v2`
+    /// must be rejected by the Φ_gate terminal check — this is exactly the
+    /// attack surface that motivated the v2 gate binding fix.
+    ///
+    /// Before R2-#1, a prover could commit `C̃ ≡ 0` to WHIR and pass the
+    /// legacy `eq(τ,r)·C̃(r) == final_eval` check. Now the verifier calls
+    /// `evaluate_gate_constraints` at `r_gate_v2` with PCS-bound wire evals,
+    /// so any inconsistency between claimed witness evals and the actual
+    /// polynomial (including fabricated evals) is caught.
+    #[test]
+    fn test_tampered_witness_evals_at_r_gate_v2_rejected() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(x, F::from_canonical_u64(3)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+
+        let mut timing = TimingTree::default();
+        let mut proof =
+            mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+
+        // Sanity: an untampered proof verifies.
+        let ok = mle_verify::<F, D>(&common_data, &vk, &proof);
+        assert!(ok.is_ok(), "Baseline proof must verify: {:?}", ok.err());
+
+        // Flip a wire evaluation at r_gate_v2 — this should break the
+        // Φ_gate terminal check (batch-consistency check triggers first in
+        // practice, but either way verification must be rejected).
+        proof.witness_individual_evals_at_r_gate_v2[0] += F::ONE;
+
+        let result = mle_verify::<F, D>(&common_data, &vk, &proof);
+        assert!(
+            result.is_err(),
+            "Tampered witness evals at r_gate_v2 must be rejected"
+        );
+    }
+
+    /// Issue R2-#1: tampering with the Φ_gate sumcheck proof itself (the
+    /// fake-sumcheck attack) must be caught by the round-poly consistency
+    /// check in `verify_sumcheck`.
+    #[test]
+    fn test_tampered_gate_sumcheck_rejected() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(x, F::from_canonical_u64(2)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(3)).unwrap();
+
+        let mut timing = TimingTree::default();
+        let mut proof =
+            mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+
+        // Corrupt the first round polynomial of Φ_gate.
+        if let Some(rp) = proof.gate_sumcheck_proof.round_polys.first_mut() {
+            rp.evaluations[0] += F::ONE;
+        }
+
+        let result = mle_verify::<F, D>(&common_data, &vk, &proof);
+        assert!(
+            result.is_err(),
+            "Tampered Φ_gate sumcheck round poly must be rejected"
+        );
+    }
+
+    /// Issue R2-#1: a preprocessed constant evaluation at `r_gate_v2` is a
+    /// direct input to `evaluate_gate_constraints` inside the terminal
+    /// check. Tampering must be rejected.
+    #[test]
+    fn test_tampered_const_evals_at_r_gate_v2_rejected() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(x, F::from_canonical_u64(4)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(9)).unwrap();
+
+        let mut timing = TimingTree::default();
+        let mut proof =
+            mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+
+        if common_data.num_constants > 0 {
+            proof.preprocessed_individual_evals_at_r_gate_v2[0] += F::ONE;
+            let result = mle_verify::<F, D>(&common_data, &vk, &proof);
+            assert!(
+                result.is_err(),
+                "Tampered const eval at r_gate_v2 must be rejected"
+            );
+        }
     }
 
     #[test]

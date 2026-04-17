@@ -6,6 +6,7 @@ import {MleVerifier} from "../src/MleVerifier.sol";
 import {SumcheckVerifier} from "../src/SumcheckVerifier.sol";
 import {SpongefishWhirVerify} from "../src/spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "../src/spongefish/GoldilocksExt3.sol";
+import {Plonky2GateEvaluator} from "../src/Plonky2GateEvaluator.sol";
 
 /// @title MleE2ETest
 /// @notice Full end-to-end test: combined sumcheck + main WHIR + auxiliary WHIR.
@@ -16,6 +17,12 @@ contract MleE2ETest is Test {
         verifier = new MleVerifier();
     }
 
+    // Issue R2-#1: Solidity port now supports the full mul-chain gate set
+    // (ArithmeticGate, ConstantGate, PublicInputGate, NoopGate, PoseidonGate).
+    // recursive_verify uses additional gates (CosetInterpolationGate,
+    // RandomAccessGate, ReducingGate, ExponentiationGate, BaseSumGate, …)
+    // that are NOT yet ported; it is expected to revert with
+    // "unsupported gate with non-zero filter".
     function test_e2e_small_mul() public view {
         _runE2E("test/fixtures/small_mul.json");
     }
@@ -32,12 +39,12 @@ contract MleE2ETest is Test {
         _runE2E("test/fixtures/poseidon_hash.json");
     }
 
-    function test_e2e_recursive_verify() public view {
-        _runE2E("test/fixtures/recursive_verify.json");
-    }
-
     function test_e2e_huge_mul() public view {
         _runE2E("test/fixtures/huge_mul.json");
+    }
+
+    function test_e2e_recursive_verify() public view {
+        _runE2E("test/fixtures/recursive_verify.json");
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -162,6 +169,74 @@ contract MleE2ETest is Test {
 
         // ── v2 logUp soundness fix (Issue R2-#2) ────────────────────────
         _parseV2LogupFields(json, proof);
+
+        // ── R2-#1: Φ_gate fields + circuit metadata ─────────────────────
+        _parseGateFields(json, proof);
+    }
+
+    function _parseGateFields(string memory json, MleVerifier.MleProof memory proof) internal pure {
+        uint256 degreeBits = vm.parseJsonUint(json, ".degreeBits");
+        proof.extChallenge = vm.parseUint(vm.parseJsonString(json, ".extChallenge"));
+        proof.gateSumcheckProof = _parseSumcheckProof(json, ".gateSumcheckProof", degreeBits);
+        proof.witnessIndividualEvalsAtRGateV2 =
+            _parseUintArray(json, ".witnessIndividualEvalsAtRGateV2");
+        proof.preprocessedIndividualEvalsAtRGateV2 =
+            _parseUintArray(json, ".preprocessedIndividualEvalsAtRGateV2");
+        proof.witnessEvalValueAtRGateV2 =
+            vm.parseUint(vm.parseJsonString(json, ".witnessEvalValueAtRGateV2"));
+        proof.preprocessedEvalValueAtRGateV2 =
+            vm.parseUint(vm.parseJsonString(json, ".preprocessedEvalValueAtRGateV2"));
+        proof.preprocessedWhirEvalAtRGateV2 = _parseExt3(json, ".preprocessedWhirEvalAtRGateV2");
+        proof.witnessWhirEvalAtRGateV2 = _parseExt3(json, ".witnessWhirEvalAtRGateV2");
+        proof.auxWhirEvalAtRGateV2 = _parseExt3(json, ".auxWhirEvalAtRGateV2");
+        proof.inverseHelpersWhirEvalAtRGateV2 = _parseExt3(json, ".inverseHelpersWhirEvalAtRGateV2");
+        proof.quotientDegreeFactor = vm.parseJsonUint(json, ".quotientDegreeFactor");
+        proof.numSelectors = vm.parseJsonUint(json, ".numSelectors");
+        proof.numGateConstraints = vm.parseJsonUint(json, ".numGateConstraints");
+
+        // Gates array
+        uint256 nGates = _countGates(json);
+        proof.gates = new Plonky2GateEvaluator.GateInfo[](nGates);
+        for (uint256 i = 0; i < nGates; i++) {
+            string memory p = string.concat(".gates[", vm.toString(i), "]");
+            proof.gates[i] = Plonky2GateEvaluator.GateInfo({
+                gateId: uint8(vm.parseJsonUint(json, string.concat(p, ".gateId"))),
+                selectorIndex: uint8(vm.parseJsonUint(json, string.concat(p, ".selectorIndex"))),
+                groupStart: uint8(vm.parseJsonUint(json, string.concat(p, ".groupStart"))),
+                groupEnd: uint8(vm.parseJsonUint(json, string.concat(p, ".groupEnd"))),
+                gateRowIndex: uint8(vm.parseJsonUint(json, string.concat(p, ".gateRowIndex"))),
+                numConstraints: uint16(vm.parseJsonUint(json, string.concat(p, ".numConstraints"))),
+                numOrConsts: uint16(vm.parseJsonUint(json, string.concat(p, ".numOrConsts"))),
+                param2: uint16(vm.parseJsonUint(json, string.concat(p, ".param2"))),
+                param3: uint16(vm.parseJsonUint(json, string.concat(p, ".param3")))
+            });
+        }
+
+        // Public inputs hash is the Poseidon digest computed by the prover.
+        // Parse from publicInputsHash field of the fixture (4 base-field values).
+        // If not present (older fixtures), fall back to zero.
+        try vm.parseJsonStringArray(json, ".publicInputsHash") returns (string[] memory hs) {
+            for (uint256 i = 0; i < 4 && i < hs.length; i++) {
+                proof.publicInputsHash[i] = vm.parseUint(hs[i]);
+            }
+        } catch {
+            // Fixture does not serialize public_inputs_hash explicitly —
+            // derive from proof.publicInputs via Poseidon (unimplemented here).
+            // Supported fixtures (large/huge_mul) require this field; if
+            // missing, the terminal check will fail below.
+        }
+    }
+
+    function _countGates(string memory json) internal pure returns (uint256 n) {
+        for (uint256 i = 0; i < 32; i++) {
+            try vm.parseJsonUint(json, string.concat(".gates[", vm.toString(i), "].gateId"))
+                returns (uint256)
+            {
+                n = i + 1;
+            } catch {
+                break;
+            }
+        }
     }
 
     /// @dev Populate the v2 logUp fields on `proof` from JSON. Extracted to

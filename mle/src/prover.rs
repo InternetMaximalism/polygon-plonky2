@@ -22,7 +22,8 @@ use crate::dense_mle::{row_major_to_mles, tables_to_mles, DenseMultilinearExtens
 use crate::eq_poly;
 use crate::proof::{MleProof, MleVerificationKey};
 use crate::sumcheck::prover::{
-    prove_sumcheck_combined, prove_sumcheck_inv_zerocheck, prove_sumcheck_plain,
+    prove_sumcheck_combined, prove_sumcheck_gate_zerocheck, prove_sumcheck_inv_zerocheck,
+    prove_sumcheck_plain,
 };
 use crate::transcript::Transcript;
 
@@ -520,6 +521,64 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     eprintln!("[prover] phase5.7 Φ_h: {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
+    // Phase 5.8 (v2 gate binding — Issue R2-#1, paper §7.3):
+    //
+    // Run the Φ_gate zero-check sumcheck that binds the ACTUAL Plonky2 gate
+    // formula evaluated at a random point to the sumcheck output, rather
+    // than relying on the legacy `aux_constraint_eval` oracle (which did
+    // not close the MLE-commutativity gap for gates of degree ≥ 2).
+    //
+    //   Φ_gate(x) := eq(τ_gate, x) · flatten_ext(
+    //                    Σ_j α^j · c_j( lift(W_k(x)), lift(const_k(x)) ),
+    //                    ext_challenge
+    //                )
+    // claimed sum = 0.
+    //
+    // SECURITY: τ_gate is squeezed AFTER all wire/const commitments and
+    // all prior transcript content. α and ext_challenge are the same
+    // scalars used for `compute_combined_constraints` /
+    // `flatten_extension_constraints`, so the row-wise value equals C̃
+    // on the Boolean hypercube (honest prover).
+    // ═══════════════════════════════════════════════════════════════════
+    let _t = std::time::Instant::now();
+    transcript.domain_separate("v2-gate-challenges");
+    let tau_gate: Vec<F> = transcript.squeeze_challenges(degree_bits);
+
+    transcript.domain_separate("v2-gate-zerocheck");
+    // Φ_gate degree per variable: 1 (eq) + max filtered-constraint degree.
+    // Plonky2 bounds the filtered constraint degree by `quotient_degree_factor + 1`
+    // when selector_polynomials produces multiple groups (many_selector = true).
+    // Use the safe upper bound qdf + 2 so the round poly captures the full
+    // polynomial regardless of how gates were grouped.
+    let max_round_degree_gate = 2 + common_data.quotient_degree_factor;
+
+    let mut eq_gate_mle = DenseMultilinearExtension::new(eq_poly::eq_evals(&tau_gate));
+    // Ensure the wire/const MLE vectors match exactly what the gate evaluator
+    // expects (pad with zero-MLEs if the prover did not build all columns).
+    let mut wire_gate_mles: Vec<DenseMultilinearExtension<F>> = wire_mles.clone();
+    while wire_gate_mles.len() < common_data.config.num_wires {
+        wire_gate_mles.push(DenseMultilinearExtension::new(vec![F::ZERO; n_rows]));
+    }
+    let mut const_gate_mles: Vec<DenseMultilinearExtension<F>> = const_mles.clone();
+    while const_gate_mles.len() < common_data.num_constants {
+        const_gate_mles.push(DenseMultilinearExtension::new(vec![F::ZERO; n_rows]));
+    }
+
+    let (gate_sumcheck_proof, gate_sumcheck_challenges) =
+        prove_sumcheck_gate_zerocheck::<F, D>(
+            common_data,
+            &mut wire_gate_mles,
+            &mut const_gate_mles,
+            &mut eq_gate_mle,
+            alpha,
+            ext_challenge,
+            &tables.public_inputs_hash,
+            max_round_degree_gate,
+            &mut transcript,
+        );
+    eprintln!("[prover] phase5.8 Φ_gate: {:?}", _t.elapsed());
+
+    // ═══════════════════════════════════════════════════════════════════
     // Phase 6: Evaluate at sumcheck output point r
     // ═══════════════════════════════════════════════════════════════════
     let _t = std::time::Instant::now();
@@ -595,6 +654,32 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         DenseMultilinearExtension::new(g_padded).evaluate(&inv_sumcheck_challenges)
     };
 
+    // At r_gate_v2: witness (wires) and full preprocessed (const||sigma) are
+    // needed so the verifier can (i) run the Plonky2 gate evaluator at
+    // `r_gate_v2` and (ii) reconstruct the batched Goldilocks sum for WHIR
+    // consistency.
+    let witness_individual_evals_at_r_gate_v2: Vec<F> = wire_mles
+        .iter()
+        .map(|m| m.evaluate(&gate_sumcheck_challenges))
+        .collect();
+    let preprocessed_individual_evals_at_r_gate_v2_full: Vec<F> = preprocessed_mles
+        .iter()
+        .map(|m| m.evaluate(&gate_sumcheck_challenges))
+        .collect();
+
+    let mut witness_eval_value_at_r_gate_v2 = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &witness_individual_evals_at_r_gate_v2 {
+        witness_eval_value_at_r_gate_v2 += r_pow * eval;
+        r_pow *= batch_r_wit;
+    }
+    let mut preprocessed_eval_value_at_r_gate_v2 = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &preprocessed_individual_evals_at_r_gate_v2_full {
+        preprocessed_eval_value_at_r_gate_v2 += r_pow * eval;
+        r_pow *= batch_r_pre;
+    }
+
     // At r_h: only inverse-helper evals are needed for terminal check.
     let inverse_helpers_evals_at_r_h: Vec<F> = {
         let a_evals: Vec<F> = a_tables
@@ -648,9 +733,12 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let r_gate_gl = to_gl(&sumcheck_challenges);
     let r_inv_gl = to_gl(&inv_sumcheck_challenges);
     let r_h_gl = to_gl(&h_sumcheck_challenges);
+    let r_gate_v2_gl = to_gl(&gate_sumcheck_challenges);
 
-    let (whir_eval_proof, whir_per_point_evals) =
-        whir_pcs.prove_split_with_eval(commit_data, &[&r_gate_gl, &r_inv_gl, &r_h_gl]);
+    let (whir_eval_proof, whir_per_point_evals) = whir_pcs.prove_split_with_eval(
+        commit_data,
+        &[&r_gate_gl, &r_inv_gl, &r_h_gl, &r_gate_v2_gl],
+    );
 
     // Layout: per_point_evals[point_idx] = [pre, wit, aux, inv]
     let pre_eval_ext3 = whir_per_point_evals[0][0];
@@ -668,7 +756,12 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     let aux_whir_eval_at_r_h_ext3 = whir_per_point_evals[2][2];
     let inverse_helpers_whir_eval_at_r_h_ext3 = whir_per_point_evals[2][3];
 
-    eprintln!("[prover] phase7 WHIR prove (3-point): {:?}", _t.elapsed());
+    let preprocessed_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][0];
+    let witness_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][1];
+    let aux_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][2];
+    let inverse_helpers_whir_eval_at_r_gate_v2_ext3 = whir_per_point_evals[3][3];
+
+    eprintln!("[prover] phase7 WHIR prove (4-point): {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
     // Phase 8: Proof assembly
@@ -763,6 +856,20 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         witness_whir_eval_at_r_h_ext3,
         preprocessed_whir_eval_at_r_h_ext3,
         inverse_helpers_whir_eval_at_r_gate_ext3,
+        // ── v2 gate binding fix (Issue R2-#1) ──────────────────────────
+        ext_challenge,
+        tau_gate,
+        gate_sumcheck_proof,
+        gate_sumcheck_challenges,
+        witness_individual_evals_at_r_gate_v2,
+        preprocessed_individual_evals_at_r_gate_v2:
+            preprocessed_individual_evals_at_r_gate_v2_full,
+        witness_eval_value_at_r_gate_v2,
+        preprocessed_eval_value_at_r_gate_v2,
+        witness_whir_eval_at_r_gate_v2_ext3,
+        preprocessed_whir_eval_at_r_gate_v2_ext3,
+        aux_whir_eval_at_r_gate_v2_ext3,
+        inverse_helpers_whir_eval_at_r_gate_v2_ext3,
     })
 }
 

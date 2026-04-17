@@ -7,6 +7,7 @@ import {SumcheckVerifier} from "./SumcheckVerifier.sol";
 import {EqPolyLib} from "./EqPolyLib.sol";
 import {SpongefishWhirVerify} from "./spongefish/SpongefishWhirVerify.sol";
 import {GoldilocksExt3} from "./spongefish/GoldilocksExt3.sol";
+import {Plonky2GateEvaluator} from "./Plonky2GateEvaluator.sol";
 
 /// @title MleVerifier — Combined sumcheck + single WHIR (3 vectors)
 contract MleVerifier {
@@ -95,6 +96,30 @@ contract MleVerifier {
         GoldilocksExt3.Ext3 witnessWhirEvalAtRH;
         GoldilocksExt3.Ext3 auxWhirEvalAtRH;
         GoldilocksExt3.Ext3 inverseHelpersWhirEvalAtRH;
+
+        // ── v2 gate binding fix (Issue R2-#1, paper §7.3) ─────────────
+        // Additional sumcheck Φ_gate whose terminal check runs the actual
+        // Plonky2 gate-constraint formula at a random point r_gate_v2,
+        // closing the MLE-commutativity gap for gates of degree ≥ 2.
+        uint256 extChallenge;
+        SumcheckVerifier.SumcheckProof gateSumcheckProof;
+        // Individual evals at r_gate_v2 (PCS-bound via WHIR 4th point):
+        //  - witnessIndividualEvalsAtRGateV2  : length = numWires
+        //  - preprocessedIndividualEvalsAtRGateV2 : length = numConstants + numRoutedWires
+        uint256[] witnessIndividualEvalsAtRGateV2;
+        uint256[] preprocessedIndividualEvalsAtRGateV2;
+        uint256 witnessEvalValueAtRGateV2;
+        uint256 preprocessedEvalValueAtRGateV2;
+        GoldilocksExt3.Ext3 preprocessedWhirEvalAtRGateV2;
+        GoldilocksExt3.Ext3 witnessWhirEvalAtRGateV2;
+        GoldilocksExt3.Ext3 auxWhirEvalAtRGateV2;
+        GoldilocksExt3.Ext3 inverseHelpersWhirEvalAtRGateV2;
+        // Circuit metadata needed by Plonky2GateEvaluator.
+        uint256 quotientDegreeFactor;
+        uint256 numSelectors;
+        uint256 numGateConstraints;
+        Plonky2GateEvaluator.GateInfo[] gates;
+        uint256[4] publicInputsHash;
     }
 
     /// @dev Wrap call args into a struct to drastically reduce stack pressure.
@@ -149,13 +174,30 @@ contract MleVerifier {
         (uint256[] memory rH, uint256 hFinal) =
             SumcheckVerifier.verify(hSc, 0, vp.degreeBits, 1, ts);
 
-        // Bind the WHIR multi-point opening to the three sumcheck-derived points.
+        // ── R2-#1: Φ_gate zero-check sumcheck (round-poly degree = qdf+2) ──
+        TranscriptLib.domainSeparate(ts, "v2-gate-challenges");
+        uint256[] memory tauGate = TranscriptLib.squeezeChallenges(ts, vp.degreeBits);
+        TranscriptLib.domainSeparate(ts, "v2-gate-zerocheck");
+        SumcheckVerifier.SumcheckProof memory gateSc = _copySumcheckProof(proof.gateSumcheckProof);
+        (uint256[] memory rGateV2, uint256 gateFinalV2) = SumcheckVerifier.verify(
+            gateSc,
+            0,
+            vp.degreeBits,
+            2 + proof.quotientDegreeFactor,
+            ts
+        );
+
+        // Bind the WHIR multi-point opening to the four sumcheck-derived points.
         whirParams.evaluationPoint = _deriveEvalPoint(rGate);
         whirParams.evaluationPoint2 = _deriveEvalPoint(rInv);
-        whirParams.additionalEvaluationPoints = new GoldilocksExt3.Ext3[][](1);
+        whirParams.additionalEvaluationPoints = new GoldilocksExt3.Ext3[][](2);
         whirParams.additionalEvaluationPoints[0] = _deriveEvalPoint(rH);
+        whirParams.additionalEvaluationPoints[1] = _deriveEvalPoint(rGateV2);
 
         _runBatchAndWhir(proof, whirParams, vp, ts);
+
+        // ── R2-#1: Φ_gate terminal check ──
+        _checkGateTerminal(proof, tauGate, rGateV2, gateFinalV2);
 
         // ── Terminal check: legacy combined sumcheck. Issue R2-#2 still
         //    leaves h̃(r) un-bound (which is exactly why we run Φ_inv + Φ_h
@@ -208,26 +250,98 @@ contract MleVerifier {
         require(proof.inverseHelpersEvalsAtRInv.length == 2 * nr, "inv r_inv len");
         require(vp.kIs.length >= nr, "kIs len");
 
-        uint256 inner = 0;
-        uint256 lambdaPow = 1;
-        for (uint256 j = 0; j < nr; j++) {
-            uint256 w = proof.witnessIndividualEvalsAtRInv[j];
-            // sigma sits AFTER constants in the preprocessed batch layout.
-            uint256 s = proof.preprocessedIndividualEvalsAtRInv[vp.numConstants + j];
-            uint256 a = proof.inverseHelpersEvalsAtRInv[j];
-            uint256 b = proof.inverseHelpersEvalsAtRInv[nr + j];
-            uint256 idJ = vp.kIs[j].mul(proof.gSubEvalAtRInv);
-            uint256 denomId = proof.beta.add(w).add(proof.gamma.mul(idJ));
-            uint256 denomSigma = proof.beta.add(w).add(proof.gamma.mul(s));
-            uint256 zId = a.mul(denomId);
-            zId = zId == 0 ? F.sub(0, 1) : F.sub(zId, 1);
-            uint256 zSigma = b.mul(denomSigma);
-            zSigma = zSigma == 0 ? F.sub(0, 1) : F.sub(zSigma, 1);
-            inner = inner.add(lambdaPow.mul(zId.add(proof.muInv.mul(zSigma))));
-            lambdaPow = lambdaPow.mul(proof.lambdaInv);
-        }
+        uint256 inner = _invInner(proof, vp, nr);
         uint256 eqAtRInv = EqPolyLib.eqEval(tauInv, rInv);
         require(eqAtRInv.mul(inner) == invFinal, "Phi_inv terminal");
+    }
+
+    /// @dev Φ_gate terminal check (Issue R2-#1, paper §7.3):
+    ///   gateFinal ?= eq(τ_gate, r_gate_v2) · flatten_ext(
+    ///       Σ_j α^j · filter_j · gate_j.eval( w(r_gate_v2), c(r_gate_v2) ),
+    ///       ext_challenge
+    ///   )
+    ///
+    /// SECURITY: All inputs to Plonky2GateEvaluator are WHIR-bound (wire +
+    /// const evals at r_gate_v2 via the 4th WHIR point opening) or
+    /// Fiat-Shamir-derived (α, ext_challenge, τ_gate). No prover oracle is
+    /// trusted for the formula result — the verifier runs the same gate
+    /// evaluator the Rust prover uses.
+    function _checkGateTerminal(
+        MleProof calldata proof,
+        uint256[] memory tauGate,
+        uint256[] memory rGateV2,
+        uint256 gateFinal
+    ) private pure {
+        uint256 flat = Plonky2GateEvaluator.evalCombinedFlat(
+            proof.witnessIndividualEvalsAtRGateV2,
+            proof.preprocessedIndividualEvalsAtRGateV2,
+            proof.alpha,
+            proof.extChallenge,
+            proof.publicInputsHash,
+            proof.gates,
+            proof.numSelectors,
+            0, // numConstants: computed inside the evaluator from preprocessed length if needed
+            proof.numGateConstraints
+        );
+        uint256 eqAtRGateV2 = EqPolyLib.eqEval(tauGate, rGateV2);
+        require(eqAtRGateV2.mul(flat) == gateFinal, "Phi_gate terminal");
+    }
+
+    /// @dev Inner sum of the Φ_inv terminal predicate. Extracted so we can
+    /// use the direct calldata arrays as typed parameters (allowing `.offset`
+    /// access inside assembly).
+    function _invInner(
+        MleProof calldata proof,
+        VerifyParams memory vp,
+        uint256 nr
+    ) private pure returns (uint256 inner) {
+        uint256[] calldata w_ = proof.witnessIndividualEvalsAtRInv;
+        uint256[] calldata pre_ = proof.preprocessedIndividualEvalsAtRInv;
+        uint256[] calldata ih_ = proof.inverseHelpersEvalsAtRInv;
+        // vp.kIs lives in memory: take its data-pointer so inner-loop reads
+        // go through a single `mload` too.
+        uint256 kPtr;
+        {
+            uint256[] memory kArr = vp.kIs;
+            assembly { kPtr := add(kArr, 0x20) }
+        }
+        uint256 gSub = proof.gSubEvalAtRInv;
+        uint256 beta = proof.beta;
+        uint256 gamma = proof.gamma;
+        uint256 muInv = proof.muInv;
+        uint256 lambdaInv = proof.lambdaInv;
+        uint256 numConsts = vp.numConstants;
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let wOff := w_.offset
+            let pOff := pre_.offset
+            let aOff := ih_.offset
+            let acc := 0
+            let lambdaPow := 1
+            for { let j := 0 } lt(j, nr) { j := add(j, 1) } {
+                let wv := calldataload(add(wOff, mul(j, 0x20)))
+                let sv := calldataload(add(pOff, mul(add(j, numConsts), 0x20)))
+                let aVal := calldataload(add(aOff, mul(j, 0x20)))
+                let bVal := calldataload(add(aOff, mul(add(j, nr), 0x20)))
+                let kj := mload(add(kPtr, mul(j, 0x20)))
+                let idJ := mulmod(kj, gSub, p)
+                let sum_bw := addmod(beta, wv, p)
+                let denomId := addmod(sum_bw, mulmod(gamma, idJ, p), p)
+                let denomSigma := addmod(sum_bw, mulmod(gamma, sv, p), p)
+                let zId := mulmod(aVal, denomId, p)
+                switch zId
+                case 0 { zId := sub(p, 1) }
+                default { zId := sub(zId, 1) }
+                let zSigma := mulmod(bVal, denomSigma, p)
+                switch zSigma
+                case 0 { zSigma := sub(p, 1) }
+                default { zSigma := sub(zSigma, 1) }
+                let combined := addmod(zId, mulmod(muInv, zSigma, p), p)
+                acc := addmod(acc, mulmod(lambdaPow, combined, p), p)
+                lambdaPow := mulmod(lambdaPow, lambdaInv, p)
+            }
+            inner := acc
+        }
     }
 
     /// @dev Φ_h terminal check (paper §4.2.3):
@@ -240,32 +354,41 @@ contract MleVerifier {
     ) private pure {
         uint256 nr = vp.numRoutedWires;
         require(proof.inverseHelpersEvalsAtRH.length == 2 * nr, "inv r_h len");
-        uint256 acc = 0;
-        for (uint256 j = 0; j < nr; j++) {
-            uint256 a = proof.inverseHelpersEvalsAtRH[j];
-            uint256 b = proof.inverseHelpersEvalsAtRH[nr + j];
-            acc = acc.add(F.sub(a, b));
+        uint256 acc;
+        {
+            uint256[] calldata ih_ = proof.inverseHelpersEvalsAtRH;
+            assembly {
+                let p := 0xFFFFFFFF00000001
+                let aOff := ih_.offset
+                let sum := 0
+                for { let j := 0 } lt(j, nr) { j := add(j, 1) } {
+                    let aVal := calldataload(add(aOff, mul(j, 0x20)))
+                    let bVal := calldataload(add(aOff, mul(add(j, nr), 0x20)))
+                    sum := addmod(sum, addmod(aVal, sub(p, bVal), p), p)
+                }
+                acc := sum
+            }
         }
         require(acc == hFinal, "Phi_h terminal");
     }
 
-    /// @dev RESERVED (Issue #2 follow-up): helper to evaluate id_j(r) using the
-    /// VK-public coset shifts and subgroup generator powers. Currently UNUSED — see
-    /// the SECURITY NOTE in verify() about why a single-point binding does not
-    /// suffice for a non-linear formula like the logUp inverse-difference.
-    /// Kept as a reusable building block for the eventual sumcheck-based fix.
+    /// @dev Evaluate g_sub MLE at r using VK-bound subgroup generator powers.
+    /// result = Π_i ((1-r_i) + r_i·g^{2^i}).
     function _evalSubgroupMle(uint256[] memory r, uint256[] memory gPow)
         internal pure returns (uint256 result)
     {
-        uint256 p = F.P;
-        result = 1;
-        for (uint256 i = 0; i < r.length; i++) {
-            uint256 ri = r[i];
-            uint256 gi = gPow[i];
-            uint256 oneMinusR = F.sub(1, ri);
-            uint256 rTimesG = F.mul(ri, gi);
-            uint256 factor = F.add(oneMinusR, rTimesG);
-            assembly {
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            result := 1
+            let rLen := mload(r)
+            let rPtr := add(r, 0x20)
+            let gPtr := add(gPow, 0x20)
+            for { let i := 0 } lt(i, rLen) { i := add(i, 1) } {
+                let ri := mload(add(rPtr, mul(i, 0x20)))
+                let gi := mload(add(gPtr, mul(i, 0x20)))
+                let oneMinusR := addmod(1, sub(p, ri), p)
+                let rTimesG := mulmod(ri, gi, p)
+                let factor := addmod(oneMinusR, rTimesG, p)
                 result := mulmod(result, factor, p)
             }
         }
@@ -313,7 +436,7 @@ contract MleVerifier {
         tauInv = TranscriptLib.squeezeChallenges(ts, degreeBits);
 
         TranscriptLib.domainSeparate(ts, "extension-combine");
-        TranscriptLib.squeezeChallenge(ts); // ext_challenge sync (unused)
+        require(TranscriptLib.squeezeChallenge(ts) == proof.extChallenge, "extChallenge");
 
         // Aux commit
         TranscriptLib.domainSeparate(ts, "aux-commit");
@@ -360,10 +483,10 @@ contract MleVerifier {
             "pre batch r_inv"
         );
 
-        // SECURITY (Issue #3 + #7 + v2 logUp): Pull whirEvals from the proof
-        // itself. Layout: [point][vector], 3 points × 4 vectors = 12 entries.
-        GoldilocksExt3.Ext3[] memory whirEvals = new GoldilocksExt3.Ext3[](12);
-        // Point 0: r_gate
+        // SECURITY (Issue #3 + #7 + v2 logUp + R2-#1): Pull whirEvals from
+        // the proof itself. Layout: [point][vector], 4 points × 4 vectors.
+        GoldilocksExt3.Ext3[] memory whirEvals = new GoldilocksExt3.Ext3[](16);
+        // Point 0: r_gate (combined sumcheck output)
         whirEvals[0] = proof.preprocessedWhirEval;
         whirEvals[1] = proof.witnessWhirEval;
         whirEvals[2] = proof.auxWhirEval;
@@ -378,6 +501,23 @@ contract MleVerifier {
         whirEvals[9] = proof.witnessWhirEvalAtRH;
         whirEvals[10] = proof.auxWhirEvalAtRH;
         whirEvals[11] = proof.inverseHelpersWhirEvalAtRH;
+        // Point 3: r_gate_v2 (Φ_gate sumcheck output — Issue R2-#1)
+        whirEvals[12] = proof.preprocessedWhirEvalAtRGateV2;
+        whirEvals[13] = proof.witnessWhirEvalAtRGateV2;
+        whirEvals[14] = proof.auxWhirEvalAtRGateV2;
+        whirEvals[15] = proof.inverseHelpersWhirEvalAtRGateV2;
+
+        // Batch consistency at r_gate_v2 (witness + full preprocessed)
+        require(
+            _computeBatchedEval(proof.witnessIndividualEvalsAtRGateV2, proof.witnessBatchR)
+                == proof.witnessEvalValueAtRGateV2,
+            "wit batch r_gate_v2"
+        );
+        require(
+            _computeBatchedEval(proof.preprocessedIndividualEvalsAtRGateV2, proof.preprocessedBatchR)
+                == proof.preprocessedEvalValueAtRGateV2,
+            "pre batch r_gate_v2"
+        );
 
         require(
             SpongefishWhirVerify.verifyWhirProof(

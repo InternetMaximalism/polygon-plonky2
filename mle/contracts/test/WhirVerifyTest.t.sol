@@ -129,9 +129,9 @@ contract WhirVerifyTest is Test {
     }
 
     function _parseEvaluations(string memory json) internal pure returns (GoldilocksExt3.Ext3[] memory) {
-        // v2 logUp multi-point WHIR: 4 vectors × 3 points = 12 evaluations.
+        // Issue R2-#1: multi-point WHIR now opens at 4 points × 4 vectors = 16 evaluations.
         // Layout matches MleVerifier._runBatchAndWhir.
-        GoldilocksExt3.Ext3[] memory evals = new GoldilocksExt3.Ext3[](12);
+        GoldilocksExt3.Ext3[] memory evals = new GoldilocksExt3.Ext3[](16);
 
         // Point 0 (r_gate)
         evals[0] = _parseExt3Field(json, ".preprocessedWhirEval");
@@ -148,6 +148,11 @@ contract WhirVerifyTest is Test {
         evals[9] = _parseExt3Field(json, ".witnessWhirEvalAtRH");
         evals[10] = _parseExt3Field(json, ".auxWhirEvalAtRH");
         evals[11] = _parseExt3Field(json, ".inverseHelpersWhirEvalAtRH");
+        // Point 3 (r_gate_v2, Issue R2-#1)
+        evals[12] = _parseExt3Field(json, ".preprocessedWhirEvalAtRGateV2");
+        evals[13] = _parseExt3Field(json, ".witnessWhirEvalAtRGateV2");
+        evals[14] = _parseExt3Field(json, ".auxWhirEvalAtRGateV2");
+        evals[15] = _parseExt3Field(json, ".inverseHelpersWhirEvalAtRGateV2");
 
         return evals;
     }
@@ -220,11 +225,14 @@ contract WhirVerifyTest is Test {
         uint256[] memory rGate = _gatePointFromEvaluationPoint(json);
         uint256[] memory rInv = _parseGoldilocksArray(json, ".invSumcheckChallenges");
         uint256[] memory rH = _parseGoldilocksArray(json, ".hSumcheckChallenges");
+        // Issue R2-#1: 4th evaluation point from the Φ_gate sumcheck output.
+        uint256[] memory rGateV2 = _parseGoldilocksArray(json, ".gateSumcheckChallenges");
 
         params.evaluationPoint = _embedExt3(rGate);
         params.evaluationPoint2 = _embedExt3(rInv);
-        params.additionalEvaluationPoints = new GoldilocksExt3.Ext3[][](1);
+        params.additionalEvaluationPoints = new GoldilocksExt3.Ext3[][](2);
         params.additionalEvaluationPoints[0] = _embedExt3(rH);
+        params.additionalEvaluationPoints[1] = _embedExt3(rGateV2);
 
         return params;
     }

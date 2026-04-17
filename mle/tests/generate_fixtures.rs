@@ -177,7 +177,7 @@ fn generate_and_verify_all_fixtures() {
         println!("  rust_verify={:?} ✓", verify_time);
 
         // Generate JSON fixture
-        let json = proof_to_json(&proof, degree_bits);
+        let json = proof_to_json::<F, D>(&proof, &circuit.common, degree_bits);
 
         // Verify fixture roundtrip
         let fixture = plonky2_mle::fixture::fixture_from_json(&json);

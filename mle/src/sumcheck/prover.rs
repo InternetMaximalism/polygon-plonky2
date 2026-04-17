@@ -2,6 +2,11 @@
 ///   `Σ_{b ∈ {0,1}^n} eq(τ, b) · C(b) = 0`
 ///
 /// where `C(b)` is the combined gate constraint polynomial evaluated at row `b`.
+use plonky2::hash::hash_types::{HashOut, RichField};
+use plonky2::plonk::circuit_data::CommonCircuitData;
+use plonky2::plonk::vanishing_poly::evaluate_gate_constraints;
+use plonky2::plonk::vars::EvaluationVars;
+use plonky2_field::extension::{Extendable, FieldExtension};
 use plonky2_field::types::Field;
 
 use crate::dense_mle::DenseMultilinearExtension;
@@ -311,6 +316,188 @@ pub fn prove_sumcheck_inv_zerocheck<F: Field + plonky2_field::types::PrimeField6
             b_mles[jj].bind_variable_in_place(r_i);
             w_mles[jj].bind_variable_in_place(r_i);
             sigma_mles[jj].bind_variable_in_place(r_i);
+        }
+
+        round_polys.push(round_poly);
+    }
+
+    (SumcheckProof { round_polys }, challenges)
+}
+
+/// Run the v2 **gate zero-check** sumcheck (paper §7.3 — Issue R2-#1).
+///
+/// ```text
+///   Φ_gate(x) := eq(τ_gate, x) · flatten_ext(
+///                    Σ_j α^j · c_j( lift(MLE(W_k)(x)), lift(MLE(const_k)(x)) ),
+///                    ext_challenge
+///                )
+/// ```
+///
+/// where `c_j` is the `j`-th Plonky2 gate constraint evaluated via
+/// `evaluate_gate_constraints` in the extension field `F::Extension`, and
+/// `flatten_ext(v, ch) = v[0] + ch·v[1] + ch²·v[2] + …`.
+///
+/// Claimed sum = 0. The polynomial has degree `1 + d` per variable, where
+/// `d = common_data.quotient_degree_factor` is the maximum gate-constraint
+/// polynomial degree (selector × gate.eval, in wires/consts). On the Boolean
+/// hypercube this reproduces the committed constraint MLE row-wise; off the
+/// hypercube it has the polynomial structure of the actual gate formula, so
+/// the terminal check via `evaluate_gate_constraints` at the sumcheck output
+/// point `r_gate_v2` closes the MLE-commutativity gap that made
+/// `aux_constraint_eval` (the legacy C̃ oracle) insufficient as a soundness
+/// anchor.
+///
+/// # Arguments
+/// - `common_data`: Plonky2 circuit description (gate list + selectors).
+/// - `wire_mles`, `const_mles`: Row-major MLEs for wires W_k and constants
+///   const_k, each with `num_vars = degree_bits`.
+/// - `eq_mle`: `eq(τ_gate, ·)` MLE.
+/// - `alpha`, `ext_challenge`: Fiat-Shamir challenges combining the gate
+///   constraints (must match the prover transcript for `compute_combined_constraints`
+///   and `flatten_extension_constraints`).
+/// - `public_inputs_hash`: Bound public-input hash (unchanged by the sumcheck).
+/// - `max_round_degree`: Degree bound of the per-round polynomial,
+///   i.e. `1 + common_data.quotient_degree_factor`.
+/// - `transcript`: Fiat-Shamir transcript.
+///
+/// SECURITY: τ_gate, α, ext_challenge must all be squeezed AFTER the witness
+/// and preprocessed commitments are absorbed. The wire/const MLEs are bound
+/// by the main WHIR commitment; the sumcheck does not rely on the legacy
+/// `aux_constraint_eval` oracle and therefore closes the MLE-non-commutative
+/// binding gap for gates of degree ≥ 2 (ArithmeticGate, PoseidonGate, …).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_sumcheck_gate_zerocheck<F: RichField + Extendable<D>, const D: usize>(
+    common_data: &CommonCircuitData<F, D>,
+    wire_mles: &mut [DenseMultilinearExtension<F>],
+    const_mles: &mut [DenseMultilinearExtension<F>],
+    eq_mle: &mut DenseMultilinearExtension<F>,
+    alpha: F,
+    ext_challenge: F,
+    public_inputs_hash: &HashOut<F>,
+    max_round_degree: usize,
+    transcript: &mut Transcript,
+) -> (SumcheckProof<F>, Vec<F>) {
+    let n = eq_mle.num_vars;
+    let num_wires = wire_mles.len();
+    let num_constants = const_mles.len();
+    let num_gate_constraints = common_data.num_gate_constraints;
+    assert!(max_round_degree >= 2, "max_round_degree must be ≥ 2");
+    for m in wire_mles.iter() {
+        assert_eq!(m.num_vars, n);
+    }
+    for m in const_mles.iter() {
+        assert_eq!(m.num_vars, n);
+    }
+
+    // Precompute α powers in the extension field (indexed by gate constraint id).
+    let alpha_ext = F::Extension::from_basefield(alpha);
+    let alpha_powers: Vec<F::Extension> = {
+        let mut powers = Vec::with_capacity(num_gate_constraints);
+        let mut pow = F::Extension::ONE;
+        for _ in 0..num_gate_constraints {
+            powers.push(pow);
+            pow *= alpha_ext;
+        }
+        powers
+    };
+
+    // Precompute ext_challenge powers in the base field (for flattening).
+    let ext_powers: [F; D] = {
+        let mut arr = [F::ZERO; D];
+        let mut pow = F::ONE;
+        for a in arr.iter_mut() {
+            *a = pow;
+            pow *= ext_challenge;
+        }
+        arr
+    };
+
+    let eval_points_count = max_round_degree + 1;
+
+    let mut round_polys = Vec::with_capacity(n);
+    let mut challenges = Vec::with_capacity(n);
+
+    // Scratch buffers reused across rounds.
+    let mut wire_lo_hi: Vec<(F, F)> = vec![(F::ZERO, F::ZERO); num_wires];
+    let mut const_lo_hi: Vec<(F, F)> = vec![(F::ZERO, F::ZERO); num_constants];
+    let mut wire_t_ext: Vec<F::Extension> = vec![F::Extension::ZERO; num_wires];
+    let mut const_t_ext: Vec<F::Extension> = vec![F::Extension::ZERO; num_constants];
+
+    for _round in 0..n {
+        let half = eq_mle.evaluations.len() / 2;
+        let mut evals = vec![F::ZERO; eval_points_count];
+
+        for j in 0..half {
+            let eq_lo = eq_mle.evaluations[2 * j];
+            let eq_hi = eq_mle.evaluations[2 * j + 1];
+            for k in 0..num_wires {
+                wire_lo_hi[k] = (
+                    wire_mles[k].evaluations[2 * j],
+                    wire_mles[k].evaluations[2 * j + 1],
+                );
+            }
+            for k in 0..num_constants {
+                const_lo_hi[k] = (
+                    const_mles[k].evaluations[2 * j],
+                    const_mles[k].evaluations[2 * j + 1],
+                );
+            }
+
+            for (d_idx, eval) in evals.iter_mut().enumerate() {
+                let t = F::from_canonical_usize(d_idx);
+                let one_minus_t = F::ONE - t;
+
+                let eq_t = one_minus_t * eq_lo + t * eq_hi;
+
+                for k in 0..num_wires {
+                    let (lo, hi) = wire_lo_hi[k];
+                    let v = one_minus_t * lo + t * hi;
+                    wire_t_ext[k] = F::Extension::from_basefield(v);
+                }
+                for k in 0..num_constants {
+                    let (lo, hi) = const_lo_hi[k];
+                    let v = one_minus_t * lo + t * hi;
+                    const_t_ext[k] = F::Extension::from_basefield(v);
+                }
+
+                let vars = EvaluationVars {
+                    local_constants: &const_t_ext,
+                    local_wires: &wire_t_ext,
+                    public_inputs_hash,
+                };
+                let constraint_values = evaluate_gate_constraints(common_data, vars);
+
+                let mut combined_ext = F::Extension::ZERO;
+                for (idx, &cv) in constraint_values.iter().enumerate() {
+                    if idx < alpha_powers.len() {
+                        combined_ext += alpha_powers[idx] * cv;
+                    }
+                }
+
+                // Flatten ext components to base field via ext_challenge powers.
+                let components = combined_ext.to_basefield_array();
+                let mut flat = F::ZERO;
+                for i in 0..D {
+                    flat += ext_powers[i] * components[i];
+                }
+
+                *eval += eq_t * flat;
+            }
+        }
+
+        let round_poly = RoundPolynomial::new(evals.clone());
+        transcript.domain_separate("sumcheck-round");
+        transcript.absorb_field_vec(&evals);
+
+        let r_i: F = transcript.squeeze_challenge();
+        challenges.push(r_i);
+
+        eq_mle.bind_variable_in_place(r_i);
+        for m in wire_mles.iter_mut() {
+            m.bind_variable_in_place(r_i);
+        }
+        for m in const_mles.iter_mut() {
+            m.bind_variable_in_place(r_i);
         }
 
         round_polys.push(round_poly);

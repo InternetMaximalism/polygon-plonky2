@@ -197,4 +197,56 @@ pub struct MleProof<F: Field> {
     /// Inverse-helpers WHIR eval at r_gate (Ext3). Not used by terminal checks
     /// but required to satisfy the multi-point WHIR verification contract.
     pub inverse_helpers_whir_eval_at_r_gate_ext3: Field64_3,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // v2 gate binding fix — Issue R2-#1 (paper §7.3)
+    //
+    // A standalone Φ_gate zero-check sumcheck closes the gap where the
+    // legacy `aux_constraint_eval` oracle is not the polynomially-correct
+    // evaluation of the gate constraint formula at a random point. Instead
+    // of trusting C̃(r) via a single WHIR commit, we run:
+    //
+    //   Φ_gate(x) := eq(τ_gate, x) · flatten_ext(
+    //                    Σ_j α^j · c_j( lift(W_k(x)), lift(const_k(x)) ),
+    //                    ext_challenge
+    //                )
+    //
+    // claimed sum = 0. The verifier terminal check calls the Plonky2 gate
+    // evaluator at `r_gate_v2` with PCS-bound individual wire/const evals.
+    // All quantities are multilinear or polynomial over base field points,
+    // so no MLE-non-commutativity gap remains.
+    // ═══════════════════════════════════════════════════════════════════
+    /// Extension-combine challenge — re-derived in the verifier but stored
+    /// here so fixture consumers (Solidity) can absorb it deterministically.
+    pub ext_challenge: F,
+    /// Fiat-Shamir point `τ_gate` for the Φ_gate zero-check.
+    pub tau_gate: Vec<F>,
+    /// Φ_gate sumcheck proof (round polys of degree
+    /// `1 + common_data.quotient_degree_factor`).
+    pub gate_sumcheck_proof: SumcheckProof<F>,
+    /// Φ_gate sumcheck output point `r_gate_v2` (length = degree_bits).
+    pub gate_sumcheck_challenges: Vec<F>,
+    /// Witness individual evals at `r_gate_v2` — one per wire column,
+    /// required by the terminal check (`evaluate_gate_constraints`).
+    pub witness_individual_evals_at_r_gate_v2: Vec<F>,
+    /// Full preprocessed individual evals at `r_gate_v2`: layout
+    /// `[const_0..const_{C-1}, sigma_0..sigma_{R-1}]`. The constants subset
+    /// feeds the Φ_gate terminal check; the sigma subset is unused there
+    /// but required for batch consistency with the WHIR Ext3 eval.
+    pub preprocessed_individual_evals_at_r_gate_v2: Vec<F>,
+    /// Witness batch eval (Goldilocks) at `r_gate_v2`.
+    pub witness_eval_value_at_r_gate_v2: F,
+    /// Preprocessed batch eval (Goldilocks) at `r_gate_v2`.
+    pub preprocessed_eval_value_at_r_gate_v2: F,
+    /// Witness batched WHIR Ext3 evaluation at `r_gate_v2`.
+    pub witness_whir_eval_at_r_gate_v2_ext3: Field64_3,
+    /// Preprocessed batched WHIR Ext3 evaluation at `r_gate_v2`.
+    pub preprocessed_whir_eval_at_r_gate_v2_ext3: Field64_3,
+    /// Auxiliary batched WHIR Ext3 evaluation at `r_gate_v2`. Not consumed
+    /// by any terminal check but required to satisfy the multi-point WHIR
+    /// verification contract (all committed vectors opened at all points).
+    pub aux_whir_eval_at_r_gate_v2_ext3: Field64_3,
+    /// Inverse-helpers batched WHIR Ext3 evaluation at `r_gate_v2`. Same
+    /// comment as above — not consumed by a terminal check, contract only.
+    pub inverse_helpers_whir_eval_at_r_gate_v2_ext3: Field64_3,
 }
