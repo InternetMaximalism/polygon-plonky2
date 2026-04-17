@@ -163,8 +163,12 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
             rp.evaluations.len()
         );
     }
-    let inv_result =
-        verify_sumcheck(&proof.inv_sumcheck_proof, F::ZERO, degree_bits, &mut transcript);
+    let inv_result = verify_sumcheck(
+        &proof.inv_sumcheck_proof,
+        F::ZERO,
+        degree_bits,
+        &mut transcript,
+    );
     let (inv_challenges, inv_final_eval) =
         inv_result.map_err(|e| anyhow::anyhow!("Φ_inv sumcheck failed: {}", e))?;
     ensure!(
@@ -185,8 +189,12 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
             rp.evaluations.len()
         );
     }
-    let h_result =
-        verify_sumcheck(&proof.h_sumcheck_proof, F::ZERO, degree_bits, &mut transcript);
+    let h_result = verify_sumcheck(
+        &proof.h_sumcheck_proof,
+        F::ZERO,
+        degree_bits,
+        &mut transcript,
+    );
     let (h_challenges, h_final_eval) =
         h_result.map_err(|e| anyhow::anyhow!("Φ_h sumcheck failed: {}", e))?;
     ensure!(
@@ -592,8 +600,7 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "witness_individual_evals_at_r_gate_v2 has wrong length for gate evaluator"
     );
     ensure!(
-        proof.preprocessed_individual_evals_at_r_gate_v2.len()
-            >= common_data.num_constants,
+        proof.preprocessed_individual_evals_at_r_gate_v2.len() >= common_data.num_constants,
         "preprocessed_individual_evals_at_r_gate_v2 missing constants for gate evaluator"
     );
     let local_wires_ext: Vec<F::Extension> = proof
@@ -757,8 +764,7 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(7)).unwrap();
 
         let mut timing = TimingTree::default();
-        let mut proof =
-            mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+        let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
 
         // Sanity: an untampered proof verifies.
         let ok = mle_verify::<F, D>(&common_data, &vk, &proof);
@@ -789,8 +795,7 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(3)).unwrap();
 
         let mut timing = TimingTree::default();
-        let mut proof =
-            mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+        let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
 
         // Corrupt the first round polynomial of Φ_gate.
         if let Some(rp) = proof.gate_sumcheck_proof.round_polys.first_mut() {
@@ -817,8 +822,7 @@ mod tests {
         pw.set_target(y, F::from_canonical_u64(9)).unwrap();
 
         let mut timing = TimingTree::default();
-        let mut proof =
-            mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+        let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
 
         if common_data.num_constants > 0 {
             proof.preprocessed_individual_evals_at_r_gate_v2[0] += F::ONE;

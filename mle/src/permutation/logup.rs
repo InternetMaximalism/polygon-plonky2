@@ -102,6 +102,7 @@ pub fn compute_permutation_numerator<F: Field>(
 /// On a zero denominator (which occurs only with negligible probability over
 /// random `β, γ` for an honest witness), this returns an `Err`. The caller
 /// (the prover) should propagate as a hard failure.
+#[allow(clippy::type_complexity)]
 pub fn compute_inverse_helpers<F: Field>(
     wire_values: &[Vec<F>],
     sigma_values: &[Vec<F>],

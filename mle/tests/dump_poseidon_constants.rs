@@ -16,7 +16,10 @@ fn row(vs: &[u64]) -> String {
 
 #[test]
 fn dump_constants() {
-    println!("// === ALL_ROUND_CONSTANTS: {} entries ===", ALL_ROUND_CONSTANTS.len());
+    println!(
+        "// === ALL_ROUND_CONSTANTS: {} entries ===",
+        ALL_ROUND_CONSTANTS.len()
+    );
     for (i, chunk) in ALL_ROUND_CONSTANTS.chunks(12).enumerate() {
         println!("    // round {i}");
         for c in chunk {
@@ -36,12 +39,18 @@ fn dump_constants() {
         row(&<GoldilocksField as Poseidon>::FAST_PARTIAL_FIRST_ROUND_CONSTANT)
     );
 
-    println!("\n// === FAST_PARTIAL_ROUND_CONSTANTS ({}) ===", N_PARTIAL_ROUNDS);
+    println!(
+        "\n// === FAST_PARTIAL_ROUND_CONSTANTS ({}) ===",
+        N_PARTIAL_ROUNDS
+    );
     for c in <GoldilocksField as Poseidon>::FAST_PARTIAL_ROUND_CONSTANTS {
         println!("    0x{c:016x},");
     }
 
-    println!("\n// === FAST_PARTIAL_ROUND_VS ({} x 11) ===", N_PARTIAL_ROUNDS);
+    println!(
+        "\n// === FAST_PARTIAL_ROUND_VS ({} x 11) ===",
+        N_PARTIAL_ROUNDS
+    );
     for (r, v) in <GoldilocksField as Poseidon>::FAST_PARTIAL_ROUND_VS
         .iter()
         .enumerate()
@@ -66,9 +75,7 @@ fn dump_constants() {
         }
     }
 
-    println!(
-        "\n// === FAST_PARTIAL_ROUND_INITIAL_MATRIX (11 x 11, row-major) ==="
-    );
+    println!("\n// === FAST_PARTIAL_ROUND_INITIAL_MATRIX (11 x 11, row-major) ===");
     for (r, v) in <GoldilocksField as Poseidon>::FAST_PARTIAL_ROUND_INITIAL_MATRIX
         .iter()
         .enumerate()

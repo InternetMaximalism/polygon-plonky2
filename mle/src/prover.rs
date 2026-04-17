@@ -301,7 +301,10 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
     );
     let inverse_helpers_root = whir_pcs.commit_additional(&mut commit_data, &p_inv_ark);
     transcript.absorb_bytes(&inverse_helpers_root);
-    eprintln!("[prover] phase2b inverse-helpers commit: {:?}", _t.elapsed());
+    eprintln!(
+        "[prover] phase2b inverse-helpers commit: {:?}",
+        _t.elapsed()
+    );
 
     // ═══════════════════════════════════════════════════════════════════
     // Phase 2c: Squeeze remaining challenges (α, τ, τ_perm + v2 challenges)
@@ -458,16 +461,10 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         })
         .collect();
     // Working copies of W, σ, g_sub (the prover-internal sumcheck consumes them).
-    let mut w_inv_mles: Vec<DenseMultilinearExtension<F>> = wire_mles
-        .iter()
-        .take(num_routed_wires)
-        .cloned()
-        .collect();
-    let mut sigma_inv_mles: Vec<DenseMultilinearExtension<F>> = sigma_mles
-        .iter()
-        .take(num_routed_wires)
-        .cloned()
-        .collect();
+    let mut w_inv_mles: Vec<DenseMultilinearExtension<F>> =
+        wire_mles.iter().take(num_routed_wires).cloned().collect();
+    let mut sigma_inv_mles: Vec<DenseMultilinearExtension<F>> =
+        sigma_mles.iter().take(num_routed_wires).cloned().collect();
     let mut g_sub_padded = tables.subgroup.clone();
     g_sub_padded.resize(n_rows, F::ZERO);
     let mut g_sub_mle = DenseMultilinearExtension::new(g_sub_padded);
@@ -564,18 +561,17 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         const_gate_mles.push(DenseMultilinearExtension::new(vec![F::ZERO; n_rows]));
     }
 
-    let (gate_sumcheck_proof, gate_sumcheck_challenges) =
-        prove_sumcheck_gate_zerocheck::<F, D>(
-            common_data,
-            &mut wire_gate_mles,
-            &mut const_gate_mles,
-            &mut eq_gate_mle,
-            alpha,
-            ext_challenge,
-            &tables.public_inputs_hash,
-            max_round_degree_gate,
-            &mut transcript,
-        );
+    let (gate_sumcheck_proof, gate_sumcheck_challenges) = prove_sumcheck_gate_zerocheck::<F, D>(
+        common_data,
+        &mut wire_gate_mles,
+        &mut const_gate_mles,
+        &mut eq_gate_mle,
+        alpha,
+        ext_challenge,
+        &tables.public_inputs_hash,
+        max_round_degree_gate,
+        &mut transcript,
+    );
     eprintln!("[prover] phase5.8 Φ_gate: {:?}", _t.elapsed());
 
     // ═══════════════════════════════════════════════════════════════════
@@ -862,8 +858,7 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         gate_sumcheck_proof,
         gate_sumcheck_challenges,
         witness_individual_evals_at_r_gate_v2,
-        preprocessed_individual_evals_at_r_gate_v2:
-            preprocessed_individual_evals_at_r_gate_v2_full,
+        preprocessed_individual_evals_at_r_gate_v2: preprocessed_individual_evals_at_r_gate_v2_full,
         witness_eval_value_at_r_gate_v2,
         preprocessed_eval_value_at_r_gate_v2,
         witness_whir_eval_at_r_gate_v2_ext3,

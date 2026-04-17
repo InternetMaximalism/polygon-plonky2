@@ -533,10 +533,7 @@ fn collect_gate_metadata<F: RichField + Extendable<D>, const D: usize>(
 ///
 /// Generates the unified WHIR proof fixture format with single
 /// transcript + hints covering both preprocessed and witness vectors.
-pub fn proof_to_fixture<
-    F: RichField + Extendable<D> + PrimeField64,
-    const D: usize,
->(
+pub fn proof_to_fixture<F: RichField + Extendable<D> + PrimeField64, const D: usize>(
     proof: &MleProof<F>,
     common_data: &CommonCircuitData<F, D>,
     degree_bits: usize,
@@ -621,9 +618,7 @@ pub fn proof_to_fixture<
         mu_inv: field_to_string(proof.mu_inv),
         lambda_h: field_to_string(proof.lambda_h),
         tau_inv: field_vec_to_strings(&proof.tau_inv),
-        inverse_helpers_evals_at_r_inv: field_vec_to_strings(
-            &proof.inverse_helpers_evals_at_r_inv,
-        ),
+        inverse_helpers_evals_at_r_inv: field_vec_to_strings(&proof.inverse_helpers_evals_at_r_inv),
         inverse_helpers_evals_at_r_h: field_vec_to_strings(&proof.inverse_helpers_evals_at_r_h),
         inverse_helpers_whir_eval_at_r_inv: ext3_to_fixture(
             &proof.inverse_helpers_whir_eval_at_r_inv_ext3,
@@ -667,9 +662,7 @@ pub fn proof_to_fixture<
         preprocessed_eval_value_at_r_gate_v2: field_to_string(
             proof.preprocessed_eval_value_at_r_gate_v2,
         ),
-        witness_whir_eval_at_r_gate_v2: ext3_to_fixture(
-            &proof.witness_whir_eval_at_r_gate_v2_ext3,
-        ),
+        witness_whir_eval_at_r_gate_v2: ext3_to_fixture(&proof.witness_whir_eval_at_r_gate_v2_ext3),
         preprocessed_whir_eval_at_r_gate_v2: ext3_to_fixture(
             &proof.preprocessed_whir_eval_at_r_gate_v2_ext3,
         ),
