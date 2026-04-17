@@ -520,6 +520,18 @@ where
 
     let mut challenger = Challenger::<F, C::Hasher>::new();
 
+    // SECURITY: Observe the FRI config BEFORE absorbing the circuit digest / public
+    // inputs / wires cap. This must match the absorption order in
+    // `prove_with_partition_witness` (the canonical path) and in the verifier's
+    // `get_challenges`. Omitting `fri_params.observe` would (a) cause proofs produced
+    // by this path to fail verification under the standard verifier, and (b) un-bind
+    // the transcript from the FRI parameter set (`num_query_rounds`,
+    // `proof_of_work_bits`, `cap_height`, `reduction_arity_bits`, `hiding`,
+    // `degree_bits`), enabling a parameter-grinding attack on any downstream consumer
+    // that mirrors the prover's transcript (e.g., an alternative commitment backend).
+    common_data.fri_params.observe(&mut challenger);
+
+    // Observe the instance.
     challenger.observe_hash::<C::Hasher>(prover_data.circuit_digest);
     challenger.observe_hash::<C::InnerHasher>(public_inputs_hash);
     challenger.observe_cap::<C::Hasher>(&wires_commitment.merkle_tree.cap);

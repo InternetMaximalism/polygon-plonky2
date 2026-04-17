@@ -1284,16 +1284,112 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let constants_sigmas_cap = constants_sigmas_commitment.merkle_tree.cap.clone();
         let domain_separator = self.domain_separator.unwrap_or_default();
         let domain_separator_digest = C::Hasher::hash_pad(&domain_separator);
-        // TODO: This should also include an encoding of gate constraints.
-        let circuit_digest_parts = [
-            constants_sigmas_cap.flatten(),
-            domain_separator_digest.to_vec(),
-            vec![
-                F::from_canonical_usize(degree_bits),
-                /* Add other circuit data here */
-            ],
-        ];
-        let circuit_digest = C::Hasher::hash_no_pad(&circuit_digest_parts.concat());
+
+        // SECURITY (audit finding H1): `circuit_digest` is the canonical identifier
+        // of the circuit that a recursive verifier binds to. Previously it covered
+        // only `constants_sigmas_cap`, `domain_separator_digest`, and `degree_bits`,
+        // leaving the gate list, LUT contents, FRI parameters, public-input count,
+        // selector layout, coset shifts, and other structural parameters unbound.
+        // Two circuits could therefore share a digest while differing in LUTs or
+        // gate composition, enabling a circuit-swap attack in recursion.
+        //
+        // This digest now binds, in a fixed deterministic order:
+        //   1. `constants_sigmas_cap`               (preprocessed polys commitment)
+        //   2. `domain_separator_digest`            (user-supplied domain label)
+        //   3. FRI parameters                       (rate, cap_height, PoW bits,
+        //                                            num_query_rounds, hiding,
+        //                                            degree_bits, reduction_arity)
+        //   4. Gate list                            (hashed `Gate::id()` per gate)
+        //   5. `SelectorsInfo`                      (selector_indices + group ranges)
+        //   6. Lookup tables                        (every (input, output) entry)
+        //   7. `k_is`                               (sigma coset shifts)
+        //   8. Circuit dimensions                   (num_challenges, num_wires,
+        //                                            num_routed_wires, num_constants,
+        //                                            num_public_inputs, etc.)
+        //
+        // Changing this encoding is a breaking change: any `VerifierOnlyCircuitData`
+        // serialized under the old encoding will no longer match and must be
+        // regenerated.
+        let mut circuit_digest_parts: Vec<F> = Vec::new();
+
+        // (1) + (2) — existing inputs.
+        circuit_digest_parts.extend(constants_sigmas_cap.flatten());
+        circuit_digest_parts.extend(domain_separator_digest.to_vec());
+
+        // (3) FRI parameters. Fields follow `FriParams::observe` order so that the
+        // digest and the Fiat-Shamir transcript agree on what "FRI configuration"
+        // means.
+        circuit_digest_parts.push(F::from_canonical_usize(fri_params.config.rate_bits));
+        circuit_digest_parts.push(F::from_canonical_usize(fri_params.config.cap_height));
+        circuit_digest_parts.push(F::from_canonical_u32(fri_params.config.proof_of_work_bits));
+        circuit_digest_parts.push(F::from_canonical_usize(fri_params.config.num_query_rounds));
+        circuit_digest_parts.push(F::from_bool(fri_params.hiding));
+        circuit_digest_parts.push(F::from_canonical_usize(fri_params.degree_bits));
+        circuit_digest_parts.push(F::from_canonical_usize(
+            fri_params.reduction_arity_bits.len(),
+        ));
+        for &arity in &fri_params.reduction_arity_bits {
+            circuit_digest_parts.push(F::from_canonical_usize(arity));
+        }
+
+        // (4) Gate list. `gates` was sorted deterministically above (see sort
+        // immediately after `gate_instances.len()` is read). Each gate contributes
+        // a Poseidon-hashed digest of its `id()` string, which encodes the gate's
+        // type and parameters — two gates of different types or with different
+        // parameters produce distinct ids by the `Gate` trait contract.
+        circuit_digest_parts.push(F::from_canonical_usize(gates.len()));
+        for gate in gates.iter() {
+            let id = gate.0.id();
+            let id_field_elts: Vec<F> = id
+                .as_bytes()
+                .iter()
+                .map(|&b| F::from_canonical_u64(b as u64))
+                .collect();
+            let id_digest = C::Hasher::hash_pad(&id_field_elts);
+            circuit_digest_parts.extend(id_digest.to_vec());
+        }
+
+        // (5) Selector layout.
+        circuit_digest_parts.push(F::from_canonical_usize(
+            selectors_info.selector_indices.len(),
+        ));
+        for &idx in &selectors_info.selector_indices {
+            circuit_digest_parts.push(F::from_canonical_usize(idx));
+        }
+        circuit_digest_parts.push(F::from_canonical_usize(selectors_info.groups.len()));
+        for range in &selectors_info.groups {
+            circuit_digest_parts.push(F::from_canonical_usize(range.start));
+            circuit_digest_parts.push(F::from_canonical_usize(range.end));
+        }
+
+        // (6) Lookup tables. Binds the LUT contents so that two circuits with
+        // different (input, output) pairs cannot collide (audit finding H1).
+        circuit_digest_parts.push(F::from_canonical_usize(num_luts));
+        for lut in self.luts.iter().take(num_luts) {
+            circuit_digest_parts.push(F::from_canonical_usize(lut.len()));
+            for &(input, output) in lut.iter() {
+                circuit_digest_parts.push(F::from_canonical_u64(input as u64));
+                circuit_digest_parts.push(F::from_canonical_u64(output as u64));
+            }
+        }
+
+        // (7) Coset shifts used by the sigma construction.
+        circuit_digest_parts.push(F::from_canonical_usize(k_is.len()));
+        circuit_digest_parts.extend(k_is.iter().copied());
+
+        // (8) Scalar circuit dimensions.
+        circuit_digest_parts.push(F::from_canonical_usize(degree_bits));
+        circuit_digest_parts.push(F::from_canonical_usize(self.config.num_challenges));
+        circuit_digest_parts.push(F::from_canonical_usize(self.config.num_routed_wires));
+        circuit_digest_parts.push(F::from_canonical_usize(self.config.num_wires));
+        circuit_digest_parts.push(F::from_canonical_usize(self.config.num_constants));
+        circuit_digest_parts.push(F::from_canonical_usize(num_public_inputs));
+        circuit_digest_parts.push(F::from_canonical_usize(num_gate_constraints));
+        circuit_digest_parts.push(F::from_canonical_usize(quotient_degree_factor));
+        circuit_digest_parts.push(F::from_canonical_usize(num_partial_products));
+        circuit_digest_parts.push(F::from_canonical_usize(num_lookup_polys));
+
+        let circuit_digest = C::Hasher::hash_no_pad(&circuit_digest_parts);
 
         let common = CommonCircuitData {
             config: self.config,

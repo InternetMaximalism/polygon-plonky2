@@ -52,6 +52,18 @@ use crate::plonk::proof::{
     ProofTarget, ProofWithPublicInputs, ProofWithPublicInputsTarget,
 };
 
+/// Magic header for `ProverOnlyCircuitData` serialization.
+///
+/// SECURITY: This fork inserts `constant_evals` into `ProverOnlyCircuitData` between
+/// `sigmas` and `subgroup` (see `write_prover_only_circuit_data`), which is
+/// backward-incompatible with upstream plonky2. Without a header, upstream-format or
+/// older fork-format payloads would silently misparse (`subgroup_len` read as
+/// `constant_evals_len`, followed by cascading misalignment). The magic + version
+/// prefix forces a fail-loud error in that case. Bump `PROVER_ONLY_CIRCUIT_DATA_VERSION`
+/// on any further layout change.
+const PROVER_ONLY_CIRCUIT_DATA_MAGIC: u32 = u32::from_le_bytes(*b"P2PO");
+const PROVER_ONLY_CIRCUIT_DATA_VERSION: u32 = 1;
+
 /// A no_std compatible variant of `std::io::Error`
 #[derive(Debug)]
 pub struct IoError;
@@ -832,6 +844,17 @@ pub trait Read {
         generator_serializer: &dyn WitnessGeneratorSerializer<F, D>,
         common_data: &CommonCircuitData<F, D>,
     ) -> IoResult<ProverOnlyCircuitData<F, C, D>> {
+        // SECURITY: verify magic + version before consuming any further bytes.
+        // See the comment on `PROVER_ONLY_CIRCUIT_DATA_MAGIC` for rationale.
+        let magic = self.read_u32()?;
+        if magic != PROVER_ONLY_CIRCUIT_DATA_MAGIC {
+            return Err(IoError);
+        }
+        let version = self.read_u32()?;
+        if version != PROVER_ONLY_CIRCUIT_DATA_VERSION {
+            return Err(IoError);
+        }
+
         let gen_len = self.read_usize()?;
         let mut generators = Vec::with_capacity(gen_len);
         for _ in 0..gen_len {
@@ -1863,6 +1886,12 @@ pub trait Write {
             lookup_rows,
             lut_to_lookups,
         } = prover_only_circuit_data;
+
+        // SECURITY: write magic + version BEFORE any payload so that a reader can
+        // fail loudly on upstream-format or older fork-format data. Bump
+        // `PROVER_ONLY_CIRCUIT_DATA_VERSION` on any further layout change.
+        self.write_u32(PROVER_ONLY_CIRCUIT_DATA_MAGIC)?;
+        self.write_u32(PROVER_ONLY_CIRCUIT_DATA_VERSION)?;
 
         self.write_usize(generators.len())?;
         for generator in generators.iter() {
