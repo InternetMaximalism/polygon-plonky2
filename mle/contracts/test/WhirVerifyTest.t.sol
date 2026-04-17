@@ -129,20 +129,48 @@ contract WhirVerifyTest is Test {
     }
 
     function _parseEvaluations(string memory json) internal pure returns (GoldilocksExt3.Ext3[] memory) {
-        // Split-commit: 2 evaluations (preprocessed + witness)
-        GoldilocksExt3.Ext3[] memory evals = new GoldilocksExt3.Ext3[](2);
+        // v2 logUp multi-point WHIR: 4 vectors × 3 points = 12 evaluations.
+        // Layout matches MleVerifier._runBatchAndWhir.
+        GoldilocksExt3.Ext3[] memory evals = new GoldilocksExt3.Ext3[](12);
 
-        uint64 p0 = uint64(vm.parseUint(vm.parseJsonString(json, ".preprocessedWhirEval.c0")));
-        uint64 p1 = uint64(vm.parseUint(vm.parseJsonString(json, ".preprocessedWhirEval.c1")));
-        uint64 p2 = uint64(vm.parseUint(vm.parseJsonString(json, ".preprocessedWhirEval.c2")));
-        evals[0] = GoldilocksExt3.Ext3(p0, p1, p2);
-
-        uint64 w0 = uint64(vm.parseUint(vm.parseJsonString(json, ".witnessWhirEval.c0")));
-        uint64 w1 = uint64(vm.parseUint(vm.parseJsonString(json, ".witnessWhirEval.c1")));
-        uint64 w2 = uint64(vm.parseUint(vm.parseJsonString(json, ".witnessWhirEval.c2")));
-        evals[1] = GoldilocksExt3.Ext3(w0, w1, w2);
+        // Point 0 (r_gate)
+        evals[0] = _parseExt3Field(json, ".preprocessedWhirEval");
+        evals[1] = _parseExt3Field(json, ".witnessWhirEval");
+        evals[2] = _parseExt3Field(json, ".auxWhirEval");
+        evals[3] = _parseExt3Field(json, ".inverseHelpersWhirEvalAtRGate");
+        // Point 1 (r_inv)
+        evals[4] = _parseExt3Field(json, ".preprocessedWhirEvalAtRInv");
+        evals[5] = _parseExt3Field(json, ".witnessWhirEvalAtRInv");
+        evals[6] = _parseExt3Field(json, ".auxWhirEvalAtRInv");
+        evals[7] = _parseExt3Field(json, ".inverseHelpersWhirEvalAtRInv");
+        // Point 2 (r_h)
+        evals[8] = _parseExt3Field(json, ".preprocessedWhirEvalAtRH");
+        evals[9] = _parseExt3Field(json, ".witnessWhirEvalAtRH");
+        evals[10] = _parseExt3Field(json, ".auxWhirEvalAtRH");
+        evals[11] = _parseExt3Field(json, ".inverseHelpersWhirEvalAtRH");
 
         return evals;
+    }
+
+    function _parseExt3Field(string memory json, string memory path)
+        internal pure returns (GoldilocksExt3.Ext3 memory)
+    {
+        return GoldilocksExt3.Ext3(
+            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c0")))),
+            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c1")))),
+            uint64(vm.parseUint(vm.parseJsonString(json, string.concat(path, ".c2"))))
+        );
+    }
+
+    /// @dev Parse a Goldilocks vector of length n from JSON string array.
+    function _parseGoldilocksArray(string memory json, string memory path)
+        internal pure returns (uint256[] memory out)
+    {
+        string[] memory strs = vm.parseJsonStringArray(json, path);
+        out = new uint256[](strs.length);
+        for (uint256 i = 0; i < strs.length; i++) {
+            out[i] = vm.parseUint(strs[i]);
+        }
     }
 
     function _parseWhirParams(string memory json) internal pure returns (SpongefishWhirVerify.WhirParams memory) {
@@ -183,11 +211,49 @@ contract WhirVerifyTest is Test {
             params.rounds[i].numVariables = vm.parseJsonUint(json, string.concat(prefix, ".numVariables"));
         }
 
-        // Empty evaluation points → uses canonical point (1, 2, ..., n) via
-        // mleEvaluateEqCanonical in SpongefishWhirVerify.
-        params.evaluationPoint = new GoldilocksExt3.Ext3[](0);
-        params.evaluationPoint2 = new GoldilocksExt3.Ext3[](0);
+        // v2 logUp multi-point WHIR — 3 evaluation points come from the
+        // proof's three sumchecks (r_gate, r_inv, r_h). These are stored in
+        // the fixture as Goldilocks vectors. Each entry must be embedded as
+        // Ext3(x, 0, 0) before being passed to WHIR.
+        params.numCommitments = 4; // override fixture (still 2 from v1)
+
+        uint256[] memory rGate = _gatePointFromEvaluationPoint(json);
+        uint256[] memory rInv = _parseGoldilocksArray(json, ".invSumcheckChallenges");
+        uint256[] memory rH = _parseGoldilocksArray(json, ".hSumcheckChallenges");
+
+        params.evaluationPoint = _embedExt3(rGate);
+        params.evaluationPoint2 = _embedExt3(rInv);
+        params.additionalEvaluationPoints = new GoldilocksExt3.Ext3[][](1);
+        params.additionalEvaluationPoints[0] = _embedExt3(rH);
 
         return params;
+    }
+
+    /// @dev Read sumcheck output point r_gate from the fixture's evaluationPoint
+    /// (already embedded as Ext3 with c1=c2=0).
+    function _gatePointFromEvaluationPoint(string memory json)
+        internal pure returns (uint256[] memory out)
+    {
+        // Probe length by trying indices.
+        uint256 len = 0;
+        for (uint256 i = 0; i < 32; i++) {
+            try vm.parseJsonString(json, string.concat(".evaluationPoint[", vm.toString(i), "].c0"))
+                returns (string memory)
+            {
+                len = i + 1;
+            } catch { break; }
+        }
+        out = new uint256[](len);
+        for (uint256 i = 0; i < len; i++) {
+            string memory ep = string.concat(".evaluationPoint[", vm.toString(i), "].c0");
+            out[i] = vm.parseUint(vm.parseJsonString(json, ep));
+        }
+    }
+
+    function _embedExt3(uint256[] memory r) internal pure returns (GoldilocksExt3.Ext3[] memory pt) {
+        pt = new GoldilocksExt3.Ext3[](r.length);
+        for (uint256 i = 0; i < r.length; i++) {
+            pt[i] = GoldilocksExt3.Ext3(uint64(r[i]), 0, 0);
+        }
     }
 }

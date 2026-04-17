@@ -197,6 +197,128 @@ pub fn prove_sumcheck_plain<F: Field + plonky2_field::types::PrimeField64>(
     (SumcheckProof { round_polys }, challenges)
 }
 
+/// Run the v2 logUp **inverse zero-check** sumcheck (paper §4.2.2):
+///
+/// ```text
+///   Φ_inv(x) := eq(τ_inv, x) · Σ_j λ^j · ( Z_j^id(x) + μ_inv · Z_j^σ(x) )
+///   Z_j^id(x) := A_j(x) · ( β + W_j(x) + γ · K_j · g_sub(x) ) − 1
+///   Z_j^σ(x)  := B_j(x) · ( β + W_j(x) + γ · σ_j(x) )           − 1
+/// ```
+///
+/// claimed sum = 0. The polynomial has degree 3 in each variable (eq is degree 1,
+/// `A_j · D_j` is degree 2). All input MLEs are multilinear; we maintain
+/// partially-bound copies and recompute the round polynomial at four evaluation
+/// points (`X = 0, 1, 2, 3`) per round.
+///
+/// On the Boolean hypercube the round polynomial computed here equals `Φ_inv`
+/// evaluated row-wise; off the hypercube it differs from `MLE(table)` precisely
+/// by the polynomial structure, which is what makes the protocol sound.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_sumcheck_inv_zerocheck<F: Field + plonky2_field::types::PrimeField64>(
+    eq_inv_mle: &mut DenseMultilinearExtension<F>,
+    a_mles: &mut [DenseMultilinearExtension<F>],
+    b_mles: &mut [DenseMultilinearExtension<F>],
+    w_mles: &mut [DenseMultilinearExtension<F>],
+    sigma_mles: &mut [DenseMultilinearExtension<F>],
+    g_sub_mle: &mut DenseMultilinearExtension<F>,
+    k_is: &[F],
+    beta: F,
+    gamma: F,
+    lambda: F,
+    mu_inv: F,
+    transcript: &mut Transcript,
+) -> (SumcheckProof<F>, Vec<F>) {
+    let n = eq_inv_mle.num_vars;
+    let num_routed = a_mles.len();
+    assert_eq!(b_mles.len(), num_routed);
+    assert!(w_mles.len() >= num_routed);
+    assert!(sigma_mles.len() >= num_routed);
+    assert_eq!(g_sub_mle.num_vars, n);
+
+    // Precompute powers of λ.
+    let mut lambda_pows = Vec::with_capacity(num_routed);
+    let mut acc = F::ONE;
+    for _ in 0..num_routed {
+        lambda_pows.push(acc);
+        acc *= lambda;
+    }
+
+    let mut round_polys = Vec::with_capacity(n);
+    let mut challenges = Vec::with_capacity(n);
+
+    for _round in 0..n {
+        let half = eq_inv_mle.evaluations.len() / 2;
+        let mut evals = vec![F::ZERO; 4]; // degree 3 → 4 evaluation points
+
+        // For each X in {0, 1, 2, 3} we compute Σ_b Φ_inv(partial_r, X, b).
+        // Each MLE M is bound at the i-th variable to X via M(X) = (1-X)·M_lo + X·M_hi.
+        for j in 0..half {
+            // Lo/hi of every MLE we need at chunk j (corresponding to the
+            // (i+1, …, n-1)-prefix part of the evaluations).
+            let eq_lo = eq_inv_mle.evaluations[2 * j];
+            let eq_hi = eq_inv_mle.evaluations[2 * j + 1];
+            let g_lo = g_sub_mle.evaluations[2 * j];
+            let g_hi = g_sub_mle.evaluations[2 * j + 1];
+
+            for (d, eval) in evals.iter_mut().enumerate() {
+                let t = F::from_canonical_usize(d);
+                let one_minus_t = F::ONE - t;
+
+                let eq_t = one_minus_t * eq_lo + t * eq_hi;
+                let g_t = one_minus_t * g_lo + t * g_hi;
+
+                let mut row_sum = F::ZERO;
+                for jj in 0..num_routed {
+                    let a_lo = a_mles[jj].evaluations[2 * j];
+                    let a_hi = a_mles[jj].evaluations[2 * j + 1];
+                    let b_lo = b_mles[jj].evaluations[2 * j];
+                    let b_hi = b_mles[jj].evaluations[2 * j + 1];
+                    let w_lo = w_mles[jj].evaluations[2 * j];
+                    let w_hi = w_mles[jj].evaluations[2 * j + 1];
+                    let s_lo = sigma_mles[jj].evaluations[2 * j];
+                    let s_hi = sigma_mles[jj].evaluations[2 * j + 1];
+
+                    let a_t = one_minus_t * a_lo + t * a_hi;
+                    let b_t = one_minus_t * b_lo + t * b_hi;
+                    let w_t = one_minus_t * w_lo + t * w_hi;
+                    let s_t = one_minus_t * s_lo + t * s_hi;
+
+                    let id_t = k_is[jj] * g_t;
+                    let denom_id_t = beta + w_t + gamma * id_t;
+                    let denom_sigma_t = beta + w_t + gamma * s_t;
+
+                    let z_id = a_t * denom_id_t - F::ONE;
+                    let z_sigma = b_t * denom_sigma_t - F::ONE;
+
+                    row_sum += lambda_pows[jj] * (z_id + mu_inv * z_sigma);
+                }
+
+                *eval += eq_t * row_sum;
+            }
+        }
+
+        let round_poly = RoundPolynomial::new(evals.clone());
+        transcript.domain_separate("sumcheck-round");
+        transcript.absorb_field_vec(&evals);
+
+        let r_i: F = transcript.squeeze_challenge();
+        challenges.push(r_i);
+
+        eq_inv_mle.bind_variable_in_place(r_i);
+        g_sub_mle.bind_variable_in_place(r_i);
+        for jj in 0..num_routed {
+            a_mles[jj].bind_variable_in_place(r_i);
+            b_mles[jj].bind_variable_in_place(r_i);
+            w_mles[jj].bind_variable_in_place(r_i);
+            sigma_mles[jj].bind_variable_in_place(r_i);
+        }
+
+        round_polys.push(round_poly);
+    }
+
+    (SumcheckProof { round_polys }, challenges)
+}
+
 /// Compute `Σ_{b ∈ {0,1}^n} f(b) · g(b)`.
 pub fn compute_claimed_sum<F: Field>(f_evals: &[F], g_evals: &[F]) -> F {
     assert_eq!(f_evals.len(), g_evals.len());

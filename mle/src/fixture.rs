@@ -75,6 +75,42 @@ pub struct ProofFixture {
     pub num_constants: usize,
     pub degree_bits: usize,
 
+    // ── Permutation argument context (Issue #2) ────────────────────────
+    /// Coset shifts k_is: id_col(b) = k_is[col] · subgroup[b] in field encoding.
+    pub k_is: Vec<String>,
+    /// Powers g^{2^i} of the subgroup generator, length = degree_bits.
+    /// Used to evaluate subgroup_MLE(r) = Π_i ((1-r_i) + r_i · g^{2^i}).
+    pub subgroup_gen_powers: Vec<String>,
+
+    // ── v2 logUp soundness fix (Issue R2-#2) ───────────────────────────
+    pub inverse_helpers_commitment_root: String,
+    pub inverse_helpers_batch_r: String,
+    pub inv_sumcheck_challenges: Vec<String>,
+    pub inv_sumcheck_proof: SumcheckFixture,
+    pub h_sumcheck_challenges: Vec<String>,
+    pub h_sumcheck_proof: SumcheckFixture,
+    pub lambda_inv: String,
+    pub mu_inv: String,
+    pub lambda_h: String,
+    pub tau_inv: Vec<String>,
+    pub inverse_helpers_evals_at_r_inv: Vec<String>,
+    pub inverse_helpers_evals_at_r_h: Vec<String>,
+    pub inverse_helpers_whir_eval_at_r_inv: Ext3Fixture,
+    pub inverse_helpers_whir_eval_at_r_h: Ext3Fixture,
+    pub inverse_helpers_whir_eval_at_r_gate: Ext3Fixture,
+    pub witness_individual_evals_at_r_inv: Vec<String>,
+    /// Full preprocessed evals at r_inv `[const_0..const_C, sigma_0..sigma_R]`.
+    pub preprocessed_individual_evals_at_r_inv: Vec<String>,
+    pub g_sub_eval_at_r_inv: String,
+    pub witness_whir_eval_at_r_inv: Ext3Fixture,
+    pub preprocessed_whir_eval_at_r_inv: Ext3Fixture,
+    pub witness_eval_value_at_r_inv: String,
+    pub preprocessed_eval_value_at_r_inv: String,
+    pub aux_whir_eval_at_r_inv: Ext3Fixture,
+    pub aux_whir_eval_at_r_h: Ext3Fixture,
+    pub witness_whir_eval_at_r_h: Ext3Fixture,
+    pub preprocessed_whir_eval_at_r_h: Ext3Fixture,
+
     // ── WHIR config ─────────────────────────────────────────────────────
     /// WHIR protocol ID (hex, 0x-prefixed, 64 bytes).
     pub whir_protocol_id: String,
@@ -395,6 +431,51 @@ pub fn proof_to_fixture<F: PrimeField64>(proof: &MleProof<F>, degree_bits: usize
         whir_protocol_id: hex_encode(&protocol_id),
         whir_split_session_id: hex_encode(&split_session_id),
         whir_params,
+        // Issue #2: permutation argument context
+        k_is: field_vec_to_strings(&proof.k_is),
+        subgroup_gen_powers: field_vec_to_strings(&proof.subgroup_gen_powers),
+
+        // v2 logUp soundness fix (Issue R2-#2)
+        inverse_helpers_commitment_root: hex_encode(&proof.inverse_helpers_root),
+        inverse_helpers_batch_r: field_to_string(proof.inverse_helpers_batch_r),
+        inv_sumcheck_challenges: field_vec_to_strings(&proof.inv_sumcheck_challenges),
+        inv_sumcheck_proof: sumcheck_to_fixture(&proof.inv_sumcheck_proof),
+        h_sumcheck_challenges: field_vec_to_strings(&proof.h_sumcheck_challenges),
+        h_sumcheck_proof: sumcheck_to_fixture(&proof.h_sumcheck_proof),
+        lambda_inv: field_to_string(proof.lambda_inv),
+        mu_inv: field_to_string(proof.mu_inv),
+        lambda_h: field_to_string(proof.lambda_h),
+        tau_inv: field_vec_to_strings(&proof.tau_inv),
+        inverse_helpers_evals_at_r_inv: field_vec_to_strings(
+            &proof.inverse_helpers_evals_at_r_inv,
+        ),
+        inverse_helpers_evals_at_r_h: field_vec_to_strings(&proof.inverse_helpers_evals_at_r_h),
+        inverse_helpers_whir_eval_at_r_inv: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_inv_ext3,
+        ),
+        inverse_helpers_whir_eval_at_r_h: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_h_ext3,
+        ),
+        inverse_helpers_whir_eval_at_r_gate: ext3_to_fixture(
+            &proof.inverse_helpers_whir_eval_at_r_gate_ext3,
+        ),
+        witness_individual_evals_at_r_inv: field_vec_to_strings(
+            &proof.witness_individual_evals_at_r_inv,
+        ),
+        preprocessed_individual_evals_at_r_inv: field_vec_to_strings(
+            &proof.preprocessed_individual_evals_at_r_inv,
+        ),
+        g_sub_eval_at_r_inv: field_to_string(proof.g_sub_eval_at_r_inv),
+        witness_whir_eval_at_r_inv: ext3_to_fixture(&proof.witness_whir_eval_at_r_inv_ext3),
+        preprocessed_whir_eval_at_r_inv: ext3_to_fixture(
+            &proof.preprocessed_whir_eval_at_r_inv_ext3,
+        ),
+        witness_eval_value_at_r_inv: field_to_string(proof.witness_eval_value_at_r_inv),
+        preprocessed_eval_value_at_r_inv: field_to_string(proof.preprocessed_eval_value_at_r_inv),
+        aux_whir_eval_at_r_inv: ext3_to_fixture(&proof.aux_whir_eval_at_r_inv_ext3),
+        aux_whir_eval_at_r_h: ext3_to_fixture(&proof.aux_whir_eval_at_r_h_ext3),
+        witness_whir_eval_at_r_h: ext3_to_fixture(&proof.witness_whir_eval_at_r_h_ext3),
+        preprocessed_whir_eval_at_r_h: ext3_to_fixture(&proof.preprocessed_whir_eval_at_r_h_ext3),
     }
 }
 

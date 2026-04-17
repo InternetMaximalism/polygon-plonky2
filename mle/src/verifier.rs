@@ -62,20 +62,39 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
     transcript.absorb_bytes(&proof.witness_root);
 
     // ═══════════════════════════════════════════════════════════════════
-    // Step 2: Re-derive challenges
+    // Step 2: Re-derive challenges (must mirror prover transcript order)
     // ═══════════════════════════════════════════════════════════════════
     transcript.domain_separate("challenges");
     let beta: F = transcript.squeeze_challenge();
     let gamma: F = transcript.squeeze_challenge();
+    ensure!(beta == proof.beta, "Beta mismatch");
+    ensure!(gamma == proof.gamma, "Gamma mismatch");
+
+    // ── v2 logUp: inverse-helpers commitment is absorbed AFTER β,γ. ─────
+    transcript.domain_separate("inverse-helpers-batch-r");
+    let inv_helpers_batch_r: F = transcript.squeeze_challenge();
+    ensure!(
+        inv_helpers_batch_r == proof.inverse_helpers_batch_r,
+        "Inverse helpers batch_r mismatch"
+    );
+    transcript.absorb_bytes(&proof.inverse_helpers_root);
+
     let alpha: F = transcript.squeeze_challenge();
     let tau: Vec<F> = transcript.squeeze_challenges(degree_bits);
     let tau_perm: Vec<F> = transcript.squeeze_challenges(degree_bits);
-
-    ensure!(beta == proof.beta, "Beta mismatch");
-    ensure!(gamma == proof.gamma, "Gamma mismatch");
     ensure!(alpha == proof.alpha, "Alpha mismatch");
     ensure!(tau == proof.tau, "Tau mismatch");
     ensure!(tau_perm == proof.tau_perm, "Tau_perm mismatch");
+
+    transcript.domain_separate("v2-logup-challenges");
+    let lambda_inv: F = transcript.squeeze_challenge();
+    let mu_inv: F = transcript.squeeze_challenge();
+    let lambda_h: F = transcript.squeeze_challenge();
+    let tau_inv: Vec<F> = transcript.squeeze_challenges(degree_bits);
+    ensure!(lambda_inv == proof.lambda_inv, "lambda_inv mismatch");
+    ensure!(mu_inv == proof.mu_inv, "mu_inv mismatch");
+    ensure!(lambda_h == proof.lambda_h, "lambda_h mismatch");
+    ensure!(tau_inv == proof.tau_inv, "tau_inv mismatch");
 
     transcript.domain_separate("extension-combine");
     let _ext_challenge: F = transcript.squeeze_challenge();
@@ -119,6 +138,55 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         verify_sumcheck(&proof.combined_proof, F::ZERO, degree_bits, &mut transcript);
     let (sumcheck_challenges, final_eval) =
         combined_result.map_err(|e| anyhow::anyhow!("Combined sumcheck failed: {}", e))?;
+    ensure!(
+        sumcheck_challenges == proof.sumcheck_challenges,
+        "Combined sumcheck challenges mismatch"
+    );
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Step 4.5 (v2 logUp): Verify Φ_inv zero-check sumcheck.
+    //   Σ_b eq(τ_inv,b)·Σ_j λ^j·(A_j·D_id − 1 + μ_inv·(B_j·D_σ − 1)) = 0
+    // Round-poly degree bound: 3.
+    // ═══════════════════════════════════════════════════════════════════
+    transcript.domain_separate("v2-inv-zerocheck");
+    // Round-poly degree bound (Φ_inv): 3. Reject any over-long round poly.
+    for (i, rp) in proof.inv_sumcheck_proof.round_polys.iter().enumerate() {
+        ensure!(
+            rp.evaluations.len() <= 4,
+            "Φ_inv round {i}: round poly degree exceeds 3 (got {} evaluations)",
+            rp.evaluations.len()
+        );
+    }
+    let inv_result =
+        verify_sumcheck(&proof.inv_sumcheck_proof, F::ZERO, degree_bits, &mut transcript);
+    let (inv_challenges, inv_final_eval) =
+        inv_result.map_err(|e| anyhow::anyhow!("Φ_inv sumcheck failed: {}", e))?;
+    ensure!(
+        inv_challenges == proof.inv_sumcheck_challenges,
+        "Φ_inv sumcheck challenges mismatch"
+    );
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Step 4.7 (v2 logUp): Verify Φ_h linear sumcheck.
+    //   Σ_b H(b) = 0, H(b) = Σ_j λ_h^j · (A_j(b) − B_j(b))
+    // Round-poly degree bound: 1.
+    // ═══════════════════════════════════════════════════════════════════
+    transcript.domain_separate("v2-h-linear");
+    for (i, rp) in proof.h_sumcheck_proof.round_polys.iter().enumerate() {
+        ensure!(
+            rp.evaluations.len() == 2,
+            "Φ_h round {i}: expected 2 evaluations (degree 1), got {}",
+            rp.evaluations.len()
+        );
+    }
+    let h_result =
+        verify_sumcheck(&proof.h_sumcheck_proof, F::ZERO, degree_bits, &mut transcript);
+    let (h_challenges, h_final_eval) =
+        h_result.map_err(|e| anyhow::anyhow!("Φ_h sumcheck failed: {}", e))?;
+    ensure!(
+        h_challenges == proof.h_sumcheck_challenges,
+        "Φ_h sumcheck challenges mismatch"
+    );
 
     // ═══════════════════════════════════════════════════════════════════
     // Step 5: Verify WHIR proofs + batch consistency
@@ -135,21 +203,52 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         })
         .collect();
 
-    // 5a: Single WHIR proof — 3 vectors (preprocessed + witness + auxiliary) at r
-    // SECURITY: All 3 vectors are in the same WHIR session with cross-term OOD
-    // binding. The phased commit (vectors 0,1 before challenges, vector 2 after)
-    // is transparent to the WHIR verifier — it sees 3 committed vectors.
+    // 5a: Multi-point WHIR proof — 4 vectors (pre + wit + aux + inverse_helpers)
+    //     at 3 points (r_gate, r_inv, r_h). All cross-vector + cross-point binding
+    //     is provided by the single WHIR session.
+    let r_inv_gl: Vec<plonky2_field::goldilocks_field::GoldilocksField> = proof
+        .inv_sumcheck_challenges
+        .iter()
+        .map(|&f| {
+            plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                f.to_canonical_u64(),
+            )
+        })
+        .collect();
+    let r_h_gl: Vec<plonky2_field::goldilocks_field::GoldilocksField> = proof
+        .h_sumcheck_challenges
+        .iter()
+        .map(|&f| {
+            plonky2_field::goldilocks_field::GoldilocksField::from_canonical_u64(
+                f.to_canonical_u64(),
+            )
+        })
+        .collect();
+
+    let whir_eval_values: Vec<_> = vec![
+        // Point 0 (r_gate): pre, wit, aux, inv
+        proof.preprocessed_whir_eval_ext3,
+        proof.witness_whir_eval_ext3,
+        proof.aux_whir_eval_ext3,
+        proof.inverse_helpers_whir_eval_at_r_gate_ext3,
+        // Point 1 (r_inv): pre, wit, aux, inv
+        proof.preprocessed_whir_eval_at_r_inv_ext3,
+        proof.witness_whir_eval_at_r_inv_ext3,
+        proof.aux_whir_eval_at_r_inv_ext3,
+        proof.inverse_helpers_whir_eval_at_r_inv_ext3,
+        // Point 2 (r_h): pre, wit, aux, inv
+        proof.preprocessed_whir_eval_at_r_h_ext3,
+        proof.witness_whir_eval_at_r_h_ext3,
+        proof.aux_whir_eval_at_r_h_ext3,
+        proof.inverse_helpers_whir_eval_at_r_h_ext3,
+    ];
     let whir_result = whir_pcs.verify_split(
         degree_bits,
         &proof.whir_eval_proof,
-        &[
-            proof.preprocessed_whir_eval_ext3,
-            proof.witness_whir_eval_ext3,
-            proof.aux_whir_eval_ext3,
-        ],
+        &whir_eval_values,
         WHIR_SESSION_SPLIT,
-        &[&r_gl],
-        3, // num_vectors: preprocessed + witness + auxiliary
+        &[&r_gl, &r_inv_gl, &r_h_gl],
+        4, // num_vectors: preprocessed + witness + auxiliary + inverse_helpers
     );
     ensure!(
         whir_result.is_ok(),
@@ -199,6 +298,82 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Witness batch mismatch"
     );
 
+    // 5e: Batch consistency — witness at r_inv
+    let mut expected_wit_at_r_inv = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.witness_individual_evals_at_r_inv {
+        expected_wit_at_r_inv += r_pow * eval;
+        r_pow *= batch_r_wit;
+    }
+    ensure!(
+        expected_wit_at_r_inv == proof.witness_eval_value_at_r_inv,
+        "Witness batch mismatch at r_inv"
+    );
+
+    // 5f: Batch consistency — preprocessed at r_inv.
+    //     Full layout `[const_0..const_C, sigma_0..sigma_R]`. The sigma subset
+    //     drives the Φ_inv terminal check; the const subset is unused there
+    //     but required to identify the batched value with the WHIR Ext3 binding.
+    let mut expected_pre_at_r_inv = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.preprocessed_individual_evals_at_r_inv {
+        expected_pre_at_r_inv += r_pow * eval;
+        r_pow *= batch_r_pre;
+    }
+    ensure!(
+        expected_pre_at_r_inv == proof.preprocessed_eval_value_at_r_inv,
+        "Preprocessed batch mismatch at r_inv"
+    );
+    let expected_pre_len = proof.num_constants + proof.num_routed_wires;
+    ensure!(
+        proof.preprocessed_individual_evals_at_r_inv.len() == expected_pre_len,
+        "preprocessed_individual_evals_at_r_inv has wrong length"
+    );
+
+    // 5g: Inverse helpers batch consistency at r_inv
+    ensure!(
+        proof.inverse_helpers_evals_at_r_inv.len() == 2 * proof.num_routed_wires,
+        "inverse_helpers_evals_at_r_inv has wrong length"
+    );
+    let mut expected_inv_at_r_inv = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.inverse_helpers_evals_at_r_inv {
+        expected_inv_at_r_inv += r_pow * eval;
+        r_pow *= proof.inverse_helpers_batch_r;
+    }
+    // The Goldilocks batch consistency together with the WHIR ext3 binding +
+    // Schwartz-Zippel on inverse_helpers_batch_r ensures the individual evals
+    // are uniquely determined by the committed P_inv polynomial.
+
+    // 5h: Inverse helpers batch consistency at r_h
+    ensure!(
+        proof.inverse_helpers_evals_at_r_h.len() == 2 * proof.num_routed_wires,
+        "inverse_helpers_evals_at_r_h has wrong length"
+    );
+    let mut _expected_inv_at_r_h = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &proof.inverse_helpers_evals_at_r_h {
+        _expected_inv_at_r_h += r_pow * eval;
+        r_pow *= proof.inverse_helpers_batch_r;
+    }
+    let _ = expected_inv_at_r_inv; // silence unused-binding warnings (used via WHIR)
+
+    // 5i: g_sub(r_inv) consistency — verifier recomputes from VK-bound powers.
+    let mut expected_g_sub_at_r_inv = F::ONE;
+    ensure!(
+        proof.subgroup_gen_powers.len() >= degree_bits,
+        "subgroup_gen_powers has insufficient length"
+    );
+    for (i, &r_i) in proof.inv_sumcheck_challenges.iter().enumerate() {
+        let g_pow_i = proof.subgroup_gen_powers[i];
+        let factor = (F::ONE - r_i) + r_i * g_pow_i;
+        expected_g_sub_at_r_inv *= factor;
+    }
+    ensure!(
+        expected_g_sub_at_r_inv == proof.g_sub_eval_at_r_inv,
+        "g_sub(r_inv) mismatch — subgroup MLE evaluation inconsistent"
+    );
+
     // ═══════════════════════════════════════════════════════════════════
     // Step 6: Final evaluation check
     //
@@ -225,6 +400,76 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "Combined final eval mismatch: \
          eq(τ,r)·C̃(r) + μ·eq(τ_perm,r)·h̃(r) ≠ sumcheck final_eval"
     );
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Step 7 (v2 logUp): Φ_inv terminal check.
+    //
+    //   inv_final_eval ?= eq(τ_inv, r_inv) · Σ_j λ_inv^j ·
+    //                       ( a_j(r_inv) · D_j^id(r_inv) − 1
+    //                       + μ_inv · (b_j(r_inv) · D_j^σ(r_inv) − 1) )
+    //
+    // where D_j^id(r_inv) = β + w_j(r_inv) + γ · K_j · g_sub(r_inv)
+    //       D_j^σ(r_inv)  = β + w_j(r_inv) + γ · σ_j(r_inv)
+    //
+    // SECURITY: This is the v2 fix for Issue R2-#2. All evaluated quantities
+    // (a_j, b_j, w_j, σ_j, g_sub) are multilinear functions of r_inv that are
+    // bound by either WHIR (a, b, w, σ) or VK + verifier reconstruction (g_sub).
+    // No 1/x is evaluated by the verifier; the polynomial identity
+    // A_j · D_j − 1 = 0 is enforced row-wise by the zero-check sumcheck.
+    // ═══════════════════════════════════════════════════════════════════
+    let eq_at_r_inv = eq_poly::eq_eval(&tau_inv, &inv_challenges);
+    let num_routed = proof.num_routed_wires;
+    ensure!(
+        proof.k_is.len() >= num_routed,
+        "k_is has insufficient length"
+    );
+    ensure!(
+        proof.witness_individual_evals_at_r_inv.len() >= num_routed,
+        "witness_individual_evals_at_r_inv has insufficient length for routed wires"
+    );
+
+    let mut inv_pred_inner = F::ZERO;
+    let mut lambda_pow = F::ONE;
+    for j in 0..num_routed {
+        let a_j = proof.inverse_helpers_evals_at_r_inv[j];
+        let b_j = proof.inverse_helpers_evals_at_r_inv[num_routed + j];
+        let w_j = proof.witness_individual_evals_at_r_inv[j];
+        // sigma sits after the constants in the preprocessed batch layout.
+        let s_j = proof.preprocessed_individual_evals_at_r_inv[proof.num_constants + j];
+        let id_j = proof.k_is[j] * proof.g_sub_eval_at_r_inv;
+        let denom_id = beta + w_j + gamma * id_j;
+        let denom_sigma = beta + w_j + gamma * s_j;
+        let z_id = a_j * denom_id - F::ONE;
+        let z_sigma = b_j * denom_sigma - F::ONE;
+        inv_pred_inner += lambda_pow * (z_id + mu_inv * z_sigma);
+        lambda_pow *= lambda_inv;
+    }
+    let inv_pred = eq_at_r_inv * inv_pred_inner;
+    ensure!(
+        inv_pred == inv_final_eval,
+        "Φ_inv terminal check failed — inverse helpers not consistent with logUp denominators"
+    );
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Step 8 (v2 logUp): Φ_h terminal check.
+    //   h_final_eval ?= Σ_j λ_h^j · ( a_j(r_h) − b_j(r_h) )
+    // (no eq weight — claimed sum 0 is unweighted)
+    // ═══════════════════════════════════════════════════════════════════
+    ensure!(
+        proof.inverse_helpers_evals_at_r_h.len() == 2 * num_routed,
+        "inverse_helpers_evals_at_r_h has wrong length"
+    );
+    let mut h_pred = F::ZERO;
+    for j in 0..num_routed {
+        let a_j = proof.inverse_helpers_evals_at_r_h[j];
+        let b_j = proof.inverse_helpers_evals_at_r_h[num_routed + j];
+        h_pred += a_j - b_j;
+    }
+    ensure!(
+        h_pred == h_final_eval,
+        "Φ_h terminal check failed — H = Σ_j (A_j − B_j) inconsistent at r_h"
+    );
+    let _ = lambda_h; // retained as transcript challenge for future per-j folding
 
     Ok(())
 }

@@ -33,16 +33,21 @@ library SumcheckVerifier {
         SumcheckProof memory proof,
         uint256 claimedSum,
         uint256 numVars,
+        uint256 maxDegree,
         TranscriptLib.Transcript memory transcript
     ) internal pure returns (uint256[] memory challenges, uint256 finalEval) {
         require(proof.roundPolys.length == numVars, "Wrong number of rounds");
+        require(maxDegree >= 1, "maxDegree must be >= 1");
 
         challenges = new uint256[](numVars);
         uint256 currentClaim = claimedSum;
+        uint256 maxEvals = maxDegree + 1;
 
         for (uint256 i = 0; i < numVars; i++) {
             uint256[] memory evals = proof.roundPolys[i].evals;
             require(evals.length >= 2, "Round poly too short");
+            // SECURITY (Issue #8): enforce upper bound on round-poly degree.
+            require(evals.length <= maxEvals, "Round poly degree too high");
 
             // Check: g_i(0) + g_i(1) == currentClaim
             uint256 sum;
