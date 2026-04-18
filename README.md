@@ -5,6 +5,8 @@ This repository was originally for Plonky2, a SNARK implementation based on tech
 
 Periodic auditing and maintenance of this fork repository, including the MLE/WHIR proving system, is conducted by the Intmax team.
 
+**WARNING: STILL EXPERIMENTAL**
+
 ## Documentation
 
 For more details about the Plonky2 argument system, see this [writeup](plonky2/plonky2.pdf).
