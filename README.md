@@ -1,8 +1,6 @@
-# Plonky2 & more
-[![Discord](https://img.shields.io/discord/743511677072572486?logo=discord)](https://discord.gg/QZKRUpqCJ6)
+# Plonky2 + WHIR
 
-This repository was originally for Plonky2, a SNARK implementation based on techniques from PLONK and FRI. It has since expanded to include tools such as Starky, a highly performant STARK implementation.
-
+This fork repository was originally for [Plonky2 with FRI](https://github.com/0xPolygonZero/plonky2). In its mle/ directory, WHIR verification is available now. 
 Periodic auditing and maintenance of this fork repository, including the MLE/WHIR proving system, is conducted by the Intmax team.
 
 **WARNING: STILL EXPERIMENTAL**
