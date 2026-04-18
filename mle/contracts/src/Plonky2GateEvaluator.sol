@@ -91,17 +91,18 @@ library Plonky2GateEvaluator {
         uint256 alpha,
         uint256 extChallenge,
         uint256[4] memory publicInputsHash,
-        GateInfo[] calldata gatesCd,
+        GateInfo[] calldata gates,
         uint256 numSelectors,
         uint256 numConstants,
         uint256 numGateConstraints
     ) internal pure returns (uint256 flat) {
         // The inner gate helpers were written against memory arrays. We copy
-        // once here (instead of at every call site) so the dispatcher below
-        // can reuse the memory arrays across all gate calls.
+        // wire / preprocessed arrays once (amortizing across all gate dispatches)
+        // but iterate `gates` directly in calldata — the dispatcher only needs
+        // to read primitive fields which are cheap `calldataload`s and avoid a
+        // full `GateInfo[]`-to-memory copy.
         uint256[] memory wires = _cdToMem(wiresCd);
         uint256[] memory preprocessed = _cdToMem(preprocessedCd);
-        GateInfo[] memory gates = _gatesCdToMem(gatesCd);
         // Component 0: ext component c0 of the combined constraint.
         // Component 1: ext component c1.
         // For D=2, combined_ext.to_basefield_array() = [c0, c1].
@@ -120,7 +121,7 @@ library Plonky2GateEvaluator {
         // into perIdxAccum[0..gate.num_constraints()] (added, not overwriting,
         // matching `evaluate_gate_constraints` which does `constraints[i] += c`).
         for (uint256 g = 0; g < gates.length; g++) {
-            GateInfo memory gi = gates[g];
+            GateInfo calldata gi = gates[g];
             uint256 selectorVal = preprocessed[gi.selectorIndex];
             uint256 filter = _computeFilter(
                 gi.gateRowIndex,
@@ -231,16 +232,13 @@ library Plonky2GateEvaluator {
         }
     }
 
-    function _gatesCdToMem(GateInfo[] calldata src) private pure returns (GateInfo[] memory dst) {
-        // Struct array has per-element memory pointers; a single calldatacopy
-        // would corrupt layout. Element-wise copy.
-        uint256 len = src.length;
-        dst = new GateInfo[](len);
-        for (uint256 i = 0; i < len; i++) dst[i] = src[i];
-    }
-
     /// @dev Plonky2 filter polynomial (see plonky2/src/gates/gate.rs:326).
     /// filter(s) = Π_{i ∈ groupRange, i != row}(i − s) · (manySel ? (UNUSED − s) : 1)
+    ///
+    /// Yul-optimized: inlines `F.sub` / `F.mul`, drops the Solidity wrapper
+    /// call overhead. `s` is assumed canonical (enforced upstream as a
+    /// preprocessed MLE evaluation at `r_gate_v2` after C2 canonicalization);
+    /// `i` is a small integer (< UNUSED_SELECTOR = 2^32-1 < P).
     function _computeFilter(
         uint256 row,
         uint256 groupStart,
@@ -248,15 +246,26 @@ library Plonky2GateEvaluator {
         uint256 s,
         bool manySel
     ) private pure returns (uint256 result) {
-        result = 1;
-        for (uint256 i = groupStart; i < groupEnd; i++) {
-            if (i == row) continue;
-            uint256 factor = F.sub(i, s);
-            result = result.mul(factor);
-        }
-        if (manySel) {
-            uint256 factor = F.sub(UNUSED_SELECTOR, s);
-            result = result.mul(factor);
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            // `s_red`: defensive reduction even though caller canonicalizes.
+            let sRed := mod(s, p)
+            let negS := sub(p, sRed) // fits in word since sRed < p.
+            let r := 1
+            for { let i := groupStart } lt(i, groupEnd) { i := add(i, 1) } {
+                if iszero(eq(i, row)) {
+                    // factor = (i - s) mod p.  i < P since groupStart/End < 2^8.
+                    // addmod(i, p - sRed, p) = (i - s) mod p.
+                    let factor := addmod(i, negS, p)
+                    r := mulmod(r, factor, p)
+                }
+            }
+            if manySel {
+                // factor = (UNUSED_SELECTOR - s) mod p.
+                let factor := addmod(0xFFFFFFFF, negS, p)
+                r := mulmod(r, factor, p)
+            }
+            result := r
         }
     }
 
@@ -311,7 +320,14 @@ library Plonky2GateEvaluator {
             for { let i := 0 } lt(i, numConsts) { i := add(i, 1) } {
                 let c := mload(add(preBase, mul(i, 0x20)))
                 let w := mload(add(wPtr, mul(i, 0x20)))
-                let diff := addmod(c, sub(p, w), p)
+                // SECURITY (C2, phase3_c2_threat_model.md §6.2): defensive
+                // self-reduction of prover-supplied wire before field negation.
+                // Without `mod(w, p)`, a non-canonical `w = v + k·P` would make
+                // `sub(p, w)` underflow 2^256 and inject K = 2^256 mod P into
+                // `diff`, enabling a subset-sum attack on `flat`. Caller-side
+                // enforcement in MleVerifier also canonicalizes, so this is
+                // defense-in-depth.
+                let diff := addmod(c, sub(p, mod(w, p)), p)
                 let slot := add(aPtr, mul(i, 0x20))
                 mstore(slot, addmod(mload(slot), mulmod(filter, diff, p), p))
             }
@@ -332,7 +348,10 @@ library Plonky2GateEvaluator {
             for { let i := 0 } lt(i, 4) { i := add(i, 1) } {
                 let w := mload(add(wPtr, mul(i, 0x20)))
                 let h := mload(add(pih, mul(i, 0x20)))
-                let diff := addmod(w, sub(p, h), p)
+                // SECURITY (C2, phase3_c2_threat_model.md §6.2): self-reduce
+                // publicInputsHash entry; caller should also canonicalize but
+                // we stay robust if that check is ever removed.
+                let diff := addmod(w, sub(p, mod(h, p)), p)
                 let slot := add(aPtr, mul(i, 0x20))
                 mstore(slot, addmod(mload(slot), mulmod(filter, diff, p), p))
             }
@@ -356,44 +375,52 @@ library Plonky2GateEvaluator {
     /// @dev PoseidonMdsGate: apply the Poseidon MDS circulant + diagonal matrix
     /// to 12 ExtensionAlgebra inputs. 24 constraints = 12 × D (D=2).
     /// Input wires: 0..24 (2 per ExtAlgebra element). Output wires: 24..48.
+    /// Yul-ified: one assembly block for the whole 12×12 MDS sweep. Reads
+    /// MDS constants once into locals, then pure Yul loops.
     function _evalPoseidonMds(
         uint256[] memory wires,
         uint256 filter,
         uint256[] memory acc
     ) private pure {
-        uint256 p = F.P;
-        uint256 constraintIdx = 0;
-        for (uint256 r = 0; r < 12; r++) {
-            uint256 c0 = 0;
-            uint256 c1 = 0;
-            for (uint256 i = 0; i < 12; i++) {
-                uint256 srcR = (i + r) % 12;
-                uint256 circ = PoseidonConstants.mdsCirc(i);
-                assembly {
-                    let v0 := mload(add(add(wires, 0x20), mul(mul(srcR, 2), 0x20)))
-                    let v1 := mload(add(add(wires, 0x20), mul(add(mul(srcR, 2), 1), 0x20)))
+        // Pre-load MDS constants into a local memory buffer so inner loops
+        // can mload by offset (mirrors the pattern in PoseidonGate).
+        bytes memory mdsCirc = PoseidonConstants.MDS_CIRC;
+        bytes memory mdsDiag = PoseidonConstants.MDS_DIAG;
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let wPtr := add(wires, 0x20)
+            let aPtr := add(acc, 0x20)
+            let circBase := add(mdsCirc, 0x20)
+            let diagBase := add(mdsDiag, 0x20)
+            let constraintIdx := 0
+            for { let r := 0 } lt(r, 12) { r := add(r, 1) } {
+                let c0 := 0
+                let c1 := 0
+                for { let i := 0 } lt(i, 12) { i := add(i, 1) } {
+                    let srcR := mod(add(i, r), 12)
+                    let circ := shr(192, mload(add(circBase, mul(i, 8))))
+                    let v0 := mload(add(wPtr, mul(mul(srcR, 2), 0x20)))
+                    let v1 := mload(add(wPtr, mul(add(mul(srcR, 2), 1), 0x20)))
                     c0 := addmod(c0, mulmod(v0, circ, p), p)
                     c1 := addmod(c1, mulmod(v1, circ, p), p)
                 }
-            }
-            uint256 diag = PoseidonConstants.mdsDiag(r);
-            {
-                uint256 v0 = wires[2 * r];
-                uint256 v1 = wires[2 * r + 1];
-                assembly {
+                {
+                    let diag := shr(192, mload(add(diagBase, mul(r, 8))))
+                    let v0 := mload(add(wPtr, mul(mul(r, 2), 0x20)))
+                    let v1 := mload(add(wPtr, mul(add(mul(r, 2), 1), 0x20)))
                     c0 := addmod(c0, mulmod(v0, diag, p), p)
                     c1 := addmod(c1, mulmod(v1, diag, p), p)
                 }
+                let out0 := mload(add(wPtr, mul(add(24, mul(r, 2)), 0x20)))
+                let out1 := mload(add(wPtr, mul(add(25, mul(r, 2)), 0x20)))
+                let diff0 := addmod(out0, sub(p, mod(c0, p)), p)
+                let diff1 := addmod(out1, sub(p, mod(c1, p)), p)
+                let slot0 := add(aPtr, mul(constraintIdx, 0x20))
+                mstore(slot0, addmod(mload(slot0), mulmod(filter, diff0, p), p))
+                let slot1 := add(aPtr, mul(add(constraintIdx, 1), 0x20))
+                mstore(slot1, addmod(mload(slot1), mulmod(filter, diff1, p), p))
+                constraintIdx := add(constraintIdx, 2)
             }
-
-            uint256 out0 = wires[24 + 2 * r];
-            uint256 out1 = wires[24 + 2 * r + 1];
-            uint256 diff0 = F.sub(out0, c0);
-            uint256 diff1 = F.sub(out1, c1);
-            acc[constraintIdx] = acc[constraintIdx].add(filter.mul(diff0));
-            constraintIdx++;
-            acc[constraintIdx] = acc[constraintIdx].add(filter.mul(diff1));
-            constraintIdx++;
         }
     }
 
@@ -401,6 +428,7 @@ library Plonky2GateEvaluator {
     ///   output_ext = const_0 · (mult0_ext × mult1_ext) + const_1 · addend_ext
     /// where each ext is an ExtensionAlgebra element (2 base wires).
     /// Wires per op: 4·D = 8. Constraints per op: D = 2.
+    /// Yul-ified: single assembly block, no Solidity wrapper calls.
     function _evalArithmeticExt(
         uint256[] memory wires,
         uint256[] memory preprocessed,
@@ -409,47 +437,44 @@ library Plonky2GateEvaluator {
         uint256 filter,
         uint256[] memory acc
     ) private pure {
-        uint256 const0 = preprocessed[numSelectors];
-        uint256 const1 = preprocessed[numSelectors + 1];
-        uint256 p = F.P;
-        uint256 constraintIdx = 0;
-        for (uint256 i = 0; i < numOps; i++) {
-            uint256 m0_0 = wires[8 * i];
-            uint256 m0_1 = wires[8 * i + 1];
-            uint256 m1_0 = wires[8 * i + 2];
-            uint256 m1_1 = wires[8 * i + 3];
-            uint256 ad_0 = wires[8 * i + 4];
-            uint256 ad_1 = wires[8 * i + 5];
-            uint256 out0 = wires[8 * i + 6];
-            uint256 out1 = wires[8 * i + 7];
-
-            // ext_algebra multiply: (a, b)·(c, d) = (a·c + W·b·d, a·d + b·c)
-            uint256 mul_c0;
-            uint256 mul_c1;
-            assembly {
-                mul_c0 := addmod(mulmod(m0_0, m1_0, p), mulmod(EXT2_W, mulmod(m0_1, m1_1, p), p), p)
-                mul_c1 := addmod(mulmod(m0_0, m1_1, p), mulmod(m0_1, m1_0, p), p)
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let wPtr := add(wires, 0x20)
+            let aPtr := add(acc, 0x20)
+            let preBase := add(add(preprocessed, 0x20), mul(numSelectors, 0x20))
+            let const0 := mload(preBase)
+            let const1 := mload(add(preBase, 0x20))
+            let constraintIdx := 0
+            for { let i := 0 } lt(i, numOps) { i := add(i, 1) } {
+                let base := add(wPtr, mul(mul(i, 8), 0x20))
+                let m0_0 := mload(base)
+                let m0_1 := mload(add(base, 0x20))
+                let m1_0 := mload(add(base, 0x40))
+                let m1_1 := mload(add(base, 0x60))
+                let ad_0 := mload(add(base, 0x80))
+                let ad_1 := mload(add(base, 0xa0))
+                let out0 := mload(add(base, 0xc0))
+                let out1 := mload(add(base, 0xe0))
+                // (m0_0, m0_1)·(m1_0, m1_1) in Ext2:
+                let mul_c0 := addmod(mulmod(m0_0, m1_0, p), mulmod(EXT2_W, mulmod(m0_1, m1_1, p), p), p)
+                let mul_c1 := addmod(mulmod(m0_0, m1_1, p), mulmod(m0_1, m1_0, p), p)
+                let comp_c0 := addmod(mulmod(const0, mul_c0, p), mulmod(const1, ad_0, p), p)
+                let comp_c1 := addmod(mulmod(const0, mul_c1, p), mulmod(const1, ad_1, p), p)
+                let diff0 := addmod(out0, sub(p, mod(comp_c0, p)), p)
+                let diff1 := addmod(out1, sub(p, mod(comp_c1, p)), p)
+                let s0 := add(aPtr, mul(constraintIdx, 0x20))
+                mstore(s0, addmod(mload(s0), mulmod(filter, diff0, p), p))
+                let s1 := add(aPtr, mul(add(constraintIdx, 1), 0x20))
+                mstore(s1, addmod(mload(s1), mulmod(filter, diff1, p), p))
+                constraintIdx := add(constraintIdx, 2)
             }
-
-            uint256 comp_c0;
-            uint256 comp_c1;
-            assembly {
-                comp_c0 := addmod(mulmod(const0, mul_c0, p), mulmod(const1, ad_0, p), p)
-                comp_c1 := addmod(mulmod(const0, mul_c1, p), mulmod(const1, ad_1, p), p)
-            }
-
-            uint256 diff0 = F.sub(out0, comp_c0);
-            uint256 diff1 = F.sub(out1, comp_c1);
-            acc[constraintIdx] = acc[constraintIdx].add(filter.mul(diff0));
-            constraintIdx++;
-            acc[constraintIdx] = acc[constraintIdx].add(filter.mul(diff1));
-            constraintIdx++;
         }
     }
 
     /// @dev MulExtensionGate: for i in 0..num_ops,
     ///   output_ext = const_0 · (mult0_ext × mult1_ext)
     /// Wires per op: 3·D = 6. Constraints per op: D = 2.
+    /// Yul-ified.
     function _evalMulExt(
         uint256[] memory wires,
         uint256[] memory preprocessed,
@@ -458,36 +483,32 @@ library Plonky2GateEvaluator {
         uint256 filter,
         uint256[] memory acc
     ) private pure {
-        uint256 const0 = preprocessed[numSelectors];
-        uint256 p = F.P;
-        uint256 constraintIdx = 0;
-        for (uint256 i = 0; i < numOps; i++) {
-            uint256 m0_0 = wires[6 * i];
-            uint256 m0_1 = wires[6 * i + 1];
-            uint256 m1_0 = wires[6 * i + 2];
-            uint256 m1_1 = wires[6 * i + 3];
-            uint256 out0 = wires[6 * i + 4];
-            uint256 out1 = wires[6 * i + 5];
-
-            uint256 mul_c0;
-            uint256 mul_c1;
-            assembly {
-                mul_c0 := addmod(mulmod(m0_0, m1_0, p), mulmod(EXT2_W, mulmod(m0_1, m1_1, p), p), p)
-                mul_c1 := addmod(mulmod(m0_0, m1_1, p), mulmod(m0_1, m1_0, p), p)
+        assembly {
+            let p := 0xFFFFFFFF00000001
+            let wPtr := add(wires, 0x20)
+            let aPtr := add(acc, 0x20)
+            let const0 := mload(add(add(preprocessed, 0x20), mul(numSelectors, 0x20)))
+            let constraintIdx := 0
+            for { let i := 0 } lt(i, numOps) { i := add(i, 1) } {
+                let base := add(wPtr, mul(mul(i, 6), 0x20))
+                let m0_0 := mload(base)
+                let m0_1 := mload(add(base, 0x20))
+                let m1_0 := mload(add(base, 0x40))
+                let m1_1 := mload(add(base, 0x60))
+                let out0 := mload(add(base, 0x80))
+                let out1 := mload(add(base, 0xa0))
+                let mul_c0 := addmod(mulmod(m0_0, m1_0, p), mulmod(EXT2_W, mulmod(m0_1, m1_1, p), p), p)
+                let mul_c1 := addmod(mulmod(m0_0, m1_1, p), mulmod(m0_1, m1_0, p), p)
+                let comp_c0 := mulmod(const0, mul_c0, p)
+                let comp_c1 := mulmod(const0, mul_c1, p)
+                let diff0 := addmod(out0, sub(p, mod(comp_c0, p)), p)
+                let diff1 := addmod(out1, sub(p, mod(comp_c1, p)), p)
+                let s0 := add(aPtr, mul(constraintIdx, 0x20))
+                mstore(s0, addmod(mload(s0), mulmod(filter, diff0, p), p))
+                let s1 := add(aPtr, mul(add(constraintIdx, 1), 0x20))
+                mstore(s1, addmod(mload(s1), mulmod(filter, diff1, p), p))
+                constraintIdx := add(constraintIdx, 2)
             }
-            uint256 comp_c0;
-            uint256 comp_c1;
-            assembly {
-                comp_c0 := mulmod(const0, mul_c0, p)
-                comp_c1 := mulmod(const0, mul_c1, p)
-            }
-
-            uint256 diff0 = F.sub(out0, comp_c0);
-            uint256 diff1 = F.sub(out1, comp_c1);
-            acc[constraintIdx] = acc[constraintIdx].add(filter.mul(diff0));
-            constraintIdx++;
-            acc[constraintIdx] = acc[constraintIdx].add(filter.mul(diff1));
-            constraintIdx++;
         }
     }
 
@@ -512,7 +533,8 @@ library Plonky2GateEvaluator {
                 let limb := mload(add(wPtr, mul(i, 0x20)))
                 computedSum := addmod(mulmod(computedSum, base, p), limb, p)
             }
-            let diff := addmod(computedSum, sub(p, wireSum), p)
+            // SECURITY (C2): self-reduce `wireSum` before field negation.
+            let diff := addmod(computedSum, sub(p, mod(wireSum, p)), p)
             mstore(aPtr, addmod(mload(aPtr), mulmod(filter, diff, p), p))
 
             // Per-limb ∏_{k=0..B} (limb - k).

@@ -238,7 +238,9 @@ library PoseidonGate {
             for { let i := 0 } lt(i, 12) { i := add(i, 1) } {
                 let stI := mload(add(statePtr, mul(i, 0x20)))
                 let outI := mload(add(wPtr, mul(add(i, 12), 0x20)))
-                let diff := addmod(stI, sub(p, outI), p)
+                // SECURITY (C2): self-reduce `outI` (prover-supplied wire)
+                // before negation — see phase3_c2_threat_model.md §6.2.
+                let diff := addmod(stI, sub(p, mod(outI, p)), p)
                 let slot := add(accPtr, mul(add(nextIdx, i), 0x20))
                 mstore(slot, addmod(mload(slot), mulmod(filter, diff, p), p))
             }
@@ -267,13 +269,19 @@ library PoseidonGate {
                 let lhs := mload(add(wPtr, mul(i, 0x20)))
                 let rhs := mload(add(wPtr, mul(add(i, 4), 0x20)))
                 let deltaI := mload(add(wPtr, mul(add(i, START_DELTA), 0x20)))
-                let rmL := addmod(rhs, sub(p, lhs), p)
+                // SECURITY (C2): reduce each prover wire before it enters any
+                // `sub(P, X)` context. Canonical representatives are forced,
+                // and downstream addmod/mulmod remain correct.
+                let lhsR := mod(lhs, p)
+                let rhsR := mod(rhs, p)
+                let deltaR := mod(deltaI, p)
+                let rmL := addmod(rhsR, sub(p, lhsR), p)
                 let tmp := mulmod(swap, rmL, p)
-                let diff := addmod(tmp, sub(p, deltaI), p)
+                let diff := addmod(tmp, sub(p, deltaR), p)
                 let slot := add(accPtr, mul(add(i, 1), 0x20))
                 mstore(slot, addmod(mload(slot), mulmod(filter, diff, p), p))
-                mstore(add(statePtr, mul(i, 0x20)), addmod(lhs, deltaI, p))
-                mstore(add(statePtr, mul(add(i, 4), 0x20)), addmod(rhs, sub(p, deltaI), p))
+                mstore(add(statePtr, mul(i, 0x20)), addmod(lhsR, deltaR, p))
+                mstore(add(statePtr, mul(add(i, 4), 0x20)), addmod(rhsR, sub(p, deltaR), p))
             }
             // state[8..12] = wire_input(8..12)
             for { let i := 8 } lt(i, 12) { i := add(i, 1) } {
@@ -299,12 +307,17 @@ library PoseidonGate {
                 let stSlot := add(statePtr, mul(i, 0x20))
                 let stV := mload(stSlot)
                 let sboxIn := mload(add(wPtr, mul(add(startSbox, i), 0x20)))
-                let diff := addmod(stV, sub(p, sboxIn), p)
+                // SECURITY (C2): reduce the prover-supplied sbox-input before
+                // using it in sub(P, X). Also write the canonical form into
+                // state so future reads are stable (even though downstream
+                // mulmod would self-reduce, this keeps state invariants clean).
+                let sboxInR := mod(sboxIn, p)
+                let diff := addmod(stV, sub(p, sboxInR), p)
                 let contribute := mulmod(f, diff, p)
                 let accSlot := add(accPtr, mul(add(nextIdx, i), 0x20))
                 mstore(accSlot, addmod(mload(accSlot), contribute, p))
-                // state[i] = sbox_in
-                mstore(stSlot, sboxIn)
+                // state[i] = sbox_in (canonical)
+                mstore(stSlot, sboxInR)
             }
         }
         unchecked { return nextIdx + 12; }
@@ -321,7 +334,9 @@ library PoseidonGate {
         assembly {
             let p := P
             let st0 := mload(statePtr)
-            let diff := addmod(st0, sub(p, sboxIn), p)
+            // SECURITY (C2): reduce `sboxIn` before sub(P, X). `sboxIn` is a
+            // single wire value (not looped), so one `mod` is enough.
+            let diff := addmod(st0, sub(p, mod(sboxIn, p)), p)
             let contribute := mulmod(filter, diff, p)
             let slot := add(accPtr, mul(nextIdx, 0x20))
             mstore(slot, addmod(mload(slot), contribute, p))
