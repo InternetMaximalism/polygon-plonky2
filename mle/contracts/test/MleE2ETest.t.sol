@@ -74,6 +74,18 @@ contract MleE2ETest is Test {
         console.log("=== E2E:", fixturePath);
         console.log("  degreeBits:", d.degreeBits);
 
+        // C1: compute expected gatesDigest via the verifier's public helper.
+        // In a real deployment the deployer computes this off-chain and pins
+        // it into the on-chain wrapper; the test harness derives it on the
+        // fly so valid fixtures continue to verify.
+        bytes32 gatesDigest = verifier.computeGatesDigest(
+            d.proof.gates,
+            d.proof.witnessIndividualEvalsAtRGateV2.length,
+            d.proof.numSelectors,
+            d.proof.numGateConstraints,
+            d.proof.quotientDegreeFactor
+        );
+
         MleVerifier.VerifyParams memory vp = MleVerifier.VerifyParams({
             degreeBits: d.degreeBits,
             preprocessedCommitmentRoot: d.preCommitRoot,
@@ -86,7 +98,7 @@ contract MleE2ETest is Test {
         });
 
         uint256 gasBefore = gasleft();
-        bool valid = verifier.verify(d.proof, vp, d.whirParams);
+        bool valid = verifier.verify(d.proof, vp, d.whirParams, gatesDigest);
         uint256 gasUsed = gasBefore - gasleft();
         console.log("  TOTAL verify gas:", gasUsed);
 

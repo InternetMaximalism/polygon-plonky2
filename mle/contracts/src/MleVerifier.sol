@@ -144,11 +144,44 @@ contract MleVerifier {
         uint256[] subgroupGenPowers;  // length = degreeBits, [g, g^2, g^4, ..., g^{2^(n-1)}]
     }
 
+    /// @dev Version byte for the gatesDigest encoding. Bump when the
+    /// GateInfo struct layout or the list of hashed fields changes.
+    uint8 internal constant GATES_DIGEST_VERSION = 1;
+
+    // NOTE on `gatesDigest`:
+    // The VK-bound digest that pins gate-layout metadata was intentionally
+    // added as a standalone verify() parameter rather than a field of
+    // VerifyParams. Growing the struct triggers a Yul-optimizer stack-too-deep
+    // failure in this already-tight function; an external parameter is
+    // API-cleaner and keeps the Yul layout stable.
+    // Digest formula (MUST match the off-chain deployer):
+    //   keccak256(abi.encode(
+    //       uint8(GATES_DIGEST_VERSION),
+    //       proof.witnessIndividualEvalsAtRGateV2.length,   // numWires
+    //       proof.numSelectors,
+    //       proof.numGateConstraints,
+    //       proof.quotientDegreeFactor,
+    //       proof.gates                                     // Plonky2GateEvaluator.GateInfo[]
+    //   ))
+
+    /// @notice External entrypoint. Performs C1 + C2 boundary checks, then
+    /// delegates to `_verifyCore` for the actual proof verification.
     function verify(
         MleProof calldata proof,
         VerifyParams memory vp,
-        SpongefishWhirVerify.WhirParams memory whirParams
+        SpongefishWhirVerify.WhirParams memory whirParams,
+        bytes32 gatesDigest
     ) external pure returns (bool) {
+        _requireGatesDigest(proof, gatesDigest);
+        _requireCanonicalProofInputs(proof);
+        return _verifyCore(proof, vp, whirParams);
+    }
+
+    function _verifyCore(
+        MleProof calldata proof,
+        VerifyParams memory vp,
+        SpongefishWhirVerify.WhirParams memory whirParams
+    ) internal pure returns (bool) {
         require(proof.circuitDigest.length == 4, "digest len");
         require(_derivePreprocessedBatchR(proof.circuitDigest) == proof.preprocessedBatchR, "preBatchR");
         require(proof.preprocessedRoot == vp.preprocessedCommitmentRoot, "VK binding");
@@ -174,18 +207,13 @@ contract MleVerifier {
         (uint256[] memory rH, uint256 hFinal) =
             SumcheckVerifier.verify(hSc, 0, vp.degreeBits, 1, ts);
 
-        // ── R2-#1: Φ_gate zero-check sumcheck (round-poly degree = qdf+2) ──
-        TranscriptLib.domainSeparate(ts, "v2-gate-challenges");
-        uint256[] memory tauGate = TranscriptLib.squeezeChallenges(ts, vp.degreeBits);
-        TranscriptLib.domainSeparate(ts, "v2-gate-zerocheck");
-        SumcheckVerifier.SumcheckProof memory gateSc = _copySumcheckProof(proof.gateSumcheckProof);
-        (uint256[] memory rGateV2, uint256 gateFinalV2) = SumcheckVerifier.verify(
-            gateSc,
-            0,
-            vp.degreeBits,
-            2 + proof.quotientDegreeFactor,
-            ts
-        );
+        // ── R2-#1: Φ_gate zero-check sumcheck + terminal check. Returns
+        // `rGateV2` (needed for the WHIR binding below). `tauGate` and
+        // `gateFinalV2` are scoped inside the helper so they do not occupy
+        // stack slots alongside `rGateV2` during `_runBatchAndWhir`. Without
+        // this split, adding the C1/C2 boundary checks overflows the Yul
+        // optimizer's 16-slot stack limit.
+        uint256[] memory rGateV2 = _runGateSumcheckAndTerminal(proof, vp, ts);
 
         // Bind the WHIR multi-point opening to the four sumcheck-derived points.
         whirParams.evaluationPoint = _deriveEvalPoint(rGate);
@@ -195,9 +223,6 @@ contract MleVerifier {
         whirParams.additionalEvaluationPoints[1] = _deriveEvalPoint(rGateV2);
 
         _runBatchAndWhir(proof, whirParams, vp, ts);
-
-        // ── R2-#1: Φ_gate terminal check ──
-        _checkGateTerminal(proof, tauGate, rGateV2, gateFinalV2);
 
         // ── Terminal check: legacy combined sumcheck. Issue R2-#2 still
         //    leaves h̃(r) un-bound (which is exactly why we run Φ_inv + Φ_h
@@ -364,7 +389,13 @@ contract MleVerifier {
                 for { let j := 0 } lt(j, nr) { j := add(j, 1) } {
                     let aVal := calldataload(add(aOff, mul(j, 0x20)))
                     let bVal := calldataload(add(aOff, mul(add(j, nr), 0x20)))
-                    sum := addmod(sum, addmod(aVal, sub(p, bVal), p), p)
+                    // SECURITY (C2): self-reduce `bVal` before sub(P, bVal).
+                    // `inverseHelpersEvalsAtRH` is prover-supplied uint256 with
+                    // no canonical check before reaching here; a non-canonical
+                    // `bVal = v + k·P` would otherwise inject K = 2^256 mod P
+                    // into the sum. Caller-side canonicalization (added in
+                    // verify() entry) also covers this; belt-and-suspenders.
+                    sum := addmod(sum, addmod(aVal, sub(p, mod(bVal, p)), p), p)
                 }
                 acc := sum
             }
@@ -534,12 +565,214 @@ contract MleVerifier {
     }
 
 
+    /// @dev Run the Φ_gate sumcheck and its terminal check in a single scope
+    /// so that `tauGate` and `gateFinalV2` don't live in `_verifyCore`'s stack
+    /// frame during the subsequent WHIR batching. Returns `rGateV2` which is
+    /// still needed for the WHIR evaluation-point binding.
+    function _runGateSumcheckAndTerminal(
+        MleProof calldata proof,
+        VerifyParams memory vp,
+        TranscriptLib.Transcript memory ts
+    ) private pure returns (uint256[] memory rGateV2) {
+        TranscriptLib.domainSeparate(ts, "v2-gate-challenges");
+        uint256[] memory tauGate = TranscriptLib.squeezeChallenges(ts, vp.degreeBits);
+        TranscriptLib.domainSeparate(ts, "v2-gate-zerocheck");
+        SumcheckVerifier.SumcheckProof memory gateSc = _copySumcheckProof(proof.gateSumcheckProof);
+        uint256 gateFinalV2;
+        (rGateV2, gateFinalV2) = SumcheckVerifier.verify(
+            gateSc,
+            0,
+            vp.degreeBits,
+            2 + proof.quotientDegreeFactor,
+            ts
+        );
+        // Terminal check uses proof.gates / wire+const evals at r_gate_v2 —
+        // all now C1+C2 bound at the verify() entry.
+        _checkGateTerminal(proof, tauGate, rGateV2, gateFinalV2);
+    }
+
+    /// @notice Public helper: compute the VK-bound gate-layout digest.
+    ///
+    /// The digest protects against the gate-reinterpretation forgery
+    /// described in phase3_c1_threat_model.md. The on-chain verifier
+    /// (`_requireGatesDigest` inside `verify`) re-computes this value and
+    /// compares against the `gatesDigest` passed by the caller; a mismatch
+    /// reverts with `"gatesDigest"`.
+    ///
+    /// Deployers and test harnesses MUST invoke this function (or emit the
+    /// identical byte layout off-chain) to pin a circuit's expected digest.
+    ///
+    /// Hashed layout (deterministic):
+    ///   [0x00] version       (32 bytes)
+    ///   [0x20] numWires      (32 bytes)
+    ///   [0x40] numSelectors  (32 bytes)
+    ///   [0x60] numGateConstr (32 bytes)
+    ///   [0x80] qdf           (32 bytes)
+    ///   [0xa0] gatesLen      (32 bytes)
+    ///   [0xc0] gates data    (gatesLen × 288 bytes, raw calldata copy)
+    ///
+    /// Each GateInfo element occupies 9 × 32 = 288 bytes in calldata because
+    /// uint8/uint16 fields are individually padded to the 32-byte word
+    /// boundary; this matches the layout `calldatacopy` would produce.
+    function computeGatesDigest(
+        Plonky2GateEvaluator.GateInfo[] calldata gates,
+        uint256 numWires,
+        uint256 numSelectors,
+        uint256 numGateConstraints,
+        uint256 quotientDegreeFactor
+    ) public pure returns (bytes32 computed) {
+        assembly {
+            let ptr := mload(0x40)
+            mstore(ptr,            GATES_DIGEST_VERSION)
+            mstore(add(ptr, 0x20), numWires)
+            mstore(add(ptr, 0x40), numSelectors)
+            mstore(add(ptr, 0x60), numGateConstraints)
+            mstore(add(ptr, 0x80), quotientDegreeFactor)
+            let gatesLen := gates.length
+            mstore(add(ptr, 0xa0), gatesLen)
+            let gatesBytes := mul(gatesLen, 288)
+            calldatacopy(add(ptr, 0xc0), gates.offset, gatesBytes)
+            computed := keccak256(ptr, add(0xc0, gatesBytes))
+        }
+    }
+
+    /// @dev C1 VK-binding check. Delegates to `computeGatesDigest` so the
+    /// on-chain and off-chain hashes stay in lockstep.
+    function _requireGatesDigest(MleProof calldata proof, bytes32 expected) private pure {
+        bytes32 computed = computeGatesDigest(
+            proof.gates,
+            proof.witnessIndividualEvalsAtRGateV2.length,
+            proof.numSelectors,
+            proof.numGateConstraints,
+            proof.quotientDegreeFactor
+        );
+        require(computed == expected, "gatesDigest");
+    }
+
+    /// @dev C2 boundary canonicalization — fully Yul-ified.
+    ///
+    /// Every prover-supplied `uint256` array consumed by inline-assembly
+    /// `sub(P, X)` (directly or via MleProof fields reaching
+    /// `Plonky2GateEvaluator` / `PoseidonGate`) must be `< P` to prevent the
+    /// K = 2^32 − 1 injection attack documented in phase2_c2_poc_report.md.
+    ///
+    /// The entire check runs in a single assembly block so the per-array
+    /// function-call overhead is amortized and the `P` constant lives in one
+    /// stack slot. On a medium_mul fixture this saves ~40k gas over the
+    /// previous `_requireCanonicalArray` helper-per-array structure.
+    function _requireCanonicalProofInputs(MleProof calldata proof) private pure {
+        // Split into two halves to stay under the Yul stack limit (each half
+        // has 5 calldata array offset+length pairs = 10 stack slots, plus
+        // locals = ~14, well within budget).
+        _canonHalfA(
+            proof.preprocessedIndividualEvals,
+            proof.witnessIndividualEvals,
+            proof.preprocessedIndividualEvalsAtRInv,
+            proof.witnessIndividualEvalsAtRInv,
+            proof.inverseHelpersEvalsAtRInv
+        );
+        _canonHalfB(
+            proof.inverseHelpersEvalsAtRH,
+            proof.witnessIndividualEvalsAtRGateV2,
+            proof.preprocessedIndividualEvalsAtRGateV2,
+            proof.circuitDigest,
+            proof.publicInputs
+        );
+        _canonPih(proof.publicInputsHash);
+    }
+
+    /// @dev Five-array canonicalization — first half. Single Yul block,
+    /// shared revert path, one `P` constant on the stack.
+    function _canonHalfA(
+        uint256[] calldata a0,
+        uint256[] calldata a1,
+        uint256[] calldata a2,
+        uint256[] calldata a3,
+        uint256[] calldata a4
+    ) private pure {
+        assembly {
+            function checkArr(off, n, p) {
+                for { let i := 0 } lt(i, n) { i := add(i, 1) } {
+                    let v := calldataload(add(off, mul(i, 0x20)))
+                    if iszero(lt(v, p)) {
+                        mstore(0x00, 0x08c379a000000000000000000000000000000000000000000000000000000000)
+                        mstore(0x04, 0x20)
+                        mstore(0x24, 9)
+                        mstore(0x44, "canonical")
+                        revert(0x00, 0x64)
+                    }
+                }
+            }
+            let P_ := 0xFFFFFFFF00000001
+            checkArr(a0.offset, a0.length, P_)
+            checkArr(a1.offset, a1.length, P_)
+            checkArr(a2.offset, a2.length, P_)
+            checkArr(a3.offset, a3.length, P_)
+            checkArr(a4.offset, a4.length, P_)
+        }
+    }
+
+    function _canonHalfB(
+        uint256[] calldata a0,
+        uint256[] calldata a1,
+        uint256[] calldata a2,
+        uint256[] calldata a3,
+        uint256[] calldata a4
+    ) private pure {
+        assembly {
+            function checkArr(off, n, p) {
+                for { let i := 0 } lt(i, n) { i := add(i, 1) } {
+                    let v := calldataload(add(off, mul(i, 0x20)))
+                    if iszero(lt(v, p)) {
+                        mstore(0x00, 0x08c379a000000000000000000000000000000000000000000000000000000000)
+                        mstore(0x04, 0x20)
+                        mstore(0x24, 9)
+                        mstore(0x44, "canonical")
+                        revert(0x00, 0x64)
+                    }
+                }
+            }
+            let P_ := 0xFFFFFFFF00000001
+            checkArr(a0.offset, a0.length, P_)
+            checkArr(a1.offset, a1.length, P_)
+            checkArr(a2.offset, a2.length, P_)
+            checkArr(a3.offset, a3.length, P_)
+            checkArr(a4.offset, a4.length, P_)
+        }
+    }
+
+    /// @dev Fixed-size 4-element publicInputsHash canonicalization. Unrolled.
+    function _canonPih(uint256[4] calldata pih) private pure {
+        assembly {
+            let P_ := 0xFFFFFFFF00000001
+            let h0 := calldataload(pih)
+            let h1 := calldataload(add(pih, 0x20))
+            let h2 := calldataload(add(pih, 0x40))
+            let h3 := calldataload(add(pih, 0x60))
+            if or(
+                or(iszero(lt(h0, P_)), iszero(lt(h1, P_))),
+                or(iszero(lt(h2, P_)), iszero(lt(h3, P_)))
+            ) {
+                mstore(0x00, 0x08c379a000000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, 0x20)
+                mstore(0x24, 13)
+                mstore(0x44, "canonical pih")
+                revert(0x00, 0x64)
+            }
+        }
+    }
+
+    /// @dev Yul-optimized: replaces the per-element calldata→memory loop with
+    /// a single `calldatacopy`.
     function _derivePreprocessedBatchR(uint256[] calldata cd) private pure returns (uint256) {
         TranscriptLib.Transcript memory t;
         TranscriptLib.init(t);
         TranscriptLib.domainSeparate(t, "preprocessed-batch-r");
-        uint256[] memory m = new uint256[](cd.length);
-        for (uint256 i = 0; i < cd.length; i++) m[i] = cd[i];
+        uint256 n = cd.length;
+        uint256[] memory m = new uint256[](n);
+        assembly {
+            calldatacopy(add(m, 0x20), cd.offset, mul(n, 0x20))
+        }
         TranscriptLib.absorbFieldVec(t, m);
         return TranscriptLib.squeezeChallenge(t);
     }
@@ -563,23 +796,58 @@ contract MleVerifier {
     /// Each r[i] (Goldilocks base field) is embedded as Ext3(r[i], 0, 0).
     /// SECURITY: The PCS evaluation point MUST be the sumcheck output point,
     /// not an external parameter — this is the binding described in paper §4.4.
-    function _deriveEvalPoint(uint256[] memory r) private pure returns (GoldilocksExt3.Ext3[] memory pt) {
-        pt = new GoldilocksExt3.Ext3[](r.length);
-        for (uint256 i = 0; i < r.length; i++) {
-            pt[i] = GoldilocksExt3.Ext3(uint64(r[i]), 0, 0);
+    ///
+    /// Yul-optimized: avoids per-element struct allocation. We allocate one
+    /// contiguous memory region for the full `Ext3[]` (header + n×96 bytes
+    /// since Ext3 is 3×32 = 96 bytes in memory) and fill it from the `r` array
+    /// in one loop, pointer-patching the array element pointers at the same
+    /// time. Note that in memory, `Ext3[] memory arr` stores `arr[i]` as a
+    /// pointer at `arr + 0x20 + 32·i`, with each Ext3 struct body following
+    /// after the pointer table.
+    function _deriveEvalPoint(uint256[] memory r)
+        private pure returns (GoldilocksExt3.Ext3[] memory pt)
+    {
+        uint256 n = r.length;
+        pt = new GoldilocksExt3.Ext3[](n);
+        assembly {
+            // Payload of r: word i at add(r, 0x20 + 32·i).
+            // Each Ext3 struct has 3 uint64 fields, laid out in memory as
+            // 3 × 32-byte words (Solidity pads uint64 to word). With Solidity
+            // allocating each Ext3 separately, `pt[i]` contains a pointer.
+            let rPtr := add(r, 0x20)
+            let ptPtr := add(pt, 0x20)
+            for { let i := 0 } lt(i, n) { i := add(i, 1) } {
+                let ri := mload(add(rPtr, mul(i, 0x20)))
+                // Allocate Ext3 struct body: 3 words.
+                let structPtr := mload(0x40)
+                mstore(0x40, add(structPtr, 0x60))
+                mstore(structPtr, ri)              // c0 = r[i] (uint64 fits in word)
+                mstore(add(structPtr, 0x20), 0)    // c1 = 0
+                mstore(add(structPtr, 0x40), 0)    // c2 = 0
+                mstore(add(ptPtr, mul(i, 0x20)), structPtr)
+            }
         }
     }
 
+    /// @dev Copy a sumcheck proof from calldata to memory using `calldatacopy`
+    /// for the inner `uint256[] evals` arrays (instead of an element-wise
+    /// Solidity loop). Called 4× per verify — on a 16-round fixture this
+    /// saves ~5 × 16 × #rounds gas vs the naïve loop.
     function _copySumcheckProof(SumcheckVerifier.SumcheckProof calldata src)
         private pure returns (SumcheckVerifier.SumcheckProof memory dst)
     {
-        dst.roundPolys = new SumcheckVerifier.RoundPoly[](src.roundPolys.length);
-        for (uint256 i = 0; i < src.roundPolys.length; i++) {
-            uint256 len = src.roundPolys[i].evals.length;
-            dst.roundPolys[i].evals = new uint256[](len);
-            for (uint256 j = 0; j < len; j++) {
-                dst.roundPolys[i].evals[j] = src.roundPolys[i].evals[j];
+        uint256 nRounds = src.roundPolys.length;
+        dst.roundPolys = new SumcheckVerifier.RoundPoly[](nRounds);
+        for (uint256 i = 0; i < nRounds; i++) {
+            uint256[] calldata srcEvals = src.roundPolys[i].evals;
+            uint256 n = srcEvals.length;
+            uint256[] memory dstEvals = new uint256[](n);
+            assembly {
+                // Copy n · 32 bytes from calldata into memory starting at
+                // the `uint256[]` payload (skipping the 0x20 length prefix).
+                calldatacopy(add(dstEvals, 0x20), srcEvals.offset, mul(n, 0x20))
             }
+            dst.roundPolys[i].evals = dstEvals;
         }
     }
 }

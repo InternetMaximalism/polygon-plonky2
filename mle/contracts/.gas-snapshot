@@ -1,0 +1,6 @@
+MleE2ETest:test_e2e_huge_mul() (gas: 20443089)
+MleE2ETest:test_e2e_large_mul() (gas: 8307890)
+MleE2ETest:test_e2e_medium_mul() (gas: 6528091)
+MleE2ETest:test_e2e_poseidon_hash() (gas: 5286479)
+MleE2ETest:test_e2e_recursive_verify() (gas: 16612816)
+MleE2ETest:test_e2e_small_mul() (gas: 5367614)
