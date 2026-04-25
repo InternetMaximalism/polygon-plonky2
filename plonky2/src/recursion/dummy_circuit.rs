@@ -128,7 +128,12 @@ where
     let mut pw = PartialWitness::new();
     for i in 0..circuit.common.num_public_inputs {
         let pi = nonzero_public_inputs.get(&i).copied().unwrap_or_default();
-        pw.set_target(circuit.prover_only.public_inputs[i], pi);
+        // SECURITY (H-1): the sync sibling propagates this Result with `?`;
+        // dropping it silently would let `set_target` failures (e.g. the
+        // target already being assigned to a conflicting value) advance the
+        // prover with an inconsistent witness, producing either a later
+        // panic or a malformed proof.
+        pw.set_target(circuit.prover_only.public_inputs[i], pi)?;
     }
     circuit.prove_async(pw).await
 }

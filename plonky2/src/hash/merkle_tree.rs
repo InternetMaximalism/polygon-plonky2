@@ -11,7 +11,7 @@ use super::merkle_tree_gpu;
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
 use wasm_bindgen::JsCast;
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
-use crate::hash::hash_types::HashOut;
+use crate::hash::hash_types::{HashOut, NUM_HASH_OUT_ELTS};
 use crate::hash::hash_types::RichField;
 use crate::hash::merkle_proofs::MerkleProof;
 use crate::plonk::config::{GenericHashOut, Hasher};
@@ -301,6 +301,17 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
             return Self::build_cpu(leaves, cap_height);
         }
 
+        // SECURITY (Attacker C1): the WGSL leaf-hash kernel always applies
+        // the Poseidon permutation, but the CPU `Hasher::hash_or_noop` skips
+        // the permutation when `inputs.len() * 8 <= H::HASH_SIZE` (returning
+        // the zero-padded canonical bytes directly). For short leaves the GPU
+        // and CPU paths therefore disagree on the leaf digest, producing
+        // mismatched Merkle roots. Fall back to CPU whenever a leaf is short
+        // enough to trigger the no-op branch on the verifier side.
+        if elems_per_leaf * core::mem::size_of::<F>() <= H::HASH_SIZE {
+            return Self::build_cpu(leaves, cap_height);
+        }
+
         // Fall back to CPU when WASM memory is above 3.5GB to avoid OOM.
         // The GPU path requires a staging buffer (~2x digest size) that the CPU path doesn't need.
         {
@@ -361,18 +372,31 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
 
     #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
     fn from_gpu_output(leaves: Vec<Vec<F>>, output: merkle_tree_gpu::GpuMerkleOutput<F>) -> Self {
-        // SECURITY: the WGSL Merkle kernels are hard-coded to Poseidon-Goldilocks
-        // and emit `HashOut<F>` digests. We convert each digest to `H::Hash`
-        // through `GenericHashOut::to_bytes`/`from_bytes`, which is the identity
-        // when `H::Hash == HashOut<F>` (the only sound configuration: e.g.
-        // `PoseidonGoldilocksConfig`). For any other hasher this round-trip
-        // produces an `H::Hash` value whose bytes do not match what `H` would
-        // have computed; the resulting Merkle root will not pass verifier
-        // checks against `H`. That is a *liveness* failure (proof rejected),
-        // not a *soundness* failure (invalid proof accepted) — which is the
-        // safety property we must preserve. This avoids the `mem::transmute`
-        // used by the upstream Lita code, whose layout assumption was UB
-        // whenever `H::Hash != HashOut<F>`.
+        // SECURITY (Attacker C2 / M-1): the WGSL Merkle kernels are hard-coded
+        // to Poseidon-Goldilocks and emit `HashOut<F>` digests (32 bytes:
+        // `NUM_HASH_OUT_ELTS * size_of::<F>()`). The bytes round-trip below
+        // is sound *only* when `H::HASH_SIZE` matches that footprint:
+        //   - If `H::HASH_SIZE > 32`, `H::Hash::from_bytes` would read out
+        //     of bounds.
+        //   - If `H::HASH_SIZE < 32`, bytes would be silently truncated.
+        // Reject unsupported hashers loudly here. The check is a single
+        // const-evaluable comparison per call (constant-folded in release).
+        let expected_hash_bytes = NUM_HASH_OUT_ELTS * core::mem::size_of::<F>();
+        assert_eq!(
+            H::HASH_SIZE,
+            expected_hash_bytes,
+            "GPU Merkle output is only valid when H::HASH_SIZE matches HashOut<F>; \
+             refusing to convert digests for an incompatible hasher"
+        );
+
+        // For `H::Hash == HashOut<F>` (e.g. `PoseidonGoldilocksConfig`) the
+        // round-trip is byte-for-byte identity. For any other hasher with the
+        // same `HASH_SIZE` (e.g. `KeccakHash<32>`) the resulting digests will
+        // not match what `H` itself would have computed, so the verifier
+        // rejects the proof — a liveness failure, not a soundness failure
+        // (which is the safety property we must preserve). This avoids the
+        // `mem::transmute` used by upstream Lita, whose layout assumption was
+        // UB whenever `H::Hash != HashOut<F>`.
         let merkle_tree_gpu::GpuMerkleOutput { digests, cap } = output;
         let digests: Vec<H::Hash> = digests
             .into_iter()

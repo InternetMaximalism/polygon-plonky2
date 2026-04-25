@@ -559,6 +559,13 @@ pub struct ProverPolynomials<F: RichField + Extendable<D>, const D: usize> {
 /// The standard `prove()` discards the polynomial batches after computing
 /// the FRI proof.  This function preserves them so that WHIR can commit
 /// to the same polynomials and prove evaluations at ζ.
+///
+/// SECURITY (H-2): not yet ported to the async/GPU pipeline. On
+/// `wasm32 + gpu_merkle` the underlying `prove_openings` it transitively
+/// calls is a panic stub, so this function is gated to the CPU path.
+/// Adding `prove_with_polys_async` is a follow-up; until then, callers
+/// on wasm-gpu must use one of the supported `*_async` entry points.
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove_with_polys<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
@@ -578,7 +585,33 @@ where
     prove_with_partition_witness_and_polys(prover_data, common_data, partition_witness, timing)
 }
 
+/// SECURITY (H-2): explicit panic stub on `wasm32 + gpu_merkle` so that
+/// callers get a clear error at the entry point rather than a deeper
+/// panic from `fri::prover::fri_proof`. An async variant
+/// (`prove_with_polys_async`) is a planned follow-up.
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+#[track_caller]
+pub fn prove_with_polys<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+    _prover_data: &ProverOnlyCircuitData<F, C, D>,
+    _common_data: &CommonCircuitData<F, D>,
+    _inputs: PartialWitness<F>,
+    _timing: &mut TimingTree,
+) -> Result<(ProofWithPublicInputs<F, C, D>, ProverPolynomials<F, D>)>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    panic!(
+        "plonk::prover::prove_with_polys is not yet supported on wasm with gpu_merkle enabled; \
+         no async variant has been ported"
+    );
+}
+
 /// Like `prove_with_partition_witness()`, but also returns polynomial data.
+///
+/// SECURITY (H-2): also gated on non-wasm-gpu since it transitively calls
+/// the sync `prove_openings`, which is a panic stub on wasm-gpu.
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove_with_partition_witness_and_polys<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,

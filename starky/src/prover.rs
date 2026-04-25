@@ -208,6 +208,13 @@ where
 
         let trace_cap = trace_commitment.merkle_tree.cap.clone();
         let mut challenger = Challenger::new();
+        // SECURITY (C-1): match the sync `prove` Fiat-Shamir transcript exactly.
+        // `StarkProofWithPublicInputs::get_challenges` (verifier side) observes
+        // public_inputs first, then config, then trace_cap (in that order).
+        // Lita's wasm-gpu prove_async originally only observed trace_cap, so
+        // every async-built proof failed verification.
+        challenger.observe_elements(public_inputs);
+        config.observe(&mut challenger);
         challenger.observe_cap(&trace_cap);
 
         prove_with_commitment_async(
@@ -761,7 +768,16 @@ where
             challenger.observe_cap(cap);
         }
 
-        let alphas = challenger.get_n_challenges(config.num_challenges);
+        // SECURITY (C-2): mirror the constraint-binding stage from the sync
+        // `prove_with_commitment` (lines ~361-492). Lita's async port jumped
+        // straight from `auxiliary_polys_cap` observation to `alphas =
+        // get_n_challenges`, skipping `alphas_prime`, the simulating-zeta
+        // sampling, dummy opening-set evaluation, `zeta_prime`,
+        // `compute_eval_vanishing_poly`, and the `observe_extension_elements`
+        // step that the verifier (`get_challenges`) performs. Without these,
+        // the prover's `alphas` and the verifier's `alphas` differ on every
+        // run, so all proofs are silently rejected.
+        let alphas_prime = challenger.get_n_challenges(config.num_challenges);
 
         let num_ctl_polys = ctl_data
             .map(|data| data.num_ctl_helper_polys())
@@ -777,12 +793,107 @@ where
                 lookup_challenges.as_ref(),
                 &lookups,
                 ctl_data,
-                alphas.clone(),
+                alphas_prime.clone(),
                 degree_bits,
                 num_lookup_columns,
                 &num_ctl_polys,
             );
         }
+
+        // Constraint-binding ritual: sample dummy opening evaluations,
+        // evaluate the vanishing polynomial against them, and observe the
+        // result so that the upcoming `alphas` are bound to the constraints.
+        let is_aux_polys = auxiliary_polys_commitment.is_some();
+        let num_auxiliary_polys = auxiliary_polys_commitment
+            .as_ref()
+            .map_or(0, |p| p.polynomials.len());
+        let total_num_ctl_polys = num_ctl_polys.iter().sum::<usize>();
+        let total_num_dummy_extension_evals =
+            trace_commitment.polynomials.len() * 2 + num_auxiliary_polys * 2;
+        let pow_degree = core::cmp::max(2, stark.constraint_degree() + 1);
+        let num_extension_powers = core::cmp::max(1, 50 / log2_ceil(pow_degree) - 1);
+        let simulating_zetas = challenger.get_n_extension_challenges(
+            total_num_dummy_extension_evals.div_ceil(num_extension_powers),
+        );
+        let nb_dummy_per_zeta =
+            core::cmp::min(num_extension_powers + 1, total_num_dummy_extension_evals);
+        let dummy_extension_evals = simulating_zetas
+            .iter()
+            .flat_map(|&zeta| {
+                successors(Some(zeta), move |prev| Some(prev.exp_u64(pow_degree as u64)))
+                    .take(nb_dummy_per_zeta)
+            })
+            .collect::<Vec<_>>();
+
+        let next_values_start = S::COLUMNS;
+        let auxiliary_polys_start = S::COLUMNS * 2;
+        let auxiliary_polys_next_start = auxiliary_polys_start + num_auxiliary_polys;
+
+        let poly_evals = StarkOpeningSet {
+            local_values: dummy_extension_evals[..next_values_start].to_vec(),
+            next_values: dummy_extension_evals[next_values_start..auxiliary_polys_start].to_vec(),
+            auxiliary_polys: if is_aux_polys {
+                Some(
+                    dummy_extension_evals[auxiliary_polys_start..auxiliary_polys_next_start]
+                        .to_vec(),
+                )
+            } else {
+                None
+            },
+            auxiliary_polys_next: if is_aux_polys {
+                Some(dummy_extension_evals[auxiliary_polys_next_start..].to_vec())
+            } else {
+                None
+            },
+            ctl_zs_first: None,
+            quotient_polys: None,
+        };
+
+        let ctl_vars = ctl_data.map(|data| {
+            let mut start_index = 0;
+            data.zs_columns
+                .iter()
+                .enumerate()
+                .map(|(i, zs_columns)| {
+                    let num_ctl_helper_cols = num_ctl_polys[i];
+                    let helper_columns = poly_evals.auxiliary_polys.as_ref().unwrap()
+                        [num_lookup_columns + start_index
+                            ..num_lookup_columns + start_index + num_ctl_helper_cols]
+                        .to_vec();
+                    let ctl_vars = CtlCheckVars::<F, F::Extension, F::Extension, D> {
+                        helper_columns,
+                        local_z: poly_evals.auxiliary_polys.as_ref().unwrap()
+                            [num_lookup_columns + total_num_ctl_polys + i],
+                        next_z: poly_evals.auxiliary_polys_next.as_ref().unwrap()
+                            [num_lookup_columns + total_num_ctl_polys + i],
+                        challenges: zs_columns.challenge,
+                        columns: zs_columns.columns.clone(),
+                        filter: zs_columns.filter.clone(),
+                    };
+                    start_index += num_ctl_helper_cols;
+                    ctl_vars
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let zeta_prime = challenger.get_extension_challenge::<D>();
+
+        let constraints = compute_eval_vanishing_poly::<F, S, D>(
+            stark,
+            &poly_evals,
+            ctl_vars.as_deref(),
+            lookup_challenges.as_ref(),
+            &lookups,
+            public_inputs,
+            alphas_prime.clone(),
+            zeta_prime,
+            degree_bits,
+            num_lookup_columns,
+        );
+
+        challenger.observe_extension_elements(&constraints);
+
+        let alphas = challenger.get_n_challenges(config.num_challenges);
 
         let quotient_polys = timed!(
             timing,
