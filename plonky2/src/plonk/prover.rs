@@ -663,6 +663,13 @@ where
 
     let mut challenger = Challenger::<F, C::Hasher>::new();
 
+    // SECURITY: align Fiat-Shamir transcript with the standard verifier
+    // (`StarkProof::get_challenges` / `plonk::get_challenges`), which
+    // observes `fri_params` first. Without this observation
+    // `prove_with_polys` produces proofs that fail standard verification
+    // ("vanishing_polys_zeta[i] == z_h_zeta * reduce_with_powers(...)").
+    common_data.fri_params.observe(&mut challenger);
+
     challenger.observe_hash::<C::Hasher>(prover_data.circuit_digest);
     challenger.observe_hash::<C::InnerHasher>(public_inputs_hash);
     challenger.observe_cap::<C::Hasher>(&wires_commitment.merkle_tree.cap);
