@@ -820,8 +820,10 @@ where
         let dummy_extension_evals = simulating_zetas
             .iter()
             .flat_map(|&zeta| {
-                successors(Some(zeta), move |prev| Some(prev.exp_u64(pow_degree as u64)))
-                    .take(nb_dummy_per_zeta)
+                successors(Some(zeta), move |prev| {
+                    Some(prev.exp_u64(pow_degree as u64))
+                })
+                .take(nb_dummy_per_zeta)
             })
             .collect::<Vec<_>>();
 

@@ -626,9 +626,9 @@ mod tests {
                             },
                         }],
                     }],
-                    final_poly: crate::gadgets::polynomial::PolynomialCoeffsExtTarget(vec![
-                        ext(80),
-                    ]),
+                    final_poly: crate::gadgets::polynomial::PolynomialCoeffsExtTarget(vec![ext(
+                        80,
+                    )]),
                     pow_witness: t(90),
                 },
             },

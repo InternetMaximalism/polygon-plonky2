@@ -50,10 +50,10 @@ use crate::plonk::copy_constraint::CopyConstraint;
 use crate::plonk::permutation_argument::Forest;
 use crate::plonk::plonk_common::PlonkOracle;
 use crate::timed;
-use crate::util::profiling::{with_timer, with_timer_async};
 use crate::util::builder_hook::BuilderHookRef;
 use crate::util::context_tree::ContextTree;
 use crate::util::partial_products::num_partial_products;
+use crate::util::profiling::{with_timer, with_timer_async};
 use crate::util::timing::TimingTree;
 use crate::util::{log2_ceil, log2_strict, transpose, transpose_poly_values};
 
@@ -1181,10 +1181,10 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let mut gates = self.gates.iter().cloned().collect::<Vec<_>>();
         // Gates need to be sorted by their degrees (and ID to make the ordering deterministic) to compute the selector polynomials.
         gates.sort_unstable_by_key(|g| (g.0.degree(), g.0.id()));
-        let (mut constant_vecs, selectors_info) = with_timer(
-            "circuit_builder::selector polynomials",
-            || selector_polynomials(&gates, &self.gate_instances, quotient_degree_factor + 1),
-        );
+        let (mut constant_vecs, selectors_info) =
+            with_timer("circuit_builder::selector polynomials", || {
+                selector_polynomials(&gates, &self.gate_instances, quotient_degree_factor + 1)
+            });
 
         // Get the lookup selectors.
         let num_lookup_selectors = if num_luts != 0 {
@@ -1204,9 +1204,8 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             0
         };
 
-        let extra_constants = with_timer("circuit_builder::constant polys", || {
-            self.constant_polys()
-        });
+        let extra_constants =
+            with_timer("circuit_builder::constant polys", || self.constant_polys());
         constant_vecs.extend(extra_constants);
         let num_constants = constant_vecs.len();
 
@@ -1402,21 +1401,20 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let num_luts = self.get_luts_length();
         // Hash the public inputs, and route them to a `PublicInputGate` which will enforce that
         // those hash wires match the claimed public inputs.
-        let (num_public_inputs, pi_gate) =
-            with_timer("circuit_builder::public inputs", || {
-                let num_public_inputs = self.public_inputs.len();
-                let public_inputs_hash =
-                    self.hash_n_to_hash_no_pad::<C::InnerHasher>(self.public_inputs.clone());
-                let pi_gate = self.add_gate(PublicInputGate, vec![]);
-                for (&hash_part, wire) in public_inputs_hash
-                    .elements
-                    .iter()
-                    .zip(PublicInputGate::wires_public_inputs_hash())
-                {
-                    self.connect(hash_part, Target::wire(pi_gate, wire))
-                }
-                (num_public_inputs, pi_gate)
-            });
+        let (num_public_inputs, pi_gate) = with_timer("circuit_builder::public inputs", || {
+            let num_public_inputs = self.public_inputs.len();
+            let public_inputs_hash =
+                self.hash_n_to_hash_no_pad::<C::InnerHasher>(self.public_inputs.clone());
+            let pi_gate = self.add_gate(PublicInputGate, vec![]);
+            for (&hash_part, wire) in public_inputs_hash
+                .elements
+                .iter()
+                .zip(PublicInputGate::wires_public_inputs_hash())
+            {
+                self.connect(hash_part, Target::wire(pi_gate, wire))
+            }
+            (num_public_inputs, pi_gate)
+        });
         self.randomize_unused_pi_wires(pi_gate);
 
         // Place LUT-related gates.

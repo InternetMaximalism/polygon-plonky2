@@ -4,22 +4,21 @@
 use alloc::{format, vec, vec::Vec};
 use core::cmp::min;
 use core::mem::swap;
+#[cfg(feature = "std")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+use std::time::Instant;
 
 use anyhow::{ensure, Result};
+use hashbrown::HashMap;
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+use js_sys::Date;
+use plonky2_maybe_rayon::*;
 #[cfg(all(
     feature = "std",
     not(all(feature = "gpu_merkle", target_arch = "wasm32"))
 ))]
 use pollster::block_on;
-use hashbrown::HashMap;
-use plonky2_maybe_rayon::*;
-
-#[cfg(feature = "std")]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(all(feature = "std", target_arch = "wasm32"))]
-use js_sys::Date;
-#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
-use std::time::Instant;
 
 use super::circuit_builder::{LookupChallenges, LookupWire};
 use crate::field::extension::Extendable;
@@ -133,10 +132,7 @@ where
     C::Hasher: Hasher<F>,
     C::InnerHasher: Hasher<F>,
 {
-    let generator_label = format!(
-        "plonk/run {} generators",
-        prover_data.generators.len()
-    );
+    let generator_label = format!("plonk/run {} generators", prover_data.generators.len());
     let partition_witness = with_timer(&generator_label, || {
         timed!(
             timing,
@@ -277,17 +273,18 @@ where
         )
     });
 
-    let wires_values: Vec<PolynomialValues<F>> = with_timer("plonk/compute wire polynomials", || {
-        timed!(
-            timing,
-            "compute wire polynomials",
-            witness
-                .wire_values
-                .par_iter()
-                .map(|column| PolynomialValues::new(column.clone()))
-                .collect()
-        )
-    });
+    let wires_values: Vec<PolynomialValues<F>> =
+        with_timer("plonk/compute wire polynomials", || {
+            timed!(
+                timing,
+                "compute wire polynomials",
+                witness
+                    .wire_values
+                    .par_iter()
+                    .map(|column| PolynomialValues::new(column.clone()))
+                    .collect()
+            )
+        });
 
     let wires_commitment = with_timer_async("plonk/commit wires", || async {
         timed!(
@@ -391,9 +388,8 @@ where
         .await;
 
     #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
-    let partial_products_zs_and_lookup_commitment = with_timer(
-        "plonk/commit partial products & Zs",
-        || {
+    let partial_products_zs_and_lookup_commitment =
+        with_timer("plonk/commit partial products & Zs", || {
             timed!(
                 timing,
                 "commit to partial products, Z's and, if any, lookup polynomials",
@@ -406,8 +402,7 @@ where
                     prover_data.fft_root_table.as_ref(),
                 )
             )
-        },
-    );
+        });
 
     challenger.observe_cap::<C::Hasher>(&partial_products_zs_and_lookup_commitment.merkle_tree.cap);
 
@@ -1211,7 +1206,9 @@ struct ProfilingInstant {
 #[cfg(all(feature = "std", target_arch = "wasm32"))]
 impl ProfilingInstant {
     fn now() -> Self {
-        Self { start_ms: Date::now() }
+        Self {
+            start_ms: Date::now(),
+        }
     }
 
     fn elapsed(&self) -> core::time::Duration {

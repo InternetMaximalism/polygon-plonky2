@@ -1,6 +1,7 @@
 //! Lightweight timing helpers that work on both native targets and wasm.
 
 use core::future::Future;
+
 use log::info;
 
 /// Execute `action`, logging the elapsed time with `label`.

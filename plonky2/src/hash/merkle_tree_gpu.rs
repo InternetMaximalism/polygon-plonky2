@@ -952,20 +952,33 @@ where
                     .device
                     .push_error_scope(wgpu::ErrorFilter::Validation);
 
-                let mut encoder = context
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("merkle-combined-readback"),
-                    });
+                let mut encoder =
+                    context
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("merkle-combined-readback"),
+                        });
                 let mut offset_bytes = 0u64;
                 // Leaf
                 let leaf_bytes = (leaf_words * std::mem::size_of::<u32>()) as u64;
-                encoder.copy_buffer_to_buffer(&buffers.input, 0, &staging, offset_bytes, leaf_bytes);
+                encoder.copy_buffer_to_buffer(
+                    &buffers.input,
+                    0,
+                    &staging,
+                    offset_bytes,
+                    leaf_bytes,
+                );
                 offset_bytes += leaf_bytes;
                 // Node
                 if total_nodes > 0 {
                     let node_bytes = (node_words * std::mem::size_of::<u32>()) as u64;
-                    encoder.copy_buffer_to_buffer(&buffers.nodes, 0, &staging, offset_bytes, node_bytes);
+                    encoder.copy_buffer_to_buffer(
+                        &buffers.nodes,
+                        0,
+                        &staging,
+                        offset_bytes,
+                        node_bytes,
+                    );
                     offset_bytes += node_bytes;
                 }
                 // Cap
@@ -1594,10 +1607,12 @@ where
     log_timing_verbose("Buffer allocation", now_ms() - buffer_start);
 
     // PHASE 3: Layer processing
-    log_lazy(|| format!(
-        "=== PHASE 3: Layer Processing ({} layers) ===",
-        num_layers_to_cap
-    ));
+    log_lazy(|| {
+        format!(
+            "=== PHASE 3: Layer Processing ({} layers) ===",
+            num_layers_to_cap
+        )
+    });
     let layer_setup_start = now_ms();
 
     for layer in 0..num_layers_to_cap {
@@ -1885,7 +1900,6 @@ impl<'a, F: RichField> LayerAccessor<'a, F> {
             num_layers_to_cap,
         }
     }
-
 }
 
 impl<'a, F: RichField> MerkleLayerAccess<F> for LayerAccessor<'a, F> {

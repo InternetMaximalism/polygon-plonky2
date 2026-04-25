@@ -4,12 +4,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use plonky2_field::types::Field;
+use plonky2_maybe_rayon::*;
 #[cfg(all(
     feature = "std",
     not(all(feature = "gpu_merkle", target_arch = "wasm32"))
 ))]
 use pollster::block_on;
-use plonky2_maybe_rayon::*;
 
 use crate::field::extension::{flatten, unflatten, Extendable};
 use crate::field::polynomial::{PolynomialCoeffs, PolynomialValues};

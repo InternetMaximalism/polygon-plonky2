@@ -1,14 +1,14 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec::Vec};
 
+use itertools::Itertools;
+use plonky2_field::types::Field;
+use plonky2_maybe_rayon::*;
 #[cfg(all(
     feature = "std",
     not(all(feature = "gpu_merkle", target_arch = "wasm32"))
 ))]
 use pollster::block_on;
-use itertools::Itertools;
-use plonky2_field::types::Field;
-use plonky2_maybe_rayon::*;
 
 use crate::field::extension::Extendable;
 use crate::field::fft::FftRootTable;

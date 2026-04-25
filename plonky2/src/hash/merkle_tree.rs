@@ -5,14 +5,14 @@ use core::slice;
 
 use plonky2_maybe_rayon::*;
 use serde::{Deserialize, Serialize};
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use wasm_bindgen::JsCast;
 
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
 use super::merkle_tree_gpu;
-#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
-use wasm_bindgen::JsCast;
+use crate::hash::hash_types::RichField;
 #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
 use crate::hash::hash_types::{HashOut, NUM_HASH_OUT_ELTS};
-use crate::hash::hash_types::RichField;
 use crate::hash::merkle_proofs::MerkleProof;
 use crate::plonk::config::{GenericHashOut, Hasher};
 use crate::util::log2_strict;
