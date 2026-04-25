@@ -1,7 +1,5 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
-use core::mem;
 use core::mem::MaybeUninit;
 use core::slice;
 
@@ -363,11 +361,27 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
 
     #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
     fn from_gpu_output(leaves: Vec<Vec<F>>, output: merkle_tree_gpu::GpuMerkleOutput<F>) -> Self {
+        // SECURITY: the WGSL Merkle kernels are hard-coded to Poseidon-Goldilocks
+        // and emit `HashOut<F>` digests. We convert each digest to `H::Hash`
+        // through `GenericHashOut::to_bytes`/`from_bytes`, which is the identity
+        // when `H::Hash == HashOut<F>` (the only sound configuration: e.g.
+        // `PoseidonGoldilocksConfig`). For any other hasher this round-trip
+        // produces an `H::Hash` value whose bytes do not match what `H` would
+        // have computed; the resulting Merkle root will not pass verifier
+        // checks against `H`. That is a *liveness* failure (proof rejected),
+        // not a *soundness* failure (invalid proof accepted) — which is the
+        // safety property we must preserve. This avoids the `mem::transmute`
+        // used by the upstream Lita code, whose layout assumption was UB
+        // whenever `H::Hash != HashOut<F>`.
         let merkle_tree_gpu::GpuMerkleOutput { digests, cap } = output;
-        // SAFETY: HashOut<F> and H::Hash share the same layout when H::Hash = HashOut<F>.
-        let digests: Vec<H::Hash> =
-            unsafe { mem::transmute::<Vec<HashOut<F>>, Vec<H::Hash>>(digests) };
-        let cap_vec: Vec<H::Hash> = unsafe { mem::transmute::<Vec<HashOut<F>>, Vec<H::Hash>>(cap) };
+        let digests: Vec<H::Hash> = digests
+            .into_iter()
+            .map(|h| H::Hash::from_bytes(&h.to_bytes()))
+            .collect();
+        let cap_vec: Vec<H::Hash> = cap
+            .into_iter()
+            .map(|h| H::Hash::from_bytes(&h.to_bytes()))
+            .collect();
 
         Self {
             leaves,
