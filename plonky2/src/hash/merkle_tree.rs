@@ -88,7 +88,11 @@ fn log_merkle_tree_size(num_leaves: usize) {
 #[cfg(not(feature = "merkle_debug_print"))]
 fn log_merkle_tree_size(_: usize) {}
 
-#[cfg(feature = "merkle_debug_print")]
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    feature = "merkle_debug_print"
+))]
 fn log_merkle_tree_size_gpu(num_leaves: usize) {
     log::info!(
         "Constructing new Merkle tree on GPU with {} elements",
@@ -96,7 +100,11 @@ fn log_merkle_tree_size_gpu(num_leaves: usize) {
     );
 }
 
-#[cfg(not(feature = "merkle_debug_print"))]
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    not(feature = "merkle_debug_print")
+))]
 fn log_merkle_tree_size_gpu(_: usize) {}
 
 #[cfg(feature = "merkle_debug_print")]
@@ -107,12 +115,20 @@ fn log_merkle_tree_done() {
 #[cfg(not(feature = "merkle_debug_print"))]
 fn log_merkle_tree_done() {}
 
-#[cfg(feature = "merkle_debug_print")]
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    feature = "merkle_debug_print"
+))]
 fn log_merkle_tree_done_gpu() {
     log::info!("--> construction on GPU done!");
 }
 
-#[cfg(not(feature = "merkle_debug_print"))]
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    not(feature = "merkle_debug_print")
+))]
 fn log_merkle_tree_done_gpu() {}
 
 pub(crate) fn capacity_up_to_mut<T>(v: &mut Vec<T>, len: usize) -> &mut [MaybeUninit<T>] {

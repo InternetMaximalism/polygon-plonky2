@@ -100,7 +100,7 @@ pub fn fri_proof<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const
 ) -> FriProof<F, C::Hasher, D> {
     #[cfg(feature = "std")]
     {
-        return block_on(fri_proof_async::<F, C, D>(
+        block_on(fri_proof_async::<F, C, D>(
             initial_merkle_trees,
             lde_polynomial_coeffs,
             lde_polynomial_values,
@@ -109,7 +109,7 @@ pub fn fri_proof<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const
             final_poly_coeff_len,
             max_num_query_steps,
             timing,
-        ));
+        ))
     }
     #[cfg(not(feature = "std"))]
     {

@@ -149,14 +149,14 @@ where
 {
     #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
     {
-        return prove::<F, C, S, D>(
+        prove::<F, C, S, D>(
             stark,
             config,
             trace_poly_values,
             public_inputs,
             verifier_circuit_fri_params,
             timing,
-        );
+        )
     }
 
     #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
@@ -661,7 +661,7 @@ where
 {
     #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
     {
-        return prove_with_commitment(
+        prove_with_commitment(
             stark,
             config,
             trace_poly_values,
@@ -673,7 +673,7 @@ where
             final_poly_coeff_len,
             max_num_query_steps,
             timing,
-        );
+        )
     }
 
     #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]

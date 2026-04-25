@@ -53,7 +53,9 @@ use crate::timed;
 use crate::util::builder_hook::BuilderHookRef;
 use crate::util::context_tree::ContextTree;
 use crate::util::partial_products::num_partial_products;
-use crate::util::profiling::{with_timer, with_timer_async};
+use crate::util::profiling::with_timer;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use crate::util::profiling::with_timer_async;
 use crate::util::timing::TimingTree;
 use crate::util::{log2_ceil, log2_strict, transpose, transpose_poly_values};
 
@@ -1666,7 +1668,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     ) -> (CircuitData<F, C, D>, bool) {
         #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
         {
-            return self.try_build_with_options::<C>(commit_to_sigma);
+            self.try_build_with_options::<C>(commit_to_sigma)
         }
 
         #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
@@ -1679,7 +1681,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     ) -> CircuitData<F, C, D> {
         #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
         {
-            return self.build_with_options::<C>(commit_to_sigma);
+            self.build_with_options::<C>(commit_to_sigma)
         }
 
         #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
@@ -1696,7 +1698,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     pub async fn build_async<C: GenericConfig<D, F = F>>(self) -> CircuitData<F, C, D> {
         #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
         {
-            return self.build::<C>();
+            self.build::<C>()
         }
 
         #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]

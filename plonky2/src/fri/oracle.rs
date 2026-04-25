@@ -330,7 +330,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
     ) -> FriProof<F, C::Hasher, D> {
         #[cfg(feature = "std")]
         {
-            return block_on(Self::prove_openings_async(
+            block_on(Self::prove_openings_async(
                 instance,
                 oracles,
                 challenger,
@@ -338,7 +338,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
                 final_poly_coeff_len,
                 max_num_query_steps,
                 timing,
-            ));
+            ))
         }
         #[cfg(not(feature = "std"))]
         {
