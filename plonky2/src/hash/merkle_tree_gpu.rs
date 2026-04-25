@@ -315,6 +315,10 @@ pub async fn initialize() -> Result<()> {
 
     log("Requesting adapter");
 
+    // Per Amendment A2: replace `.expect("failed to obtain WebGPU adapter")`
+    // with proper Result propagation. The original `expect` panicked, which on
+    // wasm32 surfaces as an unhandled JS exception and gives no opportunity for
+    // callers (e.g. `try_build_merkle_tree`) to fall back to the CPU path.
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -322,8 +326,7 @@ pub async fn initialize() -> Result<()> {
             force_fallback_adapter: false,
         })
         .await
-        .expect("failed to obtain WebGPU adapter");
-    //.ok_or_else(|| anyhow!("failed to obtain WebGPU adapter"))?;
+        .map_err(|e| anyhow!("failed to obtain WebGPU adapter: {e:?}"))?;
 
     log("Requesting device");
 
