@@ -239,7 +239,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             proof_with_pis_target: dummy_proof_with_pis_target.clone(),
             proof_with_pis: dummy_proof_with_pis,
             verifier_data_target: dummy_verifier_data_target.clone(),
-            verifier_data: dummy_circuit.verifier_only,
+            verifier_data: dummy_circuit.verifier_data(),
         });
 
         Ok((dummy_proof_with_pis_target, dummy_verifier_data_target))

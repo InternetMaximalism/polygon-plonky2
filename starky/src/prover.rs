@@ -122,6 +122,7 @@ pub fn prove<F, C, S, const D: usize>(
     _config: &StarkConfig,
     _trace_poly_values: Vec<PolynomialValues<F>>,
     _public_inputs: &[F],
+    _verifier_circuit_fri_params: Option<FriParams>,
     _timing: &mut TimingTree,
 ) -> Result<StarkProofWithPublicInputs<F, C, D>>
 where
@@ -138,6 +139,7 @@ pub async fn prove_async<F, C, S, const D: usize>(
     config: &StarkConfig,
     trace_poly_values: Vec<PolynomialValues<F>>,
     public_inputs: &[F],
+    verifier_circuit_fri_params: Option<FriParams>,
     timing: &mut TimingTree,
 ) -> Result<StarkProofWithPublicInputs<F, C, D>>
 where
@@ -147,7 +149,14 @@ where
 {
     #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
     {
-        return prove::<F, C, S, D>(stark, config, trace_poly_values, public_inputs, timing);
+        return prove::<F, C, S, D>(
+            stark,
+            config,
+            trace_poly_values,
+            public_inputs,
+            verifier_circuit_fri_params,
+            timing,
+        );
     }
 
     #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
@@ -161,6 +170,27 @@ where
             fri_params.total_arities() <= degree_bits + rate_bits - cap_height,
             "FRI total reduction arity is too large.",
         );
+
+        let (final_poly_coeff_len, max_num_query_steps) =
+            if let Some(verifier_circuit_fri_params) = verifier_circuit_fri_params {
+                assert_eq!(verifier_circuit_fri_params.config, fri_params.config);
+                match &config.fri_config.reduction_strategy {
+                    FriReductionStrategy::ConstantArityBits(_, final_poly_bits) => {
+                        let len = final_poly_coeff_len(
+                            verifier_circuit_fri_params.degree_bits,
+                            &verifier_circuit_fri_params.reduction_arity_bits,
+                        );
+                        assert_eq!(len, 1 << (1 + *final_poly_bits));
+                        (
+                            Some(len),
+                            Some(verifier_circuit_fri_params.reduction_arity_bits.len()),
+                        )
+                    }
+                    _ => panic!("Fri Reduction Strategy is not ConstantArityBits"),
+                }
+            } else {
+                (None, None)
+            };
 
         let trace_commitment = timed!(
             timing,
@@ -189,6 +219,8 @@ where
             None,
             &mut challenger,
             public_inputs,
+            final_poly_coeff_len,
+            max_num_query_steps,
             timing,
         )
         .await
@@ -578,6 +610,8 @@ pub fn prove_with_commitment<F, C, S, const D: usize>(
     _ctl_challenges: Option<&GrandProductChallengeSet<F>>,
     _challenger: &mut Challenger<F, C::Hasher>,
     _public_inputs: &[F],
+    _final_poly_coeff_len: Option<usize>,
+    _max_num_query_steps: Option<usize>,
     _timing: &mut TimingTree,
 ) -> Result<StarkProofWithPublicInputs<F, C, D>>
 where
@@ -609,6 +643,8 @@ pub async fn prove_with_commitment_async<'a, F, C, S, const D: usize>(
     ctl_challenges: Option<&'a GrandProductChallengeSet<F>>,
     challenger: &'a mut Challenger<F, C::Hasher>,
     public_inputs: &'a [F],
+    final_poly_coeff_len: Option<usize>,
+    max_num_query_steps: Option<usize>,
     timing: &'a mut TimingTree,
 ) -> Result<StarkProofWithPublicInputs<F, C, D>>
 where
@@ -627,6 +663,8 @@ where
             ctl_challenges,
             challenger,
             public_inputs,
+            final_poly_coeff_len,
+            max_num_query_steps,
             timing,
         );
     }

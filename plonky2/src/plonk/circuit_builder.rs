@@ -1509,6 +1509,11 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let max_fft_points = 1 << (degree_bits + max(rate_bits, log2_ceil(quotient_degree_factor)));
         let fft_root_table = fft_root_table(max_fft_points);
 
+        // Preserve raw constant evaluations (transposed to row-major) before
+        // they are consumed by the FRI commitment. These are needed by
+        // alternative proving backends (e.g., multilinear).
+        let constant_evals = transpose_poly_values(constant_vecs.clone());
+
         let constants_sigmas_commitment = if commit_to_sigma {
             let constants_sigmas_vecs = [constant_vecs, sigma_vecs.clone()].concat();
             with_timer_async("circuit_builder::commit constants+sigmas", || async {
@@ -1631,6 +1636,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             generator_indices_by_watches,
             constants_sigmas_commitment,
             sigmas: transpose_poly_values(sigma_vecs),
+            constant_evals,
             subgroup,
             public_inputs: self.public_inputs,
             representative_map: forest.parents,

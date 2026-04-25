@@ -76,9 +76,8 @@ mod arrays {
 /// This is typically used in recursion settings, where the outer circuit must verify
 /// a proof satisfying an inner circuit's statement, which is verified using arithmetic
 /// in an extension of the base field.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct ExtensionTarget<const D: usize>(#[serde(with = "arrays")] pub [Target; D]);
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct ExtensionTarget<const D: usize>(pub [Target; D]);
 
 impl<const D: usize> Serialize for ExtensionTarget<D> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

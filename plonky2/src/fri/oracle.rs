@@ -324,12 +324,20 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         oracles: &[&Self],
         challenger: &mut Challenger<F, C::Hasher>,
         fri_params: &FriParams,
+        final_poly_coeff_len: Option<usize>,
+        max_num_query_steps: Option<usize>,
         timing: &mut TimingTree,
     ) -> FriProof<F, C::Hasher, D> {
         #[cfg(feature = "std")]
         {
             return block_on(Self::prove_openings_async(
-                instance, oracles, challenger, fri_params, timing,
+                instance,
+                oracles,
+                challenger,
+                fri_params,
+                final_poly_coeff_len,
+                max_num_query_steps,
+                timing,
             ));
         }
         #[cfg(not(feature = "std"))]
@@ -345,6 +353,8 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         _oracles: &[&Self],
         _challenger: &mut Challenger<F, C::Hasher>,
         _fri_params: &FriParams,
+        _final_poly_coeff_len: Option<usize>,
+        _max_num_query_steps: Option<usize>,
         _timing: &mut TimingTree,
     ) -> FriProof<F, C::Hasher, D> {
         let caller = core::panic::Location::caller();
