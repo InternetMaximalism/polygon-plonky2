@@ -342,7 +342,15 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         }
         #[cfg(not(feature = "std"))]
         {
-            panic!("PolynomialBatch::prove_openings requires the `std` feature when async proving is enabled");
+            crate::util::nostd_block_on(Self::prove_openings_async(
+                instance,
+                oracles,
+                challenger,
+                fri_params,
+                final_poly_coeff_len,
+                max_num_query_steps,
+                timing,
+            ))
         }
     }
 

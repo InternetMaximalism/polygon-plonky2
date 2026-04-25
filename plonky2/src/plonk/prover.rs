@@ -867,9 +867,12 @@ where
     }
     #[cfg(not(feature = "std"))]
     {
-        panic!(
-            "plonk::prover::prove_with_partition_witness requires the `std` feature when async proving is enabled"
-        );
+        crate::util::nostd_block_on(prove_with_partition_witness_async(
+            prover_data,
+            common_data,
+            partition_witness,
+            timing,
+        ))
     }
 }
 

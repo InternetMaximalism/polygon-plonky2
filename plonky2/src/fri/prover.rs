@@ -111,9 +111,21 @@ pub fn fri_proof<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const
             timing,
         ))
     }
+    // On non-wasm-gpu builds the async future is constructed from
+    // synchronous CPU code that never yields, so spinning a single-poll
+    // executor here is equivalent to running the original sync code path.
     #[cfg(not(feature = "std"))]
     {
-        panic!("fri_proof requires the `std` feature when async proving is enabled");
+        crate::util::nostd_block_on(fri_proof_async::<F, C, D>(
+            initial_merkle_trees,
+            lde_polynomial_coeffs,
+            lde_polynomial_values,
+            challenger,
+            fri_params,
+            final_poly_coeff_len,
+            max_num_query_steps,
+            timing,
+        ))
     }
 }
 
