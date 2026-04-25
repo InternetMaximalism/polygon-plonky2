@@ -4,13 +4,18 @@ use alloc::{format, vec::Vec};
 use itertools::Itertools;
 use plonky2_field::types::Field;
 use plonky2_maybe_rayon::*;
+#[cfg(all(
+    feature = "std",
+    not(all(feature = "gpu_merkle", target_arch = "wasm32"))
+))]
+use pollster::block_on;
 
 use crate::field::extension::Extendable;
 use crate::field::fft::FftRootTable;
 use crate::field::packed::PackedField;
 use crate::field::polynomial::{PolynomialCoeffs, PolynomialValues};
 use crate::fri::proof::FriProof;
-use crate::fri::prover::fri_proof;
+use crate::fri::prover::fri_proof_async;
 use crate::fri::structure::{FriBatchInfo, FriInstanceInfo};
 use crate::fri::FriParams;
 use crate::hash::hash_types::RichField;
@@ -18,6 +23,7 @@ use crate::hash::merkle_tree::MerkleTree;
 use crate::iop::challenger::Challenger;
 use crate::plonk::config::GenericConfig;
 use crate::timed;
+use crate::util::profiling::{with_timer, with_timer_async};
 use crate::util::reducing::ReducingFactor;
 use crate::util::timing::TimingTree;
 use crate::util::{log2_strict, reverse_bits, reverse_index_bits_in_place, transpose};
@@ -62,11 +68,9 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         timing: &mut TimingTree,
         fft_root_table: Option<&FftRootTable<F>>,
     ) -> Self {
-        let coeffs = timed!(
-            timing,
-            "IFFT",
+        let coeffs = with_timer("PolynomialBatch::from_values IFFT", move || {
             values.into_par_iter().map(|v| v.ifft()).collect::<Vec<_>>()
-        );
+        });
 
         Self::from_coeffs(
             coeffs,
@@ -76,6 +80,29 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
             timing,
             fft_root_table,
         )
+    }
+
+    pub async fn from_values_async(
+        values: Vec<PolynomialValues<F>>,
+        rate_bits: usize,
+        blinding: bool,
+        cap_height: usize,
+        timing: &mut TimingTree,
+        fft_root_table: Option<&FftRootTable<F>>,
+    ) -> Self {
+        let coeffs = with_timer("PolynomialBatch::from_values_async IFFT", move || {
+            values.into_par_iter().map(|v| v.ifft()).collect::<Vec<_>>()
+        });
+
+        Self::from_coeffs_async(
+            coeffs,
+            rate_bits,
+            blinding,
+            cap_height,
+            timing,
+            fft_root_table,
+        )
+        .await
     }
 
     /// Creates a list polynomial commitment for the polynomials `polynomials`.
@@ -88,14 +115,59 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         fft_root_table: Option<&FftRootTable<F>>,
     ) -> Self {
         let degree = polynomials[0].len();
-        let lde_values = timed!(
-            timing,
-            "FFT + blinding",
+        let lde_values = with_timer("PolynomialBatch::from_coeffs FFT", || {
             Self::lde_values(&polynomials, rate_bits, blinding, fft_root_table)
+        });
+
+        let mut leaves = with_timer("PolynomialBatch::transpose LDEs", || {
+            timed!(timing, "transpose LDEs", transpose(&lde_values))
+        });
+        with_timer("PolynomialBatch::bit-reverse leaves", || {
+            reverse_index_bits_in_place(&mut leaves);
+        });
+        let merkle_tree = timed!(
+            timing,
+            "build Merkle tree",
+            MerkleTree::new(leaves, cap_height)
         );
 
-        let mut leaves = timed!(timing, "transpose LDEs", transpose(&lde_values));
-        reverse_index_bits_in_place(&mut leaves);
+        Self {
+            polynomials,
+            merkle_tree,
+            degree_log: log2_strict(degree),
+            rate_bits,
+            blinding,
+        }
+    }
+
+    pub async fn from_coeffs_async(
+        polynomials: Vec<PolynomialCoeffs<F>>,
+        rate_bits: usize,
+        blinding: bool,
+        cap_height: usize,
+        timing: &mut TimingTree,
+        fft_root_table: Option<&FftRootTable<F>>,
+    ) -> Self {
+        let degree = polynomials[0].len();
+        let lde_values = with_timer("PolynomialBatch::from_coeffs_async FFT", || {
+            Self::lde_values(&polynomials, rate_bits, blinding, fft_root_table)
+        });
+
+        let mut leaves = with_timer("PolynomialBatch::transpose LDEs", || {
+            timed!(timing, "transpose LDEs", transpose(&lde_values))
+        });
+        with_timer("PolynomialBatch::bit-reverse leaves", || {
+            reverse_index_bits_in_place(&mut leaves);
+        });
+
+        #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+        let merkle_tree = timed!(
+            timing,
+            "build Merkle tree",
+            MerkleTree::new_async(leaves, cap_height).await
+        );
+
+        #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
         let merkle_tree = timed!(
             timing,
             "build Merkle tree",
@@ -173,7 +245,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
     }
 
     /// Produces a batch opening proof.
-    pub fn prove_openings(
+    pub async fn prove_openings_async(
         instance: &FriInstanceInfo<F, D>,
         oracles: &[&Self],
         challenger: &mut Challenger<F, C::Hasher>,
@@ -196,43 +268,108 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         // where the `k_i`s are chosen such that each power of `alpha` appears only once in the final sum.
         // There are usually two batches for the openings at `zeta` and `g * zeta`.
         // The oracles used in Plonky2 are given in `FRI_ORACLES` in `plonky2/src/plonk/plonk_common.rs`.
-        for FriBatchInfo { point, polynomials } in &instance.batches {
-            // Collect the coefficients of all the polynomials in `polynomials`.
-            let polys_coeff = polynomials.iter().map(|fri_poly| {
-                &oracles[fri_poly.oracle_index].polynomials[fri_poly.polynomial_index]
-            });
-            let composition_poly = timed!(
+        with_timer("FRI combine opening batches", || {
+            for FriBatchInfo { point, polynomials } in &instance.batches {
+                // Collect the coefficients of all the polynomials in `polynomials`.
+                let polys_coeff = polynomials.iter().map(|fri_poly| {
+                    &oracles[fri_poly.oracle_index].polynomials[fri_poly.polynomial_index]
+                });
+                let composition_poly = timed!(
+                    timing,
+                    &format!("reduce batch of {} polynomials", polynomials.len()),
+                    alpha.reduce_polys_base(polys_coeff)
+                );
+                let mut quotient = composition_poly.divide_by_linear(*point);
+                quotient.coeffs.push(F::Extension::ZERO); // pad back to power of two
+                alpha.shift_poly(&mut final_poly);
+                final_poly += quotient;
+            }
+        });
+
+        let lde_final_poly = with_timer("FRI final polynomial LDE", || {
+            final_poly.lde(fri_params.config.rate_bits)
+        });
+        let lde_final_values = with_timer("FRI final FFT", || {
+            timed!(
                 timing,
-                &format!("reduce batch of {} polynomials", polynomials.len()),
-                alpha.reduce_polys_base(polys_coeff)
-            );
-            let mut quotient = composition_poly.divide_by_linear(*point);
-            quotient.coeffs.push(F::Extension::ZERO); // pad back to power of two
-            alpha.shift_poly(&mut final_poly);
-            final_poly += quotient;
-        }
+                &format!("perform final FFT {}", lde_final_poly.len()),
+                lde_final_poly.coset_fft(F::coset_shift().into())
+            )
+        });
 
-        let lde_final_poly = final_poly.lde(fri_params.config.rate_bits);
-        let lde_final_values = timed!(
-            timing,
-            &format!("perform final FFT {}", lde_final_poly.len()),
-            lde_final_poly.coset_fft(F::coset_shift().into())
-        );
-
-        let fri_proof = fri_proof::<F, C, D>(
-            &oracles
-                .par_iter()
-                .map(|c| &c.merkle_tree)
-                .collect::<Vec<_>>(),
-            lde_final_poly,
-            lde_final_values,
-            challenger,
-            fri_params,
-            final_poly_coeff_len,
-            max_num_query_steps,
-            timing,
-        );
+        let fri_proof = with_timer_async("FRI prove openings", || async {
+            fri_proof_async::<F, C, D>(
+                &oracles
+                    .par_iter()
+                    .map(|c| &c.merkle_tree)
+                    .collect::<Vec<_>>(),
+                lde_final_poly,
+                lde_final_values,
+                challenger,
+                fri_params,
+                final_poly_coeff_len,
+                max_num_query_steps,
+                timing,
+            )
+            .await
+        })
+        .await;
 
         fri_proof
+    }
+
+    #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+    pub fn prove_openings(
+        instance: &FriInstanceInfo<F, D>,
+        oracles: &[&Self],
+        challenger: &mut Challenger<F, C::Hasher>,
+        fri_params: &FriParams,
+        final_poly_coeff_len: Option<usize>,
+        max_num_query_steps: Option<usize>,
+        timing: &mut TimingTree,
+    ) -> FriProof<F, C::Hasher, D> {
+        #[cfg(feature = "std")]
+        {
+            block_on(Self::prove_openings_async(
+                instance,
+                oracles,
+                challenger,
+                fri_params,
+                final_poly_coeff_len,
+                max_num_query_steps,
+                timing,
+            ))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            crate::util::nostd_block_on(Self::prove_openings_async(
+                instance,
+                oracles,
+                challenger,
+                fri_params,
+                final_poly_coeff_len,
+                max_num_query_steps,
+                timing,
+            ))
+        }
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    #[track_caller]
+    pub fn prove_openings(
+        _instance: &FriInstanceInfo<F, D>,
+        _oracles: &[&Self],
+        _challenger: &mut Challenger<F, C::Hasher>,
+        _fri_params: &FriParams,
+        _final_poly_coeff_len: Option<usize>,
+        _max_num_query_steps: Option<usize>,
+        _timing: &mut TimingTree,
+    ) -> FriProof<F, C::Hasher, D> {
+        let caller = core::panic::Location::caller();
+        panic!(
+            "prove_openings must be awaited on wasm with gpu_merkle enabled (caller: {}:{})",
+            caller.file(),
+            caller.line()
+        );
     }
 }

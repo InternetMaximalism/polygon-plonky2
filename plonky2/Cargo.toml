@@ -16,8 +16,23 @@ default = []
 # default = ["gate_testing", "parallel", "rand_chacha", "std", "timing"]
 gate_testing = []
 parallel = ["hashbrown/rayon", "plonky2_maybe_rayon/parallel"]
-std = ["anyhow/std", "rand/std", "itertools/use_std"]
+std = ["anyhow/std", "rand/std", "itertools/use_std", "dep:futures", "dep:pollster"]
 timing = ["std", "dep:web-time"]
+merkle_debug_print = ["dep:console_log"]
+gpu_merkle = [
+    "std",
+    "dep:wgpu",
+    "dep:bytemuck",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:console_error_panic_hook",
+    "dep:console_log",
+    "dep:once_cell",
+]
+gpu_merkle_verbose_time_logging = ["gpu_merkle"]
+gpu_merkle_logging = ["gpu_merkle", "gpu_merkle_verbose_time_logging"]
+wasm_test_exports = []
 
 [dependencies]
 ahash = { workspace = true }
@@ -33,6 +48,9 @@ serde = { workspace = true, features = ["rc"] }
 static_assertions = { workspace = true }
 unroll = { workspace = true }
 web-time = { version = "1.0.0", optional = true }
+futures = { version = "0.3", optional = true, default-features = false, features = ["executor", "std", "async-await"] }
+futures-channel = "0.3"
+pollster = { version = "0.3", optional = true }
 
 # Local dependencies
 plonky2_field = { version = "1.0.0", path = "../field", default-features = false }
@@ -40,9 +58,25 @@ plonky2_maybe_rayon = { version = "1.0.0", path = "../maybe_rayon", default-feat
 plonky2_util = { version = "1.0.0", path = "../util", default-features = false }
 serde_with = "3.15.0"
 
+# multi producer, multi consumer async channels that work on native and wasm
+flume = "0.11"
+
+# For panic error messages in WASM code
+console_error_panic_hook = "0.1.7"
+
+gloo-timers = { version = "*", features = ["futures"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+bytemuck = { version = "1.18", features = ["derive"], optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 getrandom = { version = "0.2", default-features = false, features = ["js"] }
+js-sys = { version = "0.3", optional = false }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["console", "Performance"], optional = true }
+wgpu = { version = "26", default-features = false, features = ["webgpu", "wgsl"], optional = true }
+once_cell = { version = "1.20", default-features = false, features = ["std"], optional = true }
+console_log = { version = "1.0.0", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", default-features = false }
@@ -92,3 +126,7 @@ rustdoc-args = ["--html-in-header", ".cargo/katex-header.html"]
 
 [lints]
 workspace = true
+
+# For WASM Merkle tree test case
+[lib]
+crate-type = ["cdylib", "rlib"]

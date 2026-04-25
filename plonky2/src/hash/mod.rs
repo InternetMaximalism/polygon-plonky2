@@ -8,6 +8,8 @@ pub mod hashing;
 pub mod keccak;
 pub mod merkle_proofs;
 pub mod merkle_tree;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+pub mod merkle_tree_gpu;
 pub mod path_compression;
 pub mod poseidon;
 pub mod poseidon_goldilocks;

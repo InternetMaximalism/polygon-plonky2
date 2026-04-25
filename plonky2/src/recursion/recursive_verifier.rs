@@ -699,7 +699,7 @@ mod tests {
         let proof_from_bytes = ProofWithPublicInputs::from_bytes(proof_bytes, common_data)?;
         assert_eq!(proof, &proof_from_bytes);
 
-        #[cfg(feature = "std")]
+        #[cfg(all(feature = "std", not(target_family = "wasm")))]
         let now = std::time::Instant::now();
 
         let compressed_proof = proof.clone().compress(&vd.circuit_digest, common_data)?;
@@ -707,7 +707,7 @@ mod tests {
             .clone()
             .decompress(&vd.circuit_digest, common_data)?;
 
-        #[cfg(feature = "std")]
+        #[cfg(all(feature = "std", not(target_family = "wasm")))]
         info!("{:.4}s to compress proof", now.elapsed().as_secs_f64());
 
         assert_eq!(proof, &decompressed_compressed_proof);

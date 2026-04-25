@@ -53,6 +53,9 @@ use crate::timed;
 use crate::util::builder_hook::BuilderHookRef;
 use crate::util::context_tree::ContextTree;
 use crate::util::partial_products::num_partial_products;
+use crate::util::profiling::with_timer;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use crate::util::profiling::with_timer_async;
 use crate::util::timing::TimingTree;
 use crate::util::{log2_ceil, log2_strict, transpose, transpose_poly_values};
 
@@ -1097,13 +1100,15 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let start = Instant::now();
 
         // Execute all hooks
-        let hooks = take(&mut self.hooks);
-        let mut hook_keys = hooks.keys().cloned().collect::<Vec<_>>();
-        hook_keys.sort(); // Sort the keys to ensure deterministic order.
-        for key in hook_keys {
-            let hook = hooks.get(&key).unwrap();
-            hook.0.constrain(&mut self);
-        }
+        with_timer("circuit_builder::execute hooks", || {
+            let hooks = take(&mut self.hooks);
+            let mut hook_keys = hooks.keys().cloned().collect::<Vec<_>>();
+            hook_keys.sort(); // Sort the keys to ensure deterministic order.
+            for key in hook_keys {
+                let hook = hooks.get(&key).unwrap();
+                hook.0.constrain(&mut self);
+            }
+        });
 
         let rate_bits = self.config.fri_config.rate_bits;
         let cap_height = self.config.fri_config.cap_height;
@@ -1125,7 +1130,9 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         self.randomize_unused_pi_wires(pi_gate);
 
         // Place LUT-related gates.
-        self.add_all_lookups();
+        with_timer("circuit_builder::add lookups", || {
+            self.add_all_lookups();
+        });
 
         // Make sure we have enough constant generators. If not, add a `ConstantGate`.
         while self.constants_to_targets.len() > self.constant_generators.len() {
@@ -1160,7 +1167,9 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             "Degree before blinding & padding: {}",
             self.gate_instances.len()
         );
-        self.blind_and_pad();
+        with_timer("circuit_builder::blind_and_pad", || {
+            self.blind_and_pad();
+        });
         let degree = self.gate_instances.len();
         debug!("Degree after blinding & padding: {}", degree);
         let degree_bits = log2_strict(degree);
@@ -1175,32 +1184,43 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         // Gates need to be sorted by their degrees (and ID to make the ordering deterministic) to compute the selector polynomials.
         gates.sort_unstable_by_key(|g| (g.0.degree(), g.0.id()));
         let (mut constant_vecs, selectors_info) =
-            selector_polynomials(&gates, &self.gate_instances, quotient_degree_factor + 1);
+            with_timer("circuit_builder::selector polynomials", || {
+                selector_polynomials(&gates, &self.gate_instances, quotient_degree_factor + 1)
+            });
 
         // Get the lookup selectors.
         let num_lookup_selectors = if num_luts != 0 {
-            let selector_lookups =
-                selectors_lookup(&gates, &self.gate_instances, &self.lookup_rows);
-            let selector_ends = selector_ends_lookups(&self.lookup_rows, &self.gate_instances);
-            let all_lookup_selectors = [selector_lookups, selector_ends].concat();
-            let num_lookup_selectors = all_lookup_selectors.len();
+            let (all_lookup_selectors, num_lookup_selectors) =
+                with_timer("circuit_builder::lookup selectors", || {
+                    let selector_lookups =
+                        selectors_lookup(&gates, &self.gate_instances, &self.lookup_rows);
+                    let selector_ends =
+                        selector_ends_lookups(&self.lookup_rows, &self.gate_instances);
+                    let all_lookup_selectors = [selector_lookups, selector_ends].concat();
+                    let num_lookup_selectors = all_lookup_selectors.len();
+                    (all_lookup_selectors, num_lookup_selectors)
+                });
             constant_vecs.extend(all_lookup_selectors);
             num_lookup_selectors
         } else {
             0
         };
 
-        constant_vecs.extend(self.constant_polys());
+        let extra_constants =
+            with_timer("circuit_builder::constant polys", || self.constant_polys());
+        constant_vecs.extend(extra_constants);
         let num_constants = constant_vecs.len();
 
         let subgroup = F::two_adic_subgroup(degree_bits);
 
         let k_is = get_unique_coset_shifts(degree, self.config.num_routed_wires);
-        let (sigma_vecs, forest) = timed!(
-            timing,
-            "generate sigma polynomials",
-            self.sigma_vecs(&k_is, &subgroup)
-        );
+        let (sigma_vecs, forest) = with_timer("circuit_builder::sigma polynomials", || {
+            timed!(
+                timing,
+                "generate sigma polynomials",
+                self.sigma_vecs(&k_is, &subgroup)
+            )
+        });
 
         // Precompute FFT roots.
         let max_fft_points = 1 << (degree_bits + max(rate_bits, log2_ceil(quotient_degree_factor)));
@@ -1233,20 +1253,22 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             .collect::<HashMap<_, _>>();
 
         // Add gate generators.
-        self.add_generators(
-            self.gate_instances
-                .iter()
-                .enumerate()
-                .flat_map(|(index, gate)| {
-                    let mut gens = gate.gate_ref.0.generators(index, &gate.constants);
-                    // Remove unused generators, if any.
-                    if let Some(&op) = incomplete_gates.get(&index) {
-                        gens.drain(op..);
-                    }
-                    gens
-                })
-                .collect(),
-        );
+        with_timer("circuit_builder::add generators", || {
+            self.add_generators(
+                self.gate_instances
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, gate)| {
+                        let mut gens = gate.gate_ref.0.generators(index, &gate.constants);
+                        // Remove unused generators, if any.
+                        if let Some(&op) = incomplete_gates.get(&index) {
+                            gens.drain(op..);
+                        }
+                        gens
+                    })
+                    .collect(),
+            );
+        });
 
         // Index generator indices by their watched targets.
         let mut generator_indices_by_watches = BTreeMap::new();
@@ -1351,6 +1373,336 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             },
             success,
         )
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    pub async fn try_build_with_options_wasm<C: GenericConfig<D, F = F>>(
+        mut self,
+        commit_to_sigma: bool,
+    ) -> (CircuitData<F, C, D>, bool) {
+        #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+        let timing_level = Level::Info;
+        #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+        let timing_level = Level::Trace;
+        let mut timing = TimingTree::new("preprocess", timing_level);
+
+        // Execute all hooks
+        with_timer("circuit_builder::execute hooks", || {
+            let hooks = take(&mut self.hooks);
+            let mut hook_keys = hooks.keys().cloned().collect::<Vec<_>>();
+            hook_keys.sort(); // Sort the keys to ensure deterministic order.
+            for key in hook_keys {
+                let hook = hooks.get(&key).unwrap();
+                hook.0.constrain(&mut self);
+            }
+        });
+
+        let rate_bits = self.config.fri_config.rate_bits;
+        let cap_height = self.config.fri_config.cap_height;
+        // Total number of LUTs.
+        let num_luts = self.get_luts_length();
+        // Hash the public inputs, and route them to a `PublicInputGate` which will enforce that
+        // those hash wires match the claimed public inputs.
+        let (num_public_inputs, pi_gate) = with_timer("circuit_builder::public inputs", || {
+            let num_public_inputs = self.public_inputs.len();
+            let public_inputs_hash =
+                self.hash_n_to_hash_no_pad::<C::InnerHasher>(self.public_inputs.clone());
+            let pi_gate = self.add_gate(PublicInputGate, vec![]);
+            for (&hash_part, wire) in public_inputs_hash
+                .elements
+                .iter()
+                .zip(PublicInputGate::wires_public_inputs_hash())
+            {
+                self.connect(hash_part, Target::wire(pi_gate, wire))
+            }
+            (num_public_inputs, pi_gate)
+        });
+        self.randomize_unused_pi_wires(pi_gate);
+
+        // Place LUT-related gates.
+        with_timer("circuit_builder::add lookups", || {
+            self.add_all_lookups();
+        });
+
+        // Make sure we have enough constant generators. If not, add a `ConstantGate`.
+        with_timer("circuit_builder::pad constant gates", || {
+            while self.constants_to_targets.len() > self.constant_generators.len() {
+                self.add_gate(
+                    ConstantGate {
+                        num_consts: self.config.num_constants,
+                    },
+                    vec![],
+                );
+            }
+        });
+
+        // For each constant-target pair used in the circuit, use a constant generator to fill this target.
+        with_timer("circuit_builder::assign constant generators", || {
+            for ((c, t), mut const_gen) in self
+                .constants_to_targets
+                .clone()
+                .into_iter()
+                // We need to enumerate constants_to_targets in some deterministic order to ensure that
+                // building a circuit is deterministic.
+                .sorted_by_key(|(c, _t)| c.to_canonical_u64())
+                .zip(self.constant_generators.clone())
+            {
+                // Set the constant in the constant polynomial.
+                self.gate_instances[const_gen.row].constants[const_gen.constant_index] = c;
+                // Generate a copy between the target and the routable wire.
+                self.connect(Target::wire(const_gen.row, const_gen.wire_index), t);
+                // Set the constant in the generator (it's initially set with a dummy value).
+                const_gen.set_constant(c);
+                self.add_simple_generator(const_gen);
+            }
+        });
+
+        debug!(
+            "Degree before blinding & padding: {}",
+            self.gate_instances.len()
+        );
+        with_timer("circuit_builder::blind_and_pad", || {
+            self.blind_and_pad();
+        });
+        let degree = self.gate_instances.len();
+        debug!("Degree after blinding & padding: {}", degree);
+        let degree_bits = log2_strict(degree);
+        let fri_params = self.fri_params(degree_bits);
+        assert!(
+            fri_params.total_arities() <= degree_bits + rate_bits - cap_height,
+            "FRI total reduction arity is too large.",
+        );
+
+        let quotient_degree_factor = self.config.max_quotient_degree_factor;
+        let mut gates = self.gates.iter().cloned().collect::<Vec<_>>();
+        // Gates need to be sorted by their degrees (and ID to make the ordering deterministic) to compute the selector polynomials.
+        gates.sort_unstable_by_key(|g| (g.0.degree(), g.0.id()));
+        let (mut constant_vecs, selectors_info) =
+            selector_polynomials(&gates, &self.gate_instances, quotient_degree_factor + 1);
+
+        // Get the lookup selectors.
+        let num_lookup_selectors = if num_luts != 0 {
+            let selector_lookups =
+                selectors_lookup(&gates, &self.gate_instances, &self.lookup_rows);
+            let selector_ends = selector_ends_lookups(&self.lookup_rows, &self.gate_instances);
+            let all_lookup_selectors = [selector_lookups, selector_ends].concat();
+            let num_lookup_selectors = all_lookup_selectors.len();
+            constant_vecs.extend(all_lookup_selectors);
+            num_lookup_selectors
+        } else {
+            0
+        };
+
+        constant_vecs.extend(self.constant_polys());
+        let num_constants = constant_vecs.len();
+
+        let subgroup = F::two_adic_subgroup(degree_bits);
+
+        let k_is = get_unique_coset_shifts(degree, self.config.num_routed_wires);
+        let (sigma_vecs, forest) = timed!(
+            timing,
+            "generate sigma polynomials",
+            self.sigma_vecs(&k_is, &subgroup)
+        );
+
+        // Precompute FFT roots.
+        let max_fft_points = 1 << (degree_bits + max(rate_bits, log2_ceil(quotient_degree_factor)));
+        let fft_root_table = fft_root_table(max_fft_points);
+
+        // Preserve raw constant evaluations (transposed to row-major) before
+        // they are consumed by the FRI commitment. These are needed by
+        // alternative proving backends (e.g., multilinear).
+        let constant_evals = transpose_poly_values(constant_vecs.clone());
+
+        let constants_sigmas_commitment = if commit_to_sigma {
+            let constants_sigmas_vecs = [constant_vecs, sigma_vecs.clone()].concat();
+            with_timer_async("circuit_builder::commit constants+sigmas", || async {
+                PolynomialBatch::<F, C, D>::from_values_async(
+                    constants_sigmas_vecs,
+                    rate_bits,
+                    PlonkOracle::CONSTANTS_SIGMAS.blinding,
+                    cap_height,
+                    &mut timing,
+                    Some(&fft_root_table),
+                )
+                .await
+            })
+            .await
+        } else {
+            PolynomialBatch::<F, C, D>::default()
+        };
+
+        // Map between gates where not all generators are used and the gate's number of used generators.
+        let incomplete_gates = self
+            .current_slots
+            .values()
+            .flat_map(|current_slot| current_slot.current_slot.values().copied())
+            .collect::<HashMap<_, _>>();
+
+        // Add gate generators.
+        with_timer("circuit_builder::add generators", || {
+            self.add_generators(
+                self.gate_instances
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, gate)| {
+                        let mut gens = gate.gate_ref.0.generators(index, &gate.constants);
+                        // Remove unused generators, if any.
+                        if let Some(&op) = incomplete_gates.get(&index) {
+                            gens.drain(op..);
+                        }
+                        gens
+                    })
+                    .collect(),
+            );
+        });
+
+        // Index generator indices by their watched targets.
+        let mut generator_indices_by_watches = BTreeMap::new();
+        with_timer("circuit_builder::index generators", || {
+            for (i, generator) in self.generators.iter().enumerate() {
+                for watch in generator.0.watch_list() {
+                    let watch_index = forest.target_index(watch);
+                    let watch_rep_index = forest.parents[watch_index];
+                    generator_indices_by_watches
+                        .entry(watch_rep_index)
+                        .or_insert_with(Vec::new)
+                        .push(i);
+                }
+            }
+            for indices in generator_indices_by_watches.values_mut() {
+                indices.dedup();
+                indices.shrink_to_fit();
+            }
+        });
+
+        let num_gate_constraints = gates
+            .iter()
+            .map(|gate| gate.0.num_constraints())
+            .max()
+            .expect("No gates?");
+
+        let num_partial_products =
+            num_partial_products(self.config.num_routed_wires, quotient_degree_factor);
+
+        let lookup_degree = self.config.max_quotient_degree_factor - 1;
+        let num_lookup_polys = if num_luts == 0 {
+            0
+        } else {
+            // There is 1 RE polynomial and multiple Sum/LDC polynomials.
+            LookupGate::num_slots(&self.config).div_ceil(lookup_degree) + 1
+        };
+        let constants_sigmas_cap = constants_sigmas_commitment.merkle_tree.cap.clone();
+        let domain_separator = self.domain_separator.unwrap_or_default();
+        let domain_separator_digest = C::Hasher::hash_pad(&domain_separator);
+        // TODO: This should also include an encoding of gate constraints.
+        let circuit_digest_parts = [
+            constants_sigmas_cap.flatten(),
+            domain_separator_digest.to_vec(),
+            vec![
+                F::from_canonical_usize(degree_bits),
+                /* Add other circuit data here */
+            ],
+        ];
+        let circuit_digest = C::Hasher::hash_no_pad(&circuit_digest_parts.concat());
+
+        let common = CommonCircuitData {
+            config: self.config,
+            fri_params,
+            gates,
+            selectors_info,
+            quotient_degree_factor,
+            num_gate_constraints,
+            num_constants,
+            num_public_inputs,
+            k_is,
+            num_partial_products,
+            num_lookup_polys,
+            num_lookup_selectors,
+            luts: self.luts,
+        };
+
+        let mut success = true;
+
+        if let Some(goal_data) = self.goal_common_data {
+            if goal_data != common {
+                warn!("The expected circuit data passed to cyclic recursion method did not match the actual circuit");
+                success = false;
+            }
+        }
+
+        let prover_only = ProverOnlyCircuitData::<F, C, D> {
+            generators: self.generators,
+            generator_indices_by_watches,
+            constants_sigmas_commitment,
+            sigmas: transpose_poly_values(sigma_vecs),
+            constant_evals,
+            subgroup,
+            public_inputs: self.public_inputs,
+            representative_map: forest.parents,
+            fft_root_table: Some(fft_root_table),
+            circuit_digest,
+            lookup_rows: self.lookup_rows.clone(),
+            lut_to_lookups: self.lut_to_lookups.clone(),
+        };
+
+        let verifier_only = VerifierOnlyCircuitData::<C, D> {
+            constants_sigmas_cap,
+            circuit_digest,
+        };
+
+        timing.print();
+        (
+            CircuitData {
+                prover_only,
+                verifier_only,
+                common,
+            },
+            success,
+        )
+    }
+
+    pub async fn try_build_with_options_async<C: GenericConfig<D, F = F>>(
+        self,
+        commit_to_sigma: bool,
+    ) -> (CircuitData<F, C, D>, bool) {
+        #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+        {
+            self.try_build_with_options::<C>(commit_to_sigma)
+        }
+
+        #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+        self.try_build_with_options_wasm::<C>(commit_to_sigma).await
+    }
+
+    pub async fn build_with_options_async<C: GenericConfig<D, F = F>>(
+        self,
+        commit_to_sigma: bool,
+    ) -> CircuitData<F, C, D> {
+        #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+        {
+            self.build_with_options::<C>(commit_to_sigma)
+        }
+
+        #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+        {
+            let (circuit_data, success) =
+                self.try_build_with_options_wasm::<C>(commit_to_sigma).await;
+            if !success {
+                panic!("Failed to build circuit");
+            }
+            circuit_data
+        }
+    }
+
+    pub async fn build_async<C: GenericConfig<D, F = F>>(self) -> CircuitData<F, C, D> {
+        #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+        {
+            self.build::<C>()
+        }
+
+        #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+        self.build_with_options_async::<C>(true).await
     }
 
     /// Builds a "full circuit", with both prover and verifier data.

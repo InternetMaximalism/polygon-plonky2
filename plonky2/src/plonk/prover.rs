@@ -4,10 +4,21 @@
 use alloc::{format, vec, vec::Vec};
 use core::cmp::min;
 use core::mem::swap;
+#[cfg(feature = "std")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+use std::time::Instant;
 
 use anyhow::{ensure, Result};
 use hashbrown::HashMap;
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+use js_sys::Date;
 use plonky2_maybe_rayon::*;
+#[cfg(all(
+    feature = "std",
+    not(all(feature = "gpu_merkle", target_arch = "wasm32"))
+))]
+use pollster::block_on;
 
 use super::circuit_builder::{LookupChallenges, LookupWire};
 use crate::field::extension::Extendable;
@@ -32,6 +43,7 @@ use crate::plonk::vanishing_poly::{eval_vanishing_poly_base_batch, get_lut_poly}
 use crate::plonk::vars::EvaluationVarsBaseBatch;
 use crate::timed;
 use crate::util::partial_products::{partial_products_and_z_gx, quotient_chunk_products};
+use crate::util::profiling::{with_timer, with_timer_async};
 use crate::util::timing::TimingTree;
 use crate::util::{log2_ceil, transpose};
 
@@ -110,6 +122,29 @@ pub fn set_lookup_wires<
     Ok(())
 }
 
+pub async fn prove_async<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+    prover_data: &ProverOnlyCircuitData<F, C, D>,
+    common_data: &CommonCircuitData<F, D>,
+    inputs: PartialWitness<F>,
+    timing: &mut TimingTree,
+) -> Result<ProofWithPublicInputs<F, C, D>>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    let generator_label = format!("plonk/run {} generators", prover_data.generators.len());
+    let partition_witness = with_timer(&generator_label, || {
+        timed!(
+            timing,
+            &format!("run {} generators", prover_data.generators.len()),
+            generate_partial_witness(inputs, prover_data, common_data)
+        )
+    })?;
+
+    prove_with_partition_witness_async(prover_data, common_data, partition_witness, timing).await
+}
+
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
@@ -127,6 +162,26 @@ where
     );
 
     prove_with_partition_witness(prover_data, common_data, partition_witness, timing)
+}
+
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+#[track_caller]
+pub fn prove<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+    _prover_data: &ProverOnlyCircuitData<F, C, D>,
+    _common_data: &CommonCircuitData<F, D>,
+    _inputs: PartialWitness<F>,
+    _timing: &mut TimingTree,
+) -> Result<ProofWithPublicInputs<F, C, D>>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    let location = core::panic::Location::caller();
+    panic!(
+        "plonk::prover::prove must be awaited on wasm with gpu_merkle enabled; use prove_async instead (called from {}:{})",
+        location.file(),
+        location.line()
+    );
 }
 
 /// Extract raw evaluation tables from a circuit without performing polynomial
@@ -185,14 +240,14 @@ where
     })
 }
 
-pub fn prove_with_partition_witness<
+pub async fn prove_with_partition_witness_async<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
     const D: usize,
 >(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
-    mut partition_witness: PartitionWitness<F>,
+    mut partition_witness: PartitionWitness<'_, F>,
     timing: &mut TimingTree,
 ) -> Result<ProofWithPublicInputs<F, C, D>>
 where
@@ -210,34 +265,43 @@ where
     let public_inputs = partition_witness.get_targets(&prover_data.public_inputs);
     let public_inputs_hash = C::InnerHasher::hash_no_pad(&public_inputs);
 
-    let witness = timed!(
-        timing,
-        "compute full witness",
-        partition_witness.full_witness()
-    );
-
-    let wires_values: Vec<PolynomialValues<F>> = timed!(
-        timing,
-        "compute wire polynomials",
-        witness
-            .wire_values
-            .par_iter()
-            .map(|column| PolynomialValues::new(column.clone()))
-            .collect()
-    );
-
-    let wires_commitment = timed!(
-        timing,
-        "compute wires commitment",
-        PolynomialBatch::<F, C, D>::from_values(
-            wires_values,
-            config.fri_config.rate_bits,
-            config.zero_knowledge && PlonkOracle::WIRES.blinding,
-            config.fri_config.cap_height,
+    let witness = with_timer("plonk/compute full witness", || {
+        timed!(
             timing,
-            prover_data.fft_root_table.as_ref(),
+            "compute full witness",
+            partition_witness.full_witness()
         )
-    );
+    });
+
+    let wires_values: Vec<PolynomialValues<F>> =
+        with_timer("plonk/compute wire polynomials", || {
+            timed!(
+                timing,
+                "compute wire polynomials",
+                witness
+                    .wire_values
+                    .par_iter()
+                    .map(|column| PolynomialValues::new(column.clone()))
+                    .collect()
+            )
+        });
+
+    let wires_commitment = with_timer_async("plonk/commit wires", || async {
+        timed!(
+            timing,
+            "compute wires commitment",
+            PolynomialBatch::<F, C, D>::from_values_async(
+                wires_values,
+                config.fri_config.rate_bits,
+                config.zero_knowledge && PlonkOracle::WIRES.blinding,
+                config.fri_config.cap_height,
+                timing,
+                prover_data.fft_root_table.as_ref(),
+            )
+            .await
+        )
+    })
+    .await;
 
     let mut challenger = Challenger::<F, C::Hasher>::new();
 
@@ -273,11 +337,19 @@ where
         common_data.quotient_degree_factor < common_data.config.num_routed_wires,
         "When the number of routed wires is smaller that the degree, we should change the logic to avoid computing partial products."
     );
-    let mut partial_products_and_zs = timed!(
-        timing,
-        "compute partial products",
-        all_wires_permutation_partial_products(&witness, &betas, &gammas, prover_data, common_data)
-    );
+    let mut partial_products_and_zs = with_timer("plonk/compute partial products", || {
+        timed!(
+            timing,
+            "compute partial products",
+            all_wires_permutation_partial_products(
+                &witness,
+                &betas,
+                &gammas,
+                prover_data,
+                common_data
+            )
+        )
+    });
 
     // Z is expected at the front of our batch; see `zs_range` and `partial_products_range`.
     let plonk_z_vecs = partial_products_and_zs
@@ -296,66 +368,98 @@ where
         zs_partial_products
     };
 
-    let partial_products_zs_and_lookup_commitment = timed!(
-        timing,
-        "commit to partial products, Z's and, if any, lookup polynomials",
-        PolynomialBatch::from_values(
-            zs_partial_products_lookups,
-            config.fri_config.rate_bits,
-            config.zero_knowledge && PlonkOracle::ZS_PARTIAL_PRODUCTS.blinding,
-            config.fri_config.cap_height,
-            timing,
-            prover_data.fft_root_table.as_ref(),
-        )
-    );
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    let partial_products_zs_and_lookup_commitment =
+        with_timer_async("plonk/commit partial products & Zs", || async {
+            timed!(
+                timing,
+                "commit to partial products, Z's and, if any, lookup polynomials",
+                PolynomialBatch::from_values_async(
+                    zs_partial_products_lookups,
+                    config.fri_config.rate_bits,
+                    config.zero_knowledge && PlonkOracle::ZS_PARTIAL_PRODUCTS.blinding,
+                    config.fri_config.cap_height,
+                    timing,
+                    prover_data.fft_root_table.as_ref(),
+                )
+                .await
+            )
+        })
+        .await;
+
+    #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+    let partial_products_zs_and_lookup_commitment =
+        with_timer("plonk/commit partial products & Zs", || {
+            timed!(
+                timing,
+                "commit to partial products, Z's and, if any, lookup polynomials",
+                PolynomialBatch::from_values(
+                    zs_partial_products_lookups,
+                    config.fri_config.rate_bits,
+                    config.zero_knowledge && PlonkOracle::ZS_PARTIAL_PRODUCTS.blinding,
+                    config.fri_config.cap_height,
+                    timing,
+                    prover_data.fft_root_table.as_ref(),
+                )
+            )
+        });
 
     challenger.observe_cap::<C::Hasher>(&partial_products_zs_and_lookup_commitment.merkle_tree.cap);
 
     let alphas = challenger.get_n_challenges(num_challenges);
 
-    let quotient_polys = timed!(
-        timing,
-        "compute quotient polys",
-        compute_quotient_polys::<F, C, D>(
-            common_data,
-            prover_data,
-            &public_inputs_hash,
-            &wires_commitment,
-            &partial_products_zs_and_lookup_commitment,
-            &betas,
-            &gammas,
-            &deltas,
-            &alphas,
-        )
-    );
-
-    let all_quotient_poly_chunks: Vec<PolynomialCoeffs<F>> = timed!(
-        timing,
-        "split up quotient polys",
-        quotient_polys
-            .into_par_iter()
-            .flat_map(|mut quotient_poly| {
-                quotient_poly.trim_to_len(quotient_degree).expect(
-                    "Quotient has failed, the vanishing polynomial is not divisible by Z_H",
-                );
-                // Split quotient into degree-n chunks.
-                quotient_poly.chunks(degree)
-            })
-            .collect()
-    );
-
-    let quotient_polys_commitment = timed!(
-        timing,
-        "commit to quotient polys",
-        PolynomialBatch::<F, C, D>::from_coeffs(
-            all_quotient_poly_chunks,
-            config.fri_config.rate_bits,
-            config.zero_knowledge && PlonkOracle::QUOTIENT.blinding,
-            config.fri_config.cap_height,
+    let quotient_polys = with_timer("plonk/compute quotient polys", || {
+        timed!(
             timing,
-            prover_data.fft_root_table.as_ref(),
+            "compute quotient polys",
+            compute_quotient_polys::<F, C, D>(
+                common_data,
+                prover_data,
+                &public_inputs_hash,
+                &wires_commitment,
+                &partial_products_zs_and_lookup_commitment,
+                &betas,
+                &gammas,
+                &deltas,
+                &alphas,
+            )
         )
-    );
+    });
+
+    let all_quotient_poly_chunks: Vec<PolynomialCoeffs<F>> =
+        with_timer("plonk/split quotient polys", || {
+            timed!(
+                timing,
+                "split up quotient polys",
+                quotient_polys
+                    .into_par_iter()
+                    .flat_map(|mut quotient_poly| {
+                        quotient_poly.trim_to_len(quotient_degree).expect(
+                            "Quotient has failed, the vanishing polynomial is not divisible by Z_H",
+                        );
+                        // Split quotient into degree-n chunks.
+                        quotient_poly.chunks(degree)
+                    })
+                    .collect()
+            )
+        });
+
+    let quotient_polys_commitment = with_timer_async("plonk/commit quotient polys", || async {
+        timed!(
+            timing,
+            "commit to quotient polys",
+            PolynomialBatch::<F, C, D>::from_coeffs_async(
+                all_quotient_poly_chunks,
+                config.fri_config.rate_bits,
+                config.zero_knowledge && PlonkOracle::QUOTIENT.blinding,
+                config.fri_config.cap_height,
+                timing,
+                prover_data.fft_root_table.as_ref(),
+            )
+            .await
+        )
+    })
+    .await;
 
     challenger.observe_cap::<C::Hasher>(&quotient_polys_commitment.merkle_tree.cap);
 
@@ -369,40 +473,46 @@ where
         "Opening point is in the subgroup."
     );
 
-    let openings = timed!(
-        timing,
-        "construct the opening set, including lookups",
-        OpeningSet::new(
-            zeta,
-            g,
-            &prover_data.constants_sigmas_commitment,
-            &wires_commitment,
-            &partial_products_zs_and_lookup_commitment,
-            &quotient_polys_commitment,
-            common_data
-        )
-    );
-    challenger.observe_openings(&openings.to_fri_openings());
-    let instance = common_data.get_fri_instance(zeta);
-
-    let opening_proof = timed!(
-        timing,
-        "compute opening proofs",
-        PolynomialBatch::<F, C, D>::prove_openings(
-            &instance,
-            &[
+    let openings = with_timer("plonk/construct opening set", || {
+        timed!(
+            timing,
+            "construct the opening set, including lookups",
+            OpeningSet::new(
+                zeta,
+                g,
                 &prover_data.constants_sigmas_commitment,
                 &wires_commitment,
                 &partial_products_zs_and_lookup_commitment,
                 &quotient_polys_commitment,
-            ],
-            &mut challenger,
-            &common_data.fri_params,
-            None,
-            None,
-            timing,
+                common_data,
+            )
         )
-    );
+    });
+    challenger.observe_openings(&openings.to_fri_openings());
+    let instance = common_data.get_fri_instance(zeta);
+
+    let opening_proof = with_timer_async("plonk/FRI opening proof", || async {
+        timed!(
+            timing,
+            "compute opening proofs",
+            PolynomialBatch::<F, C, D>::prove_openings_async(
+                &instance,
+                &[
+                    &prover_data.constants_sigmas_commitment,
+                    &wires_commitment,
+                    &partial_products_zs_and_lookup_commitment,
+                    &quotient_polys_commitment,
+                ],
+                &mut challenger,
+                &common_data.fri_params,
+                None,
+                None,
+                timing,
+            )
+            .await
+        )
+    })
+    .await;
 
     let proof = Proof::<F, C, D> {
         wires_cap: wires_commitment.merkle_tree.cap.clone(),
@@ -444,6 +554,13 @@ pub struct ProverPolynomials<F: RichField + Extendable<D>, const D: usize> {
 /// The standard `prove()` discards the polynomial batches after computing
 /// the FRI proof.  This function preserves them so that WHIR can commit
 /// to the same polynomials and prove evaluations at ζ.
+///
+/// SECURITY (H-2): not yet ported to the async/GPU pipeline. On
+/// `wasm32 + gpu_merkle` the underlying `prove_openings` it transitively
+/// calls is a panic stub, so this function is gated to the CPU path.
+/// Adding `prove_with_polys_async` is a follow-up; until then, callers
+/// on wasm-gpu must use one of the supported `*_async` entry points.
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove_with_polys<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
     prover_data: &ProverOnlyCircuitData<F, C, D>,
     common_data: &CommonCircuitData<F, D>,
@@ -463,7 +580,33 @@ where
     prove_with_partition_witness_and_polys(prover_data, common_data, partition_witness, timing)
 }
 
+/// SECURITY (H-2): explicit panic stub on `wasm32 + gpu_merkle` so that
+/// callers get a clear error at the entry point rather than a deeper
+/// panic from `fri::prover::fri_proof`. An async variant
+/// (`prove_with_polys_async`) is a planned follow-up.
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+#[track_caller]
+pub fn prove_with_polys<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+    _prover_data: &ProverOnlyCircuitData<F, C, D>,
+    _common_data: &CommonCircuitData<F, D>,
+    _inputs: PartialWitness<F>,
+    _timing: &mut TimingTree,
+) -> Result<(ProofWithPublicInputs<F, C, D>, ProverPolynomials<F, D>)>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    panic!(
+        "plonk::prover::prove_with_polys is not yet supported on wasm with gpu_merkle enabled; \
+         no async variant has been ported"
+    );
+}
+
 /// Like `prove_with_partition_witness()`, but also returns polynomial data.
+///
+/// SECURITY (H-2): also gated on non-wasm-gpu since it transitively calls
+/// the sync `prove_openings`, which is a panic stub on wasm-gpu.
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
 pub fn prove_with_partition_witness_and_polys<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -696,6 +839,61 @@ where
         },
         polys,
     ))
+}
+
+#[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+pub fn prove_with_partition_witness<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    prover_data: &ProverOnlyCircuitData<F, C, D>,
+    common_data: &CommonCircuitData<F, D>,
+    partition_witness: PartitionWitness<'_, F>,
+    timing: &mut TimingTree,
+) -> Result<ProofWithPublicInputs<F, C, D>>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    #[cfg(feature = "std")]
+    {
+        block_on(prove_with_partition_witness_async(
+            prover_data,
+            common_data,
+            partition_witness,
+            timing,
+        ))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        crate::util::nostd_block_on(prove_with_partition_witness_async(
+            prover_data,
+            common_data,
+            partition_witness,
+            timing,
+        ))
+    }
+}
+
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+pub fn prove_with_partition_witness<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
+    _prover_data: &ProverOnlyCircuitData<F, C, D>,
+    _common_data: &CommonCircuitData<F, D>,
+    _partition_witness: PartitionWitness<'_, F>,
+    _timing: &mut TimingTree,
+) -> Result<ProofWithPublicInputs<F, C, D>>
+where
+    C::Hasher: Hasher<F>,
+    C::InnerHasher: Hasher<F>,
+{
+    panic!(
+        "plonk::prover::prove_with_partition_witness must be awaited on wasm with gpu_merkle enabled"
+    );
 }
 
 /// Compute the partial products used in the `Z` polynomials.
@@ -943,6 +1141,104 @@ fn compute_all_lookup_polys<
 
 const BATCH_SIZE: usize = 32;
 
+#[cfg(feature = "std")]
+#[derive(Default)]
+struct QuotientEvalStats {
+    gather_ns: AtomicU64,
+    eval_ns: AtomicU64,
+    scale_ns: AtomicU64,
+    batches: AtomicU64,
+}
+
+#[cfg(feature = "std")]
+impl QuotientEvalStats {
+    fn record_gather(&self, elapsed: core::time::Duration) {
+        self.gather_ns
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn record_eval(&self, elapsed: core::time::Duration) {
+        self.eval_ns
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn record_scale(&self, elapsed: core::time::Duration) {
+        self.scale_ns
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn inc_batches(&self) {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn log(&self, label: &str) {
+        let batches = self.batches.load(Ordering::Relaxed);
+        if batches == 0 {
+            return;
+        }
+        let to_ms = |ns: u64| ns as f64 / 1_000_000.0;
+        log::info!(
+            "{label} -> gather {:.3} ms, eval {:.3} ms, scale {:.3} ms across {} batches",
+            to_ms(self.gather_ns.load(Ordering::Relaxed)),
+            to_ms(self.eval_ns.load(Ordering::Relaxed)),
+            to_ms(self.scale_ns.load(Ordering::Relaxed)),
+            batches
+        );
+    }
+}
+
+#[cfg(not(feature = "std"))]
+#[derive(Default)]
+struct QuotientEvalStats;
+
+#[cfg(not(feature = "std"))]
+impl QuotientEvalStats {
+    fn record_gather(&self, _elapsed: core::time::Duration) {}
+    fn record_eval(&self, _elapsed: core::time::Duration) {}
+    fn record_scale(&self, _elapsed: core::time::Duration) {}
+    fn inc_batches(&self) {}
+    fn log(&self, _label: &str) {}
+}
+
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct ProfilingInstant {
+    start_ms: f64,
+}
+
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+impl ProfilingInstant {
+    fn now() -> Self {
+        Self {
+            start_ms: Date::now(),
+        }
+    }
+
+    fn elapsed(&self) -> core::time::Duration {
+        let delta_ms = Date::now() - self.start_ms;
+        core::time::Duration::from_secs_f64(delta_ms / 1000.0)
+    }
+}
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy)]
+struct ProfilingInstant {
+    inner: Instant,
+}
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+impl ProfilingInstant {
+    fn now() -> Self {
+        Self {
+            inner: Instant::now(),
+        }
+    }
+
+    fn elapsed(&self) -> core::time::Duration {
+        self.inner.elapsed()
+    }
+}
+
 fn compute_quotient_polys<
     'a,
     F: RichField + Extendable<D>,
@@ -1021,6 +1317,8 @@ fn compute_quotient_polys<
     let points_batches = points.par_chunks(BATCH_SIZE);
     let num_batches = points.len().div_ceil(BATCH_SIZE);
 
+    let quotient_stats = QuotientEvalStats::default();
+
     let quotient_values: Vec<Vec<F>> = points_batches
         .enumerate()
         .flat_map(|(batch_i, xs_batch)| {
@@ -1045,6 +1343,11 @@ fn compute_quotient_polys<
 
             let mut local_constants_batch_refs = Vec::with_capacity(xs_batch.len());
             let mut local_wires_batch_refs = Vec::with_capacity(xs_batch.len());
+
+            #[cfg(feature = "std")]
+            quotient_stats.inc_batches();
+            #[cfg(feature = "std")]
+            let gather_start = ProfilingInstant::now();
 
             for (&i, &x) in indices_batch.iter().zip(xs_batch) {
                 let shifted_x = F::coset_shift() * x;
@@ -1090,6 +1393,9 @@ fn compute_quotient_polys<
                 s_sigmas_batch.push(s_sigmas);
             }
 
+            #[cfg(feature = "std")]
+            quotient_stats.record_gather(gather_start.elapsed());
+
             // NB (JN): I'm not sure how (in)efficient the below is. It needs measuring.
             let mut local_constants_batch =
                 vec![F::ZERO; xs_batch.len() * local_constants_batch_refs[0].len()];
@@ -1114,6 +1420,8 @@ fn compute_quotient_polys<
                 public_inputs_hash,
             );
 
+            #[cfg(feature = "std")]
+            let eval_start = ProfilingInstant::now();
             let mut quotient_values_batch = eval_vanishing_poly_base_batch::<F, D>(
                 common_data,
                 &indices_batch,
@@ -1132,7 +1440,11 @@ fn compute_quotient_polys<
                 &z_h_on_coset,
                 &lut_re_poly_evals_refs,
             );
+            #[cfg(feature = "std")]
+            quotient_stats.record_eval(eval_start.elapsed());
 
+            #[cfg(feature = "std")]
+            let scale_start = ProfilingInstant::now();
             for (&i, quotient_values) in indices_batch.iter().zip(quotient_values_batch.iter_mut())
             {
                 let denominator_inv = z_h_on_coset.eval_inverse(i);
@@ -1140,13 +1452,19 @@ fn compute_quotient_polys<
                     .iter_mut()
                     .for_each(|v| *v *= denominator_inv);
             }
+            #[cfg(feature = "std")]
+            quotient_stats.record_scale(scale_start.elapsed());
             quotient_values_batch
         })
         .collect();
 
-    transpose(&quotient_values)
-        .into_par_iter()
-        .map(PolynomialValues::new)
-        .map(|values| values.coset_ifft(F::coset_shift()))
-        .collect()
+    quotient_stats.log("plonk quotient constraints detail");
+
+    with_timer("plonk quotient coset IFFT", || {
+        transpose(&quotient_values)
+            .into_par_iter()
+            .map(PolynomialValues::new)
+            .map(|values| values.coset_ifft(F::coset_shift()))
+            .collect()
+    })
 }

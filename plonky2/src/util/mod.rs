@@ -13,10 +13,49 @@ use crate::field::types::Field;
 pub mod builder_hook;
 pub(crate) mod context_tree;
 pub(crate) mod partial_products;
+pub mod profiling;
 pub mod reducing;
 pub mod serialization;
 pub mod strided_view;
 pub mod timing;
+
+/// `no_std`-friendly future driver used by the synchronous prover wrappers
+/// when the `std` feature is disabled. On non-wasm-gpu builds the futures
+/// produced by `*_async` entry points are constructed from purely
+/// synchronous CPU code (no real I/O, no `wasm_bindgen_futures`), so they
+/// resolve on the very first poll.
+///
+/// We provide a tiny single-poll executor here so that the sync wrappers
+/// (e.g. `prove_with_partition_witness`, `fri_proof`,
+/// `PolynomialBatch::prove_openings`) can be called from `no_std`
+/// environments without pulling in `pollster` or `futures::executor`,
+/// both of which require `std`.
+///
+/// On `cfg(feature = "std")` we always prefer `pollster::block_on`, so
+/// this helper is gated to `no_std`.
+#[cfg(not(feature = "std"))]
+pub(crate) fn nostd_block_on<Fut: core::future::Future>(fut: Fut) -> Fut::Output {
+    use core::pin::pin;
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    // A no-op waker: all four vtable hooks are empty since we never park.
+    const VTABLE: RawWakerVTable =
+        RawWakerVTable::new(|p| RawWaker::new(p, &VTABLE), |_| {}, |_| {}, |_| {});
+    let raw = RawWaker::new(core::ptr::null(), &VTABLE);
+    // SAFETY: the vtable above honours all four `Waker` invariants
+    // (clone returns a fresh `RawWaker` with the same vtable; wake / wake_by_ref / drop are no-ops).
+    let waker = unsafe { Waker::from_raw(raw) };
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = pin!(fut);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!(
+            "nostd_block_on: future returned Pending, but the synchronous \
+             wrapper expected an immediately-Ready future. This indicates \
+             a real async operation reached a no_std code path."
+        ),
+    }
+}
 
 pub(crate) fn transpose_poly_values<F: Field>(polys: Vec<PolynomialValues<F>>) -> Vec<Vec<F>> {
     let poly_values = polys.into_iter().map(|p| p.values).collect::<Vec<_>>();

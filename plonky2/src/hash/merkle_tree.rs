@@ -5,8 +5,14 @@ use core::slice;
 
 use plonky2_maybe_rayon::*;
 use serde::{Deserialize, Serialize};
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use wasm_bindgen::JsCast;
 
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use super::merkle_tree_gpu;
 use crate::hash::hash_types::RichField;
+#[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+use crate::hash::hash_types::{HashOut, NUM_HASH_OUT_ELTS};
 use crate::hash::merkle_proofs::MerkleProof;
 use crate::plonk::config::{GenericHashOut, Hasher};
 use crate::util::log2_strict;
@@ -70,6 +76,60 @@ impl<F: RichField, H: Hasher<F>> Default for MerkleTree<F, H> {
         }
     }
 }
+
+#[cfg(feature = "merkle_debug_print")]
+fn log_merkle_tree_size(num_leaves: usize) {
+    log::info!(
+        "Constructing new Merkle tree on CPU with {} elements",
+        num_leaves
+    );
+}
+
+#[cfg(not(feature = "merkle_debug_print"))]
+fn log_merkle_tree_size(_: usize) {}
+
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    feature = "merkle_debug_print"
+))]
+fn log_merkle_tree_size_gpu(num_leaves: usize) {
+    log::info!(
+        "Constructing new Merkle tree on GPU with {} elements",
+        num_leaves
+    );
+}
+
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    not(feature = "merkle_debug_print")
+))]
+fn log_merkle_tree_size_gpu(_: usize) {}
+
+#[cfg(feature = "merkle_debug_print")]
+fn log_merkle_tree_done() {
+    log::info!("--> construction on CPU done!");
+}
+
+#[cfg(not(feature = "merkle_debug_print"))]
+fn log_merkle_tree_done() {}
+
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    feature = "merkle_debug_print"
+))]
+fn log_merkle_tree_done_gpu() {
+    log::info!("--> construction on GPU done!");
+}
+
+#[cfg(all(
+    feature = "gpu_merkle",
+    target_arch = "wasm32",
+    not(feature = "merkle_debug_print")
+))]
+fn log_merkle_tree_done_gpu() {}
 
 pub(crate) fn capacity_up_to_mut<T>(v: &mut Vec<T>, len: usize) -> &mut [MaybeUninit<T>] {
     assert!(v.capacity() >= len);
@@ -190,7 +250,9 @@ pub(crate) fn merkle_tree_prove<F: RichField, H: Hasher<F>>(
 }
 
 impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
-    pub fn new(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+    fn build_cpu(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        log_merkle_tree_size(leaves.len());
+
         let log2_leaves_len = log2_strict(leaves.len());
         assert!(
             cap_height <= log2_leaves_len,
@@ -216,11 +278,166 @@ impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
             cap.set_len(len_cap);
         }
 
+        log_merkle_tree_done();
+
         Self {
             leaves,
             digests,
             cap: MerkleCap(cap),
         }
+    }
+
+    pub fn new(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        Self::build_cpu(leaves, cap_height)
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    async fn build_gpu(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        log_merkle_tree_size_gpu(leaves.len());
+        let leaf_count = leaves.len();
+        //if leaf_count < 500000 {
+
+        let elems_per_leaf = leaves[0].len();
+        log::info!(
+            "{}",
+            format!(
+                "Leaf count: {}, elems per leaf: {}, cap_height: {}",
+                leaf_count, elems_per_leaf, cap_height
+            )
+        );
+
+        let log2_leaves = log2_strict(leaf_count);
+        if cap_height >= log2_leaves {
+            return Self::build_cpu(leaves, cap_height);
+        }
+
+        // Fall back to CPU for smaller trees — GPU overhead isn't worth it,
+        // and certain tree sizes (e.g. 4096 leaves) can cause GPU deadlocks.
+        if leaf_count < 8192 {
+            return Self::build_cpu(leaves, cap_height);
+        }
+
+        // SECURITY (Attacker C1): the WGSL leaf-hash kernel always applies
+        // the Poseidon permutation, but the CPU `Hasher::hash_or_noop` skips
+        // the permutation when `inputs.len() * 8 <= H::HASH_SIZE` (returning
+        // the zero-padded canonical bytes directly). For short leaves the GPU
+        // and CPU paths therefore disagree on the leaf digest, producing
+        // mismatched Merkle roots. Fall back to CPU whenever a leaf is short
+        // enough to trigger the no-op branch on the verifier side.
+        if elems_per_leaf * core::mem::size_of::<F>() <= H::HASH_SIZE {
+            return Self::build_cpu(leaves, cap_height);
+        }
+
+        // Fall back to CPU when WASM memory is above 3.5GB to avoid OOM.
+        // The GPU path requires a staging buffer (~2x digest size) that the CPU path doesn't need.
+        {
+            let mem = wasm_bindgen::memory()
+                .dyn_into::<js_sys::WebAssembly::Memory>()
+                .unwrap();
+            let buf = mem.buffer();
+            let buf_size = if let Ok(ab) = buf.dyn_into::<js_sys::ArrayBuffer>() {
+                ab.byte_length()
+            } else if let Ok(sab) = mem.buffer().dyn_into::<js_sys::SharedArrayBuffer>() {
+                sab.byte_length()
+            } else {
+                0
+            };
+            let mem_mb = buf_size as f64 / (1024.0 * 1024.0);
+            if mem_mb > 3500.0 {
+                web_sys::console::warn_1(
+                    &format!(
+                        "WASM memory at {:.0}MB (>3.5GB), falling back to CPU Merkle to avoid OOM",
+                        mem_mb
+                    )
+                    .into(),
+                );
+                return Self::build_cpu(leaves, cap_height);
+            }
+        }
+        if let Some(result) = merkle_tree_gpu::try_build_merkle_tree::<F>(&leaves, cap_height) {
+            match result {
+                Ok(job) => match job.await_async().await {
+                    Ok(output) => {
+                        log_merkle_tree_done_gpu();
+                        return Self::from_gpu_output(leaves, output);
+                    }
+                    Err(err) => {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "Merkle GPU job failed; falling back to CPU construction: {err}"
+                            )
+                            .into(),
+                        );
+                    }
+                },
+                Err(err) => {
+                    web_sys::console::warn_1(
+                        &format!("Merkle GPU path unavailable; falling back to CPU: {err}").into(),
+                    );
+                }
+            }
+        } else {
+            web_sys::console::warn_1(
+                &format!("WebGPU context not initialized. Falling back to CPU construction!")
+                    .into(),
+            );
+        }
+
+        Self::build_cpu(leaves, cap_height)
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    fn from_gpu_output(leaves: Vec<Vec<F>>, output: merkle_tree_gpu::GpuMerkleOutput<F>) -> Self {
+        // SECURITY (Attacker C2 / M-1): the WGSL Merkle kernels are hard-coded
+        // to Poseidon-Goldilocks and emit `HashOut<F>` digests (32 bytes:
+        // `NUM_HASH_OUT_ELTS * size_of::<F>()`). The bytes round-trip below
+        // is sound *only* when `H::HASH_SIZE` matches that footprint:
+        //   - If `H::HASH_SIZE > 32`, `H::Hash::from_bytes` would read out
+        //     of bounds.
+        //   - If `H::HASH_SIZE < 32`, bytes would be silently truncated.
+        // Reject unsupported hashers loudly here. The check is a single
+        // const-evaluable comparison per call (constant-folded in release).
+        let expected_hash_bytes = NUM_HASH_OUT_ELTS * core::mem::size_of::<F>();
+        assert_eq!(
+            H::HASH_SIZE,
+            expected_hash_bytes,
+            "GPU Merkle output is only valid when H::HASH_SIZE matches HashOut<F>; \
+             refusing to convert digests for an incompatible hasher"
+        );
+
+        // For `H::Hash == HashOut<F>` (e.g. `PoseidonGoldilocksConfig`) the
+        // round-trip is byte-for-byte identity. For any other hasher with the
+        // same `HASH_SIZE` (e.g. `KeccakHash<32>`) the resulting digests will
+        // not match what `H` itself would have computed, so the verifier
+        // rejects the proof — a liveness failure, not a soundness failure
+        // (which is the safety property we must preserve). This avoids the
+        // `mem::transmute` used by upstream Lita, whose layout assumption was
+        // UB whenever `H::Hash != HashOut<F>`.
+        let merkle_tree_gpu::GpuMerkleOutput { digests, cap } = output;
+        let digests: Vec<H::Hash> = digests
+            .into_iter()
+            .map(|h| H::Hash::from_bytes(&h.to_bytes()))
+            .collect();
+        let cap_vec: Vec<H::Hash> = cap
+            .into_iter()
+            .map(|h| H::Hash::from_bytes(&h.to_bytes()))
+            .collect();
+
+        Self {
+            leaves,
+            digests,
+            cap: MerkleCap(cap_vec),
+        }
+    }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    pub async fn new_async(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        Self::build_gpu(leaves, cap_height).await
+    }
+
+    #[cfg(not(all(feature = "gpu_merkle", target_arch = "wasm32")))]
+    pub async fn new_async(leaves: Vec<Vec<F>>, cap_height: usize) -> Self {
+        Self::build_cpu(leaves, cap_height)
     }
 
     pub fn get(&self, i: usize) -> &[F] {

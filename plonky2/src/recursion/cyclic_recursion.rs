@@ -174,6 +174,30 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         )?;
         Ok(())
     }
+
+    #[cfg(all(feature = "gpu_merkle", target_arch = "wasm32"))]
+    pub async fn conditionally_verify_cyclic_proof_or_dummy_async<
+        C: GenericConfig<D, F = F> + 'static,
+    >(
+        &mut self,
+        condition: BoolTarget,
+        cyclic_proof_with_pis: &ProofWithPublicInputsTarget<D>,
+        common_data: &CommonCircuitData<F, D>,
+    ) -> Result<()>
+    where
+        C::Hasher: AlgebraicHasher<F>,
+    {
+        let (dummy_proof_with_pis_target, dummy_verifier_data_target) =
+            self.dummy_proof_and_vk_async::<C>(common_data).await?;
+        self.conditionally_verify_cyclic_proof::<C>(
+            condition,
+            cyclic_proof_with_pis,
+            &dummy_proof_with_pis_target,
+            &dummy_verifier_data_target,
+            common_data,
+        )?;
+        Ok(())
+    }
 }
 
 /// Additional checks to be performed on a cyclic recursive proof in addition to verifying the proof.

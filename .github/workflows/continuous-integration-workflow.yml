@@ -86,6 +86,14 @@ jobs:
           CARGO_INCREMENTAL: 1
           RUST_BACKTRACE: 1
 
+      - name: Check in plonky2 subdirectory with gpu_merkle (WebGPU)
+        run: cargo check --manifest-path plonky2/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features gpu_merkle
+        env:
+          RUSTFLAGS: -Copt-level=3 -Cdebug-assertions -Coverflow-checks=y -Cdebuginfo=0
+          RUST_LOG: 1
+          CARGO_INCREMENTAL: 1
+          RUST_BACKTRACE: 1
+
       - name: Check in starky subdirectory for wasm targets
         run: cargo check --manifest-path starky/Cargo.toml --target wasm32-unknown-unknown --no-default-features
         env:
