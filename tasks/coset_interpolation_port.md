@@ -239,8 +239,24 @@ This task is **incomplete until every item in §5 P1 is checked**. Specifically:
 
 ### Verification matrix (final)
 
+Before pushing any commit on this branch, run all of:
+```sh
+cargo fmt --all --check               # NOT `-p plonky2` only — CI runs --all
+cargo clippy --all-features --all-targets -- -D warnings \
+    -A incomplete-features -A clippy::uninlined_format_args
+(cd mle/contracts && forge test)      # 79/79 must pass
+cargo check --target wasm32-unknown-unknown --manifest-path plonky2/Cargo.toml \
+    --no-default-features --features gpu_merkle
+```
+
+Lesson from this PR: `cargo fmt -p plonky2 -p starky` is NOT sufficient
+because CI runs `cargo fmt --all` and the `plonky2_mle` workspace member
+is in scope. Always use `--all`.
+
 | Check | Status |
 |---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --all-features --all-targets -- -D warnings ...` | clean |
 | `forge build` | green |
 | `forge test --match-contract CosetInterpolationTest` | 5/5 pass (9 combos: bits 1..5) |
 | `forge test --match-test test_e2e_coset_recursive_verify` | PASS |
