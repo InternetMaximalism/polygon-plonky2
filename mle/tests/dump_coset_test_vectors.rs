@@ -109,16 +109,27 @@ fn dump_solidity(combos: &[(usize, usize)]) {
         let (wires, expected) = one_combo(bits, deg, ((bits * 100) + deg) as u64);
         let gate = <CosetInterpolationGate<F, D>>::with_max_degree(bits, deg);
         println!();
-        println!("    /// subgroup_bits = {}, max_degree (constructor arg) = {} (effective degree = {})", bits, deg, gate.degree());
+        println!(
+            "    /// subgroup_bits = {}, max_degree (constructor arg) = {} (effective degree = {})",
+            bits,
+            deg,
+            gate.degree()
+        );
         println!(
             "    function vector_k{}_d{}() internal pure returns (uint256[] memory, uint256[] memory) {{",
             bits, deg
         );
-        println!("        uint256[] memory wires = new uint256[]({});", wires.len());
+        println!(
+            "        uint256[] memory wires = new uint256[]({});",
+            wires.len()
+        );
         for (i, w) in wires.iter().enumerate() {
             println!("        wires[{}] = {};", i, fmt_field(*w));
         }
-        println!("        uint256[] memory expected = new uint256[]({});", expected.len());
+        println!(
+            "        uint256[] memory expected = new uint256[]({});",
+            expected.len()
+        );
         for (i, e) in expected.iter().enumerate() {
             println!("        expected[{}] = {};", i, fmt_field(*e));
         }
@@ -132,7 +143,12 @@ fn dump_solidity(combos: &[(usize, usize)]) {
     println!("        cs = new uint256[2][]({});", combos.len());
     for (i, &(bits, deg)) in combos.iter().enumerate() {
         let gate = <CosetInterpolationGate<F, D>>::with_max_degree(bits, deg);
-        println!("        cs[{}] = [uint256({}), uint256({})];", i, bits, gate.degree());
+        println!(
+            "        cs[{}] = [uint256({}), uint256({})];",
+            i,
+            bits,
+            gate.degree()
+        );
     }
     println!("    }}");
     println!("}}");

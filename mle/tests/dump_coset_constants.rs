@@ -78,17 +78,16 @@ fn dump_constants() {
         // The plonky2 gate uses `(x, F::ZERO)` placeholder pairs because
         // `barycentric_weights` operates on `(x, y)` pairs but only `x` is
         // needed for the weights. We replicate that exactly.
-        let weights: Vec<F> = barycentric_weights(
-            &domain
-                .iter()
-                .map(|&x| (x, F::ZERO))
-                .collect::<Vec<_>>(),
-        );
+        let weights: Vec<F> =
+            barycentric_weights(&domain.iter().map(|&x| (x, F::ZERO)).collect::<Vec<_>>());
         assert_eq!(domain.len(), 1 << bits, "subgroup length mismatch");
         assert_eq!(weights.len(), 1 << bits, "weights length mismatch");
 
         println!();
-        println!("    /// Two-adic subgroup of size 2^{bits} (= {}).", 1 << bits);
+        println!(
+            "    /// Two-adic subgroup of size 2^{bits} (= {}).",
+            1 << bits
+        );
         println!(
             "    bytes internal constant SUBGROUP_{bits} = hex\"{}\";",
             pack(&domain)
@@ -104,7 +103,9 @@ fn dump_constants() {
     println!();
     println!("    /// Read the `i`-th u64 from a packed `bytes` blob (8 bytes / entry).");
     println!("    /// Mirrors `PoseidonConstants.readU64`.");
-    println!("    function readU64(bytes memory blob, uint256 i) internal pure returns (uint256 v) {{");
+    println!(
+        "    function readU64(bytes memory blob, uint256 i) internal pure returns (uint256 v) {{"
+    );
     println!("        // Defense-in-depth (audit L2): bound-check `i` against the");
     println!("        // packed-blob length so a buggy caller cannot silently read");
     println!("        // past the constants table (which `mload` would otherwise pad");
@@ -118,14 +119,18 @@ fn dump_constants() {
     println!();
     println!("    /// Return the `i`-th element of the two-adic subgroup of size 2^bits.");
     println!("    /// Reverts if `bits` is outside the supported set or `i >= 2^bits`.");
-    println!("    function subgroupElement(uint256 bits, uint256 i) internal pure returns (uint256) {{");
+    println!(
+        "    function subgroupElement(uint256 bits, uint256 i) internal pure returns (uint256) {{"
+    );
     for &bits in SUPPORTED_BITS {
         println!("        if (bits == {bits}) return readU64(SUBGROUP_{bits}, i);");
     }
     println!("        revert(\"CosetInterpolation: subgroup_bits not supported\");");
     println!("    }}");
     println!();
-    println!("    /// Return the `i`-th barycentric weight for the two-adic subgroup of size 2^bits.");
+    println!(
+        "    /// Return the `i`-th barycentric weight for the two-adic subgroup of size 2^bits."
+    );
     println!("    function weight(uint256 bits, uint256 i) internal pure returns (uint256) {{");
     for &bits in SUPPORTED_BITS {
         println!("        if (bits == {bits}) return readU64(WEIGHTS_{bits}, i);");
