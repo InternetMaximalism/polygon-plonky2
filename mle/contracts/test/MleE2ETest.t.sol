@@ -17,12 +17,12 @@ contract MleE2ETest is Test {
         verifier = new MleVerifier();
     }
 
-    // Issue R2-#1: Solidity port now supports the full mul-chain gate set
-    // (ArithmeticGate, ConstantGate, PublicInputGate, NoopGate, PoseidonGate).
-    // recursive_verify uses additional gates (CosetInterpolationGate,
-    // RandomAccessGate, ReducingGate, ExponentiationGate, BaseSumGate, …)
-    // that are NOT yet ported; it is expected to revert with
-    // "unsupported gate with non-zero filter".
+    // Historical context: the original "minimal port" (Issue R2-#1) only
+    // covered ArithmeticGate / ConstantGate / PublicInputGate / NoopGate.
+    // Commit 72d5f0f8 expanded coverage to 12 gates; the present commit
+    // adds the 13th (CosetInterpolationGate). All six legacy fixtures
+    // and the new `coset_recursive_verify` fixture now verify end-to-end
+    // on-chain.
     function test_e2e_small_mul() public view {
         _runE2E("test/fixtures/small_mul.json");
     }
@@ -45,6 +45,16 @@ contract MleE2ETest is Test {
 
     function test_e2e_recursive_verify() public view {
         _runE2E("test/fixtures/recursive_verify.json");
+    }
+
+    /// E2E: recursive proof whose inner FRI is forced to fold once
+    /// (`reduction_arity_bits = [4]`) so the outer verifier circuit
+    /// instantiates a `CosetInterpolationGate` row at non-zero filter.
+    /// This is the test that actually exercises the
+    /// `_evalCosetInterpolation` dispatcher branch on-chain — the
+    /// existing `recursive_verify.json` fixture was crafted to skip it.
+    function test_e2e_coset_recursive_verify() public view {
+        _runE2E("test/fixtures/coset_recursive_verify.json");
     }
 
     // ═══════════════════════════════════════════════════════════════════

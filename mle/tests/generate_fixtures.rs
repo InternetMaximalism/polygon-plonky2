@@ -97,6 +97,94 @@ fn build_recursive_circuit() -> (
     (outer_data, outer_pw)
 }
 
+/// Build a recursive circuit whose **inner** FRI is forced to fold at
+/// least once, so the **outer** verifier circuit instantiates a
+/// `CosetInterpolationGate` row at non-zero filter. This is the fixture
+/// that exercises the Solidity `_evalCosetInterpolation` evaluator end
+/// to end (see `tasks/coset_interpolation_port.md` §5 P2).
+///
+/// Why the dedicated builder: the default `build_recursive_circuit`
+/// keeps the inner circuit so small (one multiplication, padded to
+/// degree_bits ≈ 3) that the inner FRI does not need any folding
+/// (`reduction_arity_bits = []` from
+/// `FriReductionStrategy::ConstantArityBits(4,5)` since the trip-count
+/// condition fails). We override the inner config in two ways:
+///   1. **Many multiplications** to push the inner `degree_bits` past
+///      the cap that `ConstantArityBits` needs to fold once.
+///   2. **`Fixed(vec![4])` reduction strategy** as a belt-and-braces
+///      guarantee that the inner FRI always emits exactly one
+///      `arity_bits = 4` fold step (= subgroup_bits = 4 = supported
+///      Solidity branch). Without (2), tweaks elsewhere (rate_bits,
+///      cap_height, mul-chain length) could silently drop the fold and
+///      the fixture would regress to "no CosetInterpolation".
+fn build_recursive_circuit_with_coset_interp() -> (
+    plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+    PartialWitness<F>,
+) {
+    use plonky2::fri::reduction_strategies::FriReductionStrategy;
+
+    // Inner config: force exactly one FRI fold of arity 16
+    // (= `subgroup_bits = 4` for the outer's `CosetInterpolationGate`).
+    let mut inner_config = CircuitConfig::standard_recursion_config();
+    inner_config.fri_config.reduction_strategy = FriReductionStrategy::Fixed(vec![4]);
+
+    let mut inner_builder = CircuitBuilder::<F, D>::new(inner_config);
+    let x = inner_builder.add_virtual_target();
+    let mut current = x;
+    // Long-enough mul-chain so the inner satisfies the FRI total-arity
+    // check `total_arities ≤ degree_bits + rate_bits − cap_height`.
+    // With `Fixed(vec![4])`, `rate_bits = 3`, `cap_height = 4`, we need
+    // `inner_degree_bits ≥ 5`. plonky2's ArithmeticGate packs many mul
+    // ops per row, so we err on the side of plenty: 2000 ops → about 100
+    // rows → `degree_bits ≥ 7` with selector/padding overhead. This is
+    // overkill but resilient to upstream gate-packing changes.
+    for _ in 0..2000 {
+        current = inner_builder.mul(current, x);
+    }
+    inner_builder.register_public_input(current);
+    let inner_data = inner_builder.build::<C>();
+
+    let mut inner_pw = PartialWitness::new();
+    inner_pw.set_target(x, F::from_canonical_u64(2)).unwrap();
+    let inner_proof = inner_data.prove(inner_pw).unwrap();
+
+    // Outer: same standard config (unchanged).
+    let outer_config = CircuitConfig::standard_recursion_config();
+    let mut outer_builder = CircuitBuilder::<F, D>::new(outer_config);
+    let proof_t = outer_builder.add_virtual_proof_with_pis(&inner_data.common);
+    let vd_t =
+        outer_builder.add_virtual_verifier_data(inner_data.common.config.fri_config.cap_height);
+    outer_builder.verify_proof::<C>(&proof_t, &vd_t, &inner_data.common);
+    for &pi in &proof_t.public_inputs {
+        outer_builder.register_public_input(pi);
+    }
+    let outer_data = outer_builder.build::<C>();
+
+    // SANITY: the outer's gate list MUST include `CosetInterpolationGate`.
+    // If this fails, the fixture would silently regress to no-CosetInterp
+    // and the on-chain E2E test would no longer exercise the new gate.
+    let coset_in_outer = outer_data
+        .common
+        .gates
+        .iter()
+        .any(|g| g.0.id().starts_with("CosetInterpolationGate"));
+    assert!(
+        coset_in_outer,
+        "build_recursive_circuit_with_coset_interp: outer gate list does not contain \
+         CosetInterpolationGate. Inner FRI strategy did not produce a fold step; \
+         this fixture would not exercise the Solidity `_evalCosetInterpolation` branch."
+    );
+
+    let mut outer_pw = PartialWitness::new();
+    outer_pw
+        .set_proof_with_pis_target(&proof_t, &inner_proof)
+        .unwrap();
+    outer_pw
+        .set_verifier_data_target(&vd_t, &inner_data.verifier_only)
+        .unwrap();
+    (outer_data, outer_pw)
+}
+
 #[test]
 fn generate_and_verify_all_fixtures() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -120,6 +208,13 @@ fn generate_and_verify_all_fixtures() {
         ("large_mul", Box::new(|| build_mul_chain_circuit(200))),
         ("poseidon_hash", Box::new(build_hash_circuit)),
         ("recursive_verify", Box::new(build_recursive_circuit)),
+        // E2E fixture that exercises `_evalCosetInterpolation` on-chain.
+        // See `build_recursive_circuit_with_coset_interp` for why the
+        // default `recursive_verify` does NOT trigger that branch.
+        (
+            "coset_recursive_verify",
+            Box::new(build_recursive_circuit_with_coset_interp),
+        ),
         ("huge_mul", Box::new(|| build_mul_chain_circuit(100000))),
     ];
 

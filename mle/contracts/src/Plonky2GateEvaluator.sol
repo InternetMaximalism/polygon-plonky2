@@ -4,26 +4,38 @@ pragma solidity ^0.8.25;
 import {GoldilocksField as F} from "./GoldilocksField.sol";
 import {PoseidonGate} from "./PoseidonGate.sol";
 import {PoseidonConstants} from "./PoseidonConstants.sol";
+import {CosetInterpolationConstants} from "./CosetInterpolationConstants.sol";
 
-/// @title Plonky2GateEvaluator — minimal port (Issue R2-#1)
+/// @title Plonky2GateEvaluator — Solidity port of Plonky2's gate constraint
+///         evaluation, used by the MLE verifier's Φ_gate sumcheck terminal.
 ///
-/// Supports the 4 simple gate types that appear in mul-chain fixtures:
-///   ArithmeticGate (num_ops × [c0·w0·w1 + c1·w2 − w3]),
-///   ConstantGate (num_consts × [const_i − w_i]),
-///   PublicInputGate (4 × [w_i − PI_hash[i]]),
-///   NoopGate (no constraints).
+/// SUPPORTED GATES (gate_id → constraint family):
+///     0  NoopGate              — no constraints
+///     1  ConstantGate          — num_consts × [const_i − w_i]
+///     2  PublicInputGate       — 4 × [w_i − PI_hash[i]]
+///     3  ArithmeticGate        — num_ops × [c0·w0·w1 + c1·w2 − w3]
+///     4  PoseidonGate          — full 12-state Poseidon-Goldilocks permutation
+///                                (round constants + MDS + S-box; see PoseidonGate.sol)
+///     5  PoseidonMdsGate       — MDS-only variant of PoseidonGate
+///     6  ArithmeticExtensionGate — extension-field arithmetic ops
+///     7  MulExtensionGate      — extension-field multiplications
+///     9  BaseSumGate           — base-B limb decomposition checks
+///    10  ReducingGate          — Horner-style reduction (base field)
+///    11  ReducingExtensionGate — Horner-style reduction (extension field)
+///    12  RandomAccessGate      — multiplexer w/ binary selectors
+///    13  CosetInterpolationGate — barycentric Lagrange interpolation over a
+///                                  two-adic coset (used by recursive FRI verifier)
 ///
-/// PoseidonGate, CosetInterpolationGate, ReducingGate, LookupGate, …
-/// are intentionally NOT ported. Fixtures that activate those gates at
-/// any row will fail Solidity verification with a completeness (not
-/// soundness) error — the Rust prover remains trusted to include their
-/// contribution; if the Solidity evaluator returns a smaller sum the
-/// terminal check mismatch causes rejection.
+/// UNSUPPORTED GATES (any row with filter ≠ 0 reverts explicitly — never
+/// silently accepted):
+///     8  ExponentiationGate    — not yet ported; recursion circuits may emit it
+///        LookupGate / LookupTableGate — only used if the inner circuit has
+///                                       lookup tables (out of scope for the
+///                                       recursive verifier fixture today)
 ///
-/// For `large_mul` and `huge_mul` fixtures, selector[0] is constant 3
-/// (ArithmeticGate) and selector[1] is constant UNUSED: every gate
-/// except ArithmeticGate has filter = 0 at the sumcheck output point,
-/// so only ArithmeticGate actually contributes to the sum.
+/// Per-fixture wire interpretation, plus how `numOrConsts` / `param2` / `param3`
+/// map to each gate's parameters, is documented on the `GateInfo` struct
+/// below and on each `_evalXxx` helper.
 library Plonky2GateEvaluator {
     using F for uint256;
 
@@ -198,10 +210,18 @@ library Plonky2GateEvaluator {
                     filter,
                     perIdxAccum
                 );
+            } else if (gi.gateId == GATE_COSET_INTERPOLATION) {
+                _evalCosetInterpolation(
+                    wires,
+                    gi.numOrConsts, // subgroup_bits
+                    gi.param2,      // degree
+                    filter,
+                    perIdxAccum
+                );
             } else {
-                // Unsupported gate (ExponentiationGate, CosetInterpolationGate,
-                // LookupGate, …). SECURITY: if filter != 0, we revert to signal
-                // a completeness failure. Never silently accepts.
+                // Unsupported gate (ExponentiationGate, LookupGate / LookupTableGate).
+                // SECURITY: if filter != 0, we revert to signal a completeness
+                // failure. Never silently accepts.
                 revert("unsupported gate with non-zero filter");
             }
         }
@@ -806,5 +826,353 @@ library Plonky2GateEvaluator {
         cIdx++;
 
         return cIdx;
+    }
+
+    /// @dev Working state of the Plonky2 `partial_interpolate` recurrence,
+    ///      held in memory so we can pass it by reference between
+    ///      helper calls without exhausting the EVM stack.
+    ///
+    ///      The recurrence (see `coset_interpolation.rs::partial_interpolate`):
+    ///        for each (x_j, w_j, val_j) in current chunk:
+    ///          term = sep - x_j            (Ext-Ext subtraction; sep = shifted_eval_pt)
+    ///          weighted_val = val_j · w_j  (Ext scalar mul by base-field weight)
+    ///          eval' = eval · term + weighted_val · prod
+    ///          prod' = prod · term
+    ///
+    ///      Every Ext value is stored as a `(a0, a1)` pair representing
+    ///      `a0 + a1 · X` with `X² = EXT2_W = 7` over Goldilocks.
+    struct CosetState {
+        uint256 evalA;
+        uint256 evalB;
+        uint256 prodA;
+        uint256 prodB;
+        uint256 sepA;
+        uint256 sepB;
+    }
+
+    /// @dev Bundle of loop-invariant arguments for the per-intermediate
+    ///      iteration. Boxed into a struct so we can pass it by reference
+    ///      (single stack slot) and stay below Yul's stack limit.
+    struct _CosetLoopArgs {
+        uint256 subgroupBits;
+        uint256 degree;
+        uint256 N;
+        uint256 numInt;
+        uint256 startInt;
+        uint256 i;
+        uint256 filter;
+    }
+
+    /// @dev Handle one intermediate `i`:
+    ///      1. Read `intermediate_eval[i]` / `intermediate_prod[i]` from wires.
+    ///      2. Emit the two constraint pairs (eval diff / prod diff) into `acc`.
+    ///      3. Reseed `(eval, prod)` with those intermediates.
+    ///      4. Run `partial_interpolate` over the next domain chunk.
+    ///      Returns the updated `cIdx` (advanced by 4).
+    function _cosetCheckIntermediateAndAdvance(
+        CosetState memory st,
+        uint256[] memory wires,
+        uint256[] memory acc,
+        uint256 cIdx,
+        _CosetLoopArgs memory args
+    ) private pure returns (uint256) {
+        uint256 ieA = wires[args.startInt + 2 * args.i];
+        uint256 ieB = wires[args.startInt + 2 * args.i + 1];
+        uint256 ipA = wires[args.startInt + 2 * args.numInt + 2 * args.i];
+        uint256 ipB = wires[args.startInt + 2 * args.numInt + 2 * args.i + 1];
+
+        // eval diff + prod diff (4 base-field constraint slots).
+        _cosetEmitExtDiff(acc, cIdx, args.filter, ieA, ieB, st.evalA, st.evalB);
+        _cosetEmitExtDiff(acc, cIdx + 2, args.filter, ipA, ipB, st.prodA, st.prodB);
+
+        // Reseed and advance.
+        st.evalA = ieA;
+        st.evalB = ieB;
+        st.prodA = ipA;
+        st.prodB = ipB;
+
+        uint256 startIdx = 1 + (args.degree - 1) * (args.i + 1);
+        uint256 endIdx = startIdx + (args.degree - 1);
+        if (endIdx > args.N) {
+            endIdx = args.N;
+        }
+        _cosetRunChunk(st, wires, args.subgroupBits, startIdx, endIdx);
+
+        return cIdx + 4;
+    }
+
+    /// @dev Emit `filter · (lhs - rhs)` for both Ext components into
+    ///      `acc[cIdx]` and `acc[cIdx+1]`. Used for every Ext constraint
+    ///      pair in this gate (shift consistency, intermediates, final).
+    ///
+    /// SECURITY (defense-in-depth, audit M1): self-reduce every operand
+    /// with `mod(..., p)` before `sub(p, rhs)`. This matches the explicit
+    /// `// SECURITY (C2)…` pattern used by every other gate in this file
+    /// (`_evalConstant`, `_evalPublicInput`, `_evalArithmeticExt`, …) to
+    /// neutralise the `K = 2^256 mod P` injection attack at the gate
+    /// boundary, in case `MleVerifier._requireCanonicalProofInputs`
+    /// upstream ever fails to canonicalize a wire — a regression there
+    /// otherwise becomes an in-coset soundness break. The cost is one
+    /// extra `mod` per Ext component (negligible relative to the
+    /// surrounding `mulmod`s).
+    function _cosetEmitExtDiff(
+        uint256[] memory acc,
+        uint256 cIdx,
+        uint256 filter,
+        uint256 lhsA,
+        uint256 lhsB,
+        uint256 rhsA,
+        uint256 rhsB
+    ) private pure {
+        uint256 p = F.P;
+        uint256 dA;
+        uint256 dB;
+        assembly ("memory-safe") {
+            // Self-reduce wire reads before the modular sub.
+            let lA := mod(lhsA, p)
+            let lB := mod(lhsB, p)
+            let rA := mod(rhsA, p)
+            let rB := mod(rhsB, p)
+            dA := addmod(lA, sub(p, rA), p)
+            dB := addmod(lB, sub(p, rB), p)
+        }
+        acc[cIdx] = addmod(acc[cIdx], mulmod(filter, dA, p), p);
+        acc[cIdx + 1] = addmod(acc[cIdx + 1], mulmod(filter, dB, p), p);
+    }
+
+    /// @dev Run `partial_interpolate` over `wires[1 + 2·startIdx .. 1 + 2·endIdx)`,
+    ///      using `subgroupBits` (to look up domain/weights) and the
+    ///      `shifted_evaluation_point` already stored in `st`. Mutates `st`.
+    ///      Factoring this loop into its own function bounds the stack pressure
+    ///      inside `_evalCosetInterpolation` (Solidity / Yul stack-too-deep
+    ///      otherwise; `via_ir` alone is not enough for this gate).
+    function _cosetRunChunk(
+        CosetState memory st,
+        uint256[] memory wires,
+        uint256 subgroupBits,
+        uint256 startIdx,
+        uint256 endIdx
+    ) private pure {
+        for (uint256 j = startIdx; j < endIdx; j++) {
+            uint256 xj = CosetInterpolationConstants.subgroupElement(subgroupBits, j);
+            uint256 wj = CosetInterpolationConstants.weight(subgroupBits, j);
+            uint256 valA = wires[1 + 2 * j];
+            uint256 valB = wires[1 + 2 * j + 1];
+            _cosetPartialStep(st, xj, wj, valA, valB);
+        }
+    }
+
+    /// @dev Single step of `partial_interpolate`: advance `(eval, prod)` by
+    ///      one domain-point/value pair. See `CosetState` for the formula.
+    ///
+    ///      SECURITY: this exactly mirrors the inner loop body of
+    ///      `coset_interpolation.rs::partial_interpolate`. Any deviation
+    ///      causes the Solidity-evaluated constraint value to disagree
+    ///      with the Rust prover's witness, breaking completeness (honest
+    ///      proofs rejected). Bit-for-bit equivalence is enforced by the
+    ///      Foundry test `Plonky2GateEvaluatorCosetInterpolation.t.sol`.
+    function _cosetPartialStep(
+        CosetState memory st,
+        uint256 xj,
+        uint256 wj,
+        uint256 valA,
+        uint256 valB
+    ) private pure {
+        uint256 p = F.P;
+        assembly ("memory-safe") {
+            // Load state pointers.
+            let evalA := mload(st)
+            let evalB := mload(add(st, 0x20))
+            let prodA := mload(add(st, 0x40))
+            let prodB := mload(add(st, 0x60))
+            let sepA := mload(add(st, 0x80))
+            let sepB := mload(add(st, 0xa0))
+
+            // term = sep - (x_j, 0) = (sepA - x_j, sepB)
+            let t0 := addmod(sepA, sub(p, xj), p)
+            let t1 := sepB
+
+            // weighted_val = val · w (component-wise base-field mul).
+            let wvA := mulmod(valA, wj, p)
+            let wvB := mulmod(valB, wj, p)
+
+            // Ext2 mul (a0 + a1·X)·(b0 + b1·X)
+            //   = (a0·b0 + W·a1·b1, a0·b1 + a1·b0), with W = 7.
+
+            // eval · term
+            let etA := addmod(
+                mulmod(evalA, t0, p),
+                mulmod(EXT2_W, mulmod(evalB, t1, p), p),
+                p
+            )
+            let etB := addmod(
+                mulmod(evalA, t1, p),
+                mulmod(evalB, t0, p),
+                p
+            )
+
+            // weighted_val · prod
+            let wpA := addmod(
+                mulmod(wvA, prodA, p),
+                mulmod(EXT2_W, mulmod(wvB, prodB, p), p),
+                p
+            )
+            let wpB := addmod(
+                mulmod(wvA, prodB, p),
+                mulmod(wvB, prodA, p),
+                p
+            )
+
+            // next_eval = eval · term + weighted_val · prod
+            let newEvalA := addmod(etA, wpA, p)
+            let newEvalB := addmod(etB, wpB, p)
+
+            // next_prod = prod · term
+            let newProdA := addmod(
+                mulmod(prodA, t0, p),
+                mulmod(EXT2_W, mulmod(prodB, t1, p), p),
+                p
+            )
+            let newProdB := addmod(
+                mulmod(prodA, t1, p),
+                mulmod(prodB, t0, p),
+                p
+            )
+
+            mstore(st, newEvalA)
+            mstore(add(st, 0x20), newEvalB)
+            mstore(add(st, 0x40), newProdA)
+            mstore(add(st, 0x60), newProdB)
+            // sepA / sepB unchanged.
+        }
+    }
+
+    /// @dev `CosetInterpolationGate::eval_unfiltered_base_one` port.
+    ///
+    /// Wire layout (after the dispatcher strips `numSelectors` constants —
+    /// CosetInterpolation has `num_constants() == 0`, so the wire array is
+    /// the gate's full local-wires slice unchanged):
+    ///
+    ///   wires[0]                                    = shift (base-field scalar)
+    ///   wires[1 + 2·i .. 1 + 2·(i+1))               = values[i] for i in 0..N   (Ext)
+    ///   wires[1 + 2·N .. 1 + 2·(N+1))               = evaluation_point          (Ext)
+    ///   wires[1 + 2·(N+1) .. 1 + 2·(N+2))           = evaluation_value          (Ext)
+    ///   startInt = 1 + 2·(N+2) = 2·N + 5
+    ///   wires[startInt + 2·i .. startInt + 2·(i+1)) = intermediate_eval[i] for i in 0..numInt
+    ///   wires[startInt + 2·numInt + 2·i .. +2)      = intermediate_prod[i] for i in 0..numInt
+    ///   wires[startInt + 4·numInt .. +2)            = shifted_evaluation_point  (Ext)
+    ///
+    /// where N = 2^subgroup_bits and numInt = (N - 2) / (degree - 1).
+    ///
+    /// Constraint sequence written into `acc` (each Ext diff → 2 base-field entries):
+    ///
+    ///   acc[0..2):                    evaluation_point - shift · shifted_eval_pt
+    ///   for i in 0..numInt:
+    ///     acc[2+4·i .. 2+4·i+2):      intermediate_eval[i]  - computed_eval[i]
+    ///     acc[2+4·i+2 .. 2+4·i+4):    intermediate_prod[i]  - computed_prod[i]
+    ///   acc[2+4·numInt .. +2):        evaluation_value      - computed_eval_final
+    ///
+    /// SECURITY: param validation is intentionally strict. `subgroupBits ∉ {1,2,3,4,5}`
+    /// (the currently-supported set; see `mle/tests/dump_coset_constants.rs`
+    /// `SUPPORTED_BITS`) reverts via `CosetInterpolationConstants.{subgroupElement,weight}`
+    /// because those helpers carry the canonical revert. `degree < 2` would
+    /// underflow `degree - 1` so we explicitly reject it. `degree > N` is
+    /// rejected to prevent the chunk loop reading past the constants table.
+    // INTERNAL visibility (not private) so the Foundry test harness in
+    // `test/CosetInterpolationTest.t.sol` can invoke this directly and
+    // verify bit-exact equivalence with the Rust gate evaluator. The
+    // production caller is always the dispatcher above.
+    function _evalCosetInterpolation(
+        uint256[] memory wires,
+        uint256 subgroupBits,
+        uint256 degree,
+        uint256 filter,
+        uint256[] memory acc
+    ) internal pure {
+        // INVARIANT I3 (tasks/coset_interpolation_port.md §4.1): degree >= 2.
+        require(degree >= 2, "CosetInterpolation: degree must be >= 2");
+
+        uint256 N = uint256(1) << subgroupBits;
+        require(N >= 2, "CosetInterpolation: subgroup must have >= 2 points");
+        // Defense-in-depth (audit L1): a malformed gate descriptor with
+        // `degree > N` would let the initial chunk loop run past the
+        // checked-in subgroup table. Honest `with_max_degree` ensures
+        // `degree ≤ N` by construction; guarding here surfaces drift
+        // between the fixture generator and the on-chain constants.
+        require(degree <= N, "CosetInterpolation: degree > subgroup size");
+
+        // INVARIANT I2 / A1: the constants library reverts on unsupported
+        // `subgroupBits`. Touch it eagerly so we surface the error before
+        // doing any work on the wires.
+        // (`weight(_, 0)` doubles as both a sanity check and a constant load.)
+        CosetInterpolationConstants.weight(subgroupBits, 0);
+
+        uint256 numInt = (N - 2) / (degree - 1);
+        uint256 startInt = 2 * N + 5;
+        uint256 shiftedEvalIdx = startInt + 4 * numInt;
+
+        uint256 p = F.P;
+
+        // Constraint pair 1: evaluation_point - shift · shifted_evaluation_point.
+        // `shift` is base-field; scalar-mul on Ext = component-wise mul.
+        {
+            uint256 shift = wires[0];
+            uint256 sepA = wires[shiftedEvalIdx];
+            uint256 sepB = wires[shiftedEvalIdx + 1];
+            _cosetEmitExtDiff(
+                acc,
+                0,
+                filter,
+                wires[1 + 2 * N],
+                wires[1 + 2 * N + 1],
+                mulmod(shift, sepA, p),
+                mulmod(shift, sepB, p)
+            );
+        }
+
+        // Seed the recurrence with (eval, prod) = (0, 1) and run
+        // `partial_interpolate` over `domain[0..degree]`.
+        CosetState memory st = CosetState({
+            evalA: 0,
+            evalB: 0,
+            prodA: 1,
+            prodB: 0,
+            sepA: wires[shiftedEvalIdx],
+            sepB: wires[shiftedEvalIdx + 1]
+        });
+
+        _cosetRunChunk(st, wires, subgroupBits, 0, degree);
+
+        // For each intermediate: two constraint pairs (eval diff, prod diff),
+        // then advance the recurrence over the next chunk.
+        uint256 cIdx = 2;
+        for (uint256 i = 0; i < numInt; i++) {
+            cIdx = _cosetCheckIntermediateAndAdvance(
+                st,
+                wires,
+                acc,
+                cIdx,
+                _CosetLoopArgs({
+                    subgroupBits: subgroupBits,
+                    degree: degree,
+                    N: N,
+                    numInt: numInt,
+                    startInt: startInt,
+                    i: i,
+                    filter: filter
+                })
+            );
+        }
+
+        // C₃: evaluation_value - computed_eval_final.
+        _cosetEmitExtDiff(
+            acc,
+            cIdx,
+            filter,
+            wires[1 + 2 * (N + 1)],
+            wires[1 + 2 * (N + 1) + 1],
+            st.evalA,
+            st.evalB
+        );
     }
 }
