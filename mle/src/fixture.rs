@@ -202,6 +202,7 @@ pub struct GateInfoFixture {
     ///   BaseSumGate: `B` (base) — not currently exposed via `gate.id()`, so
     ///     we hardcode 2 for `BaseSumGate<2>` occurrences (only one in scope).
     ///   RandomAccessGate: `num_copies`
+    ///   CosetInterpolationGate: `degree`
     ///   Else: 0
     pub param2: u16,
     /// Tertiary gate-specific parameter:
@@ -494,7 +495,18 @@ fn classify_gate(id: &str) -> (u8, u16, u16, u16) {
         let num_extra = num_after(id, "num_extra_constants:");
         (12, bits, num_copies, num_extra)
     } else if id.starts_with("CosetInterpolationGate") {
-        (13, num_after(id, "subgroup_bits:"), 0, 0)
+        // `subgroup_bits` drives the wire layout (2^k Ext values + 2^k weights).
+        // `degree` is the algebraic degree of the gate's constraints; the
+        // Solidity evaluator uses it to compute
+        //   `num_intermediates = (2^subgroup_bits - 2) / (degree - 1)`,
+        // which determines how many intermediate-eval/prod constraint pairs
+        // are checked. Both come from the Debug-derived `gate.id()` string.
+        (
+            13,
+            num_after(id, "subgroup_bits:"),
+            num_after(id, "degree:"),
+            0,
+        )
     } else {
         (255, 0, 0, 0)
     }
