@@ -99,15 +99,17 @@ contract CosetInterpolationTest is Test {
     }
 
     /// Verify that unsupported `subgroup_bits` revert at the constants
-    /// library entry. We exercise `bits = 5` (larger than supported).
+    /// library entry. We currently support bits ∈ {1,2,3,4,5} (see
+    /// `mle/tests/dump_coset_constants.rs` `SUPPORTED_BITS` — the
+    /// generator that produces `CosetInterpolationConstants.sol`), so
+    /// exercise bits=6.
     function test_unsupportedSubgroupBits_revert() public {
-        // Wire array must be at least 2·N + 7 + 4·numInt long; with bits=5
-        // (N=32) and degree=4 → numInt = 10, length ≥ 113. Allocate plenty.
-        uint256[] memory wires = new uint256[](256);
-        uint256[] memory acc = new uint256[](256);
-        // bits = 5 → would need SUBGROUP_5 which doesn't exist.
+        // Allocate generously so the wire OOB doesn't trigger first.
+        // For bits=6 (N=64) the gate would need ≥ 2·64 + 4·numInt + 9 wires.
+        uint256[] memory wires = new uint256[](1024);
+        uint256[] memory acc = new uint256[](1024);
         vm.expectRevert(bytes("CosetInterpolation: subgroup_bits not supported"));
-        harness.eval(wires, 5, 4, 1, acc);
+        harness.eval(wires, 6, 4, 1, acc);
     }
 
     function test_degreeBelowTwo_revert() public {
@@ -164,6 +166,8 @@ contract CosetInterpolationTest is Test {
         if (bits == 3 && degree == 4) return CosetInterpolationVectors.vector_k3_d4();
         if (bits == 4 && degree == 4) return CosetInterpolationVectors.vector_k4_d4();
         if (bits == 4 && degree == 6) return CosetInterpolationVectors.vector_k4_d6();
+        if (bits == 5 && degree == 4) return CosetInterpolationVectors.vector_k5_d4();
+        if (bits == 5 && degree == 8) return CosetInterpolationVectors.vector_k5_d8();
         revert("CosetInterpolationTest: vector not found for (bits, degree)");
     }
 

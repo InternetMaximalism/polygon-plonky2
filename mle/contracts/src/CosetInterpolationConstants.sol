@@ -38,6 +38,12 @@ library CosetInterpolationConstants {
     /// Barycentric weights for SUBGROUP_4.
     bytes internal constant WEIGHTS_4 = hex"efffffff10000001000000000000010000000000001000000000000100000000000010000000000001000000000000000000000ffffffff00000ffffffff00000ffffffff0000000fffffffeffffff01fffffffefff00001fffffffe00000001ffffefff00000001feffffff00000001ffffffef00000011fffeffff00010001";
 
+    /// Two-adic subgroup of size 2^5 (= 32).
+    bytes internal constant SUBGROUP_5 = hex"0000000000000001000000000000004000000000000010000000000000040000000000000100000000000000400000000000001000000000000004000000000000010000000000000040000000000000100000000000000000000003fffffffc000000ffffffff0000003fffffffc000000ffffffff0000003fffffffc000000ffffffff00000000fffffffeffffffc1fffffffefffff001fffffffefffc0001fffffffeff000001fffffffec0000001ffffffef00000001fffffbff00000001fffeffff00000001ffbfffff00000001efffffff00000001fffffffb00000005fffffeff00000101ffffbfff00004001ffefffff00100001fbffffff04000001";
+
+    /// Barycentric weights for SUBGROUP_5.
+    bytes internal constant WEIGHTS_5 = hex"f7ffffff080000010000000000000002000000000000008000000000000020000000000000080000000000000200000000000000800000000000002000000000000008000000000000020000000000000080000000000000200000000000000000000007fffffff8000001fffffffe0000007fffffff8000001fffffffe0000007fffffff8000000fffffffefffffffffffffffeffffff81fffffffeffffe001fffffffefff80001fffffffefe000001fffffffe80000001ffffffdf00000001fffff7ff00000001fffdffff00000001ff7fffff00000001dfffffff00000001fffffff700000009fffffdff00000201ffff7fff00008001ffdfffff00200001";
+
     /// Read the `i`-th u64 from a packed `bytes` blob (8 bytes / entry).
     /// Mirrors `PoseidonConstants.readU64`.
     function readU64(bytes memory blob, uint256 i) internal pure returns (uint256 v) {
@@ -59,6 +65,7 @@ library CosetInterpolationConstants {
         if (bits == 2) return readU64(SUBGROUP_2, i);
         if (bits == 3) return readU64(SUBGROUP_3, i);
         if (bits == 4) return readU64(SUBGROUP_4, i);
+        if (bits == 5) return readU64(SUBGROUP_5, i);
         revert("CosetInterpolation: subgroup_bits not supported");
     }
 
@@ -68,6 +75,7 @@ library CosetInterpolationConstants {
         if (bits == 2) return readU64(WEIGHTS_2, i);
         if (bits == 3) return readU64(WEIGHTS_3, i);
         if (bits == 4) return readU64(WEIGHTS_4, i);
+        if (bits == 5) return readU64(WEIGHTS_5, i);
         revert("CosetInterpolation: subgroup_bits not supported");
     }
 }

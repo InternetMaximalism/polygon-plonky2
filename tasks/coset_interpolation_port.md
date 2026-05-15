@@ -1,8 +1,8 @@
 # CosetInterpolationGate Solidity Port — Plan & Threat Model
 
-**Status:** Phase P1 complete — Solidity port + Foundry tests + attacker audit done.
-P2 (real recursive-proof fixture exercising `CosetInterpolation` on-chain) remains a
-follow-up. Honest accounting in §8 below.
+**Status:** Phase P1 and Phase P2 both complete. End-to-end recursive proof with
+`CosetInterpolation` verified on-chain (gas spike + negative-probe both confirm the
+new branch is actually executed). Honest accounting in §8 / §9 below.
 
 **Goal:** Add `_evalCosetInterpolation(...)` to `mle/contracts/src/Plonky2GateEvaluator.sol` and dispatch `gateId = 13` to it, so that recursive plonky2 proofs that include a `CosetInterpolationGate` row at non-zero filter can be verified on-chain instead of reverting with `"unsupported gate with non-zero filter"`.
 
@@ -222,21 +222,16 @@ This task is **incomplete until every item in §5 P1 is checked**. Specifically:
 
 ### What is NOT done (do not claim completeness here)
 
-- [ ] **Phase P2: a real recursive-proof fixture that exercises `CosetInterpolation`
-  with non-zero filter on-chain.** The existing `recursive_verify.json` fixture was
-  crafted to avoid CosetInterpolation entirely. Without P2, we have verified that
-  *if* the gate runs, it returns the same per-constraint values as Rust — but we
-  have **not** verified that an end-to-end recursive proof produced by Lita-style
-  recursion + emitted through `mle::fixture::ProofFixture` + verified by
-  `MleVerifier.verify(...)` actually reaches the `_evalCosetInterpolation` branch
-  with the wires it expects. This is a known gap; downstream consumers should
-  produce a `coset_recursive_verify.json` and add an E2E test before relying on
-  this for production proofs.
-- [ ] **`subgroup_bits ∈ {5, …}` support.** The constants library covers
-  `{1, 2, 3, 4}`. Higher arities revert at runtime with
-  `"CosetInterpolation: subgroup_bits not supported"`. Adding more requires
-  re-running `cargo test --test dump_coset_constants --release -- --nocapture`
-  with `SUPPORTED_BITS` extended.
+- [ ] **`subgroup_bits ≥ 6` support.** The constants library now covers
+  `{1, 2, 3, 4, 5}`. `bits = 6` would require 169 wires (vs the
+  `standard_recursion_config` budget of 135), so it is not reachable
+  without a wider config. Adding 6+ requires re-running
+  `cargo test --release --test dump_coset_constants -- --nocapture`
+  with `SUPPORTED_BITS` extended AND a wider circuit config upstream.
+- [ ] **Property-style randomisation in Foundry (audit I1, P1).** Test
+  vectors use one deterministic seed per `(bits, degree)`. A forge-fuzz
+  harness that derives expected via the Rust dumper at run-time would
+  tighten the soundness guarantee further. Not blocking, not in scope today.
 - [ ] **Property-style randomisation in Foundry.** Test vectors use one
   deterministic seed per `(bits, degree)`. A forge-fuzz harness that derives
   expected via the Rust dumper at run-time would tighten the soundness
@@ -247,12 +242,86 @@ This task is **incomplete until every item in §5 P1 is checked**. Specifically:
 | Check | Status |
 |---|---|
 | `forge build` | green |
-| `forge test --match-contract CosetInterpolationTest` | 5/5 pass |
-| `forge test` (full suite) | 78/78 pass |
-| Regenerate constants from Rust → byte-equal to checked-in file | yes (run `cargo test --release --test dump_coset_constants -- --nocapture` and diff) |
-| Bit-exact match Rust ↔ Solidity for all `(bits, degree)` in §6 | yes (see `test_bitExactMatch_filterOne`) |
-| Attacker subagent findings ≥ MEDIUM | M1, L1, L2 all applied |
-| E2E recursive proof using CosetInterpolation verified on-chain | **NOT DONE** — see P2 above |
+| `forge test --match-contract CosetInterpolationTest` | 5/5 pass (9 combos: bits 1..5) |
+| `forge test --match-test test_e2e_coset_recursive_verify` | PASS |
+| `forge test` (full suite) | **79/79 pass** |
+| Regenerate constants from Rust → byte-equal to checked-in file | yes |
+| Bit-exact match Rust ↔ Solidity for all 9 `(bits, degree)` combos | yes |
+| Attacker subagent findings P1 | M1, L1, L2 all applied |
+| Attacker subagent findings P2 | M1 (`bits=5` in doc) + M2 (stale ref in test comment) applied; LOW (mass fixture regen) documented |
+| E2E recursive proof using CosetInterpolation verified on-chain | **DONE** — `coset_recursive_verify.json`, gas spike +1.96M, negative probe confirmed |
+
+## 9. Phase P2 outcome (E2E recursive proof on-chain)
+
+### What was done
+
+- `mle/tests/generate_fixtures.rs::build_recursive_circuit_with_coset_interp`:
+  - Inner FRI forced to fold exactly once via `FriReductionStrategy::Fixed(vec![4])`
+    + 2000-multiplication chain to satisfy `total_arities ≤ degree_bits + rate_bits - cap_height`.
+  - Outer circuit uses `standard_recursion_config` (unchanged), verifies inner via `verify_proof`.
+  - Builder-side `assert!(coset_in_outer, ...)` guards against silent regression:
+    if a future plonky2 upgrade stops emitting `CosetInterpolationGate` for this
+    config, fixture generation panics rather than producing a fixture that
+    doesn't exercise the new branch.
+- `mle/contracts/test/fixtures/coset_recursive_verify.json` generated:
+  `degree_bits = 12`, 13 gate types including
+  `CosetInterpolationGate { subgroup_bits: 4, degree: 6 }` (gate_id=13,
+  numOrConsts=4, param2=6).
+- `mle/contracts/test/MleE2ETest.t.sol::test_e2e_coset_recursive_verify` PASS.
+- Gas: `recursive_verify` (no coset) = 8.12M, `coset_recursive_verify` = 10.08M.
+  +1.96M = 24% — consistent with executing `_evalCosetInterpolation` for one
+  CosetInterpolation row plus 28 additional constraint emits.
+
+### How we know the branch actually executes (not bypassed)
+
+Three independent confirmations:
+
+1. **Empirical (gas)**: +1.96M gas delta. If the dispatch fell through to the
+   `unsupported gate` revert, the test would fail. If it silently bypassed (filter=0),
+   gas would be ~unchanged.
+
+2. **Negative probe**: temporarily replaced the dispatch body with
+   `revert("PROBE: coset_disabled")`. The E2E test failed with that exact message.
+   This proves the dispatcher reaches the branch. The probe was reverted immediately
+   (`git diff HEAD` on `Plonky2GateEvaluator.sol` after restore = empty).
+
+3. **Filter check (independent attacker subagent verification)**: computed the
+   selector filter value at the FS-derived sumcheck point r:
+     - `s = preprocessedIndividualEvalsAtRGateV2[2]` (= the selector poly eval)
+     - `filter_CosetInterp = (12 − s)·(UNUSED − s) mod p = 4761291109470363177 ≠ 0`
+   Non-zero filter → dispatcher does NOT `continue` → `_evalCosetInterpolation` runs.
+
+### Subgroup_bits extension (P2 part 2)
+
+- `mle/tests/dump_coset_constants.rs::SUPPORTED_BITS`: `{1,2,3,4}` → `{1,2,3,4,5}`.
+- `CosetInterpolationConstants.sol`: now has `SUBGROUP_5` / `WEIGHTS_5`.
+- `CosetInterpolationVectors.sol`: now has `vector_k5_d4`, `vector_k5_d8`.
+- `CosetInterpolationTest.t.sol`: dispatch table extended; unsupported-bits test
+  switched to `bits=6` (was `bits=5`).
+- Attacker subagent **independently verified** `SUBGROUP_5[1] = 64` is a primitive
+  32nd root of unity in Goldilocks, and `WEIGHTS_5` entries are bit-exact with
+  `1/Π_{i≠j}(x_j − x_i)` computed in Python.
+
+### Why we cap at bits=5
+
+`CosetInterpolationGate::num_wires() = 2·N + 4·num_intermediates + 9` where
+`N = 2^subgroup_bits`. For `bits=5, degree=8`: num_wires = 89. For `bits=6`:
+num_wires ≥ 169 — exceeds `standard_recursion_config`'s `num_wires = 135`. To
+support `bits ≥ 6` the downstream consumer must use a wider config (e.g.
+`CircuitConfig::wide_ecc_config` or a custom one); regeneration is mechanical
+once that's settled.
+
+### Note on mass fixture regeneration (audit LOW)
+
+Regenerating `coset_recursive_verify.json` via the existing
+`generate_and_verify_all_fixtures` test also rewrote the 6 pre-existing
+fixtures because spongefish's `ProverState::new_std` seeds the prover RNG with
+`from_entropy()`. The downstream commitment roots and FS challenges therefore
+change run-to-run even when the circuit is unchanged. This is not a soundness
+issue (proofs remain independently sound and verify on-chain), but is review
+noise: 6 unrelated JSON files now show large diffs. If this becomes a CI
+problem, a follow-up should plumb a deterministic seed through
+`ProverState::new_std` for fixture regeneration.
 
 ### Files changed in this PR
 

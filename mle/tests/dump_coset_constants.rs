@@ -22,10 +22,21 @@ use plonky2::field::types::{Field, PrimeField64};
 use plonky2_field::goldilocks_field::GoldilocksField as F;
 
 /// `subgroup_bits` values we generate constants for. Higher values are
-/// rejected by the Solidity gate at runtime — extend this array (and the
-/// matching `_subgroupK`/`_weightsK` selectors in
-/// `CosetInterpolationConstants.sol`) to support more.
-const SUPPORTED_BITS: &[usize] = &[1, 2, 3, 4];
+/// rejected by the Solidity gate at runtime — extend this array to
+/// support more, then regenerate `CosetInterpolationConstants.sol`.
+///
+/// Why the cap is 5 by default:
+///   `CosetInterpolationGate::num_wires() = 2·N + 4·num_intermediates + 9`
+///   where `N = 2^subgroup_bits`. The standard recursion config caps
+///   `num_wires` at 135, so:
+///     bits=5 → 89 wires  ✓ fits standard_recursion_config
+///     bits=6 → 169 wires ✗ requires a wider config (uncommon)
+///     bits=7 → 337 wires ✗
+///   We support up to 5 to cover every recursive setup that uses the
+///   default `standard_recursion_config`. Extending to 6+ requires
+///   downstream consumers to use a wider config (or to add an explicit
+///   `num_wires` argument upstream); regenerating is mechanical.
+const SUPPORTED_BITS: &[usize] = &[1, 2, 3, 4, 5];
 
 fn pack(values: &[F]) -> String {
     let mut s = String::new();

@@ -42,6 +42,14 @@ const COMBOS: &[(usize, usize)] = &[
     (3, 4),
     (4, 4),
     (4, 6),
+    // subgroup_bits = 5 (32 points) — exercised by recursive proofs whose
+    // inner FRI uses arity_bits=4 across multiple folds, plus by any
+    // future caller with `reduction_arity_bits = [5, ...]`. The two
+    // representative degrees match plonky2's
+    // `max_quotient_degree_factor`: 4 (small circuits) and 8 (typical
+    // recursion config).
+    (5, 4),
+    (5, 8),
 ];
 
 /// Generate a `(wires, expected_constraints)` test vector for one

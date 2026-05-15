@@ -1072,10 +1072,12 @@ library Plonky2GateEvaluator {
     ///     acc[2+4·i+2 .. 2+4·i+4):    intermediate_prod[i]  - computed_prod[i]
     ///   acc[2+4·numInt .. +2):        evaluation_value      - computed_eval_final
     ///
-    /// SECURITY: param validation is intentionally strict. `subgroupBits ∉ {1,2,3,4}`
-    /// reverts via `CosetInterpolationConstants.{subgroupElement,weight}` because
-    /// those helpers carry the canonical revert. `degree < 2` would underflow
-    /// `degree - 1` so we explicitly reject it.
+    /// SECURITY: param validation is intentionally strict. `subgroupBits ∉ {1,2,3,4,5}`
+    /// (the currently-supported set; see `mle/tests/dump_coset_constants.rs`
+    /// `SUPPORTED_BITS`) reverts via `CosetInterpolationConstants.{subgroupElement,weight}`
+    /// because those helpers carry the canonical revert. `degree < 2` would
+    /// underflow `degree - 1` so we explicitly reject it. `degree > N` is
+    /// rejected to prevent the chunk loop reading past the constants table.
     // INTERNAL visibility (not private) so the Foundry test harness in
     // `test/CosetInterpolationTest.t.sol` can invoke this directly and
     // verify bit-exact equivalence with the Rust gate evaluator. The
