@@ -1,191 +1,194 @@
-# WHIR/MLE構成の最適性分析レポート
+# WHIR/MLE Configuration Optimality Analysis Report
 
-## 概要
+## Overview
 
-本レポートでは、`plonky2_mle_paper.pdf` に記述されたマルチリニア・ネイティブ証明システムの構成を、WHIRのクエリ特性の観点から分析し、改善案を提示する。
+This report analyzes the multilinear native proof system described in `plonky2_mle_paper.pdf` from the perspective of WHIR query costs and proposes improvements.
 
-現在の構成は **2つのWHIRプルーフ** を必要とする：
-1. **メインWHIR**: preprocessed + witness 多項式の split-commit（チャレンジ導出前にコミット）
-2. **補助WHIR**: C̃ + h̃ のバッチコミット（チャレンジ導出後にコミット）
+The current design requires **two WHIR proofs**:
+1. **Main WHIR**: split-commit of the preprocessed and witness polynomials, committed before challenge derivation.
+2. **Auxiliary WHIR**: batched commitment for C̃ and h̃, committed after challenge derivation.
 
-結論として、**補助WHIRプルーフの完全な除去が可能**であり、これにより検証コスト約50%削減、プルーフサイズの大幅削減が達成できる。
+The conclusion is that **the auxiliary WHIR proof can be removed entirely**, yielding roughly a 50% reduction in verification cost and a significant reduction in proof size.
 
 ---
 
-## 1. WHIRのクエリ特性の整理
+## 1. WHIR Query Characteristics
 
-WHIRは以下の特性を持つマルチリニアPCS：
+WHIR is a multilinear PCS with the following properties:
 
-| 特性 | 詳細 |
+| Property | Details |
 |------|------|
-| コミット | ハイパーキューブ上の評価値のMerkle化 → ルートハッシュ |
-| オープン | 指定点 r での評価値 f(r) を証明 |
-| フォールディング | 各ラウンドで `folding_factor` 変数を一度に畳み込み |
-| クエリ数 | q ≈ λ / log(1/ρ)、ρ=rate（現在 1/16 → q ≈ λ/4） |
-| 検証コスト | O(q · n/ff · 2^ff) ハッシュ評価（ff=folding_factor） |
-| プルーフサイズ | O(q · n/ff) Merkleパス + フォールディングデータ |
-| バッチ対応 | 同一点での複数多項式のバッチオープンはネイティブサポート |
+| Commit | Merkle commitment over evaluations on the hypercube, producing a root hash |
+| Open | Proves the evaluation value `f(r)` at a specified point `r` |
+| Folding | Folds `folding_factor` variables at once per round |
+| Query count | `q ≈ λ / log(1/ρ)`, where `ρ = rate` (currently `1/16`, so `q ≈ λ/4`) |
+| Verification cost | `O(q · n/ff · 2^ff)` hash evaluations, where `ff = folding_factor` |
+| Proof size | `O(q · n/ff)` Merkle paths plus folding data |
+| Batch support | Native support for batch opening multiple polynomials at the same point |
 
-**重要な観察**: WHIRの検証コストはプルーフ1件あたり固定的に高い。2件のWHIRプルーフは単純に2倍のコストがかかる。Sumcheckラウンド多項式のサイズ増加（数百バイト）と比較して、WHIRプルーフ1件（数KB〜数十KB）のコスト差は桁違いに大きい。
+**Key observation**: WHIR verification has a high fixed cost per proof. Two WHIR proofs roughly double that cost. Compared with the size increase of sumcheck round polynomials, which is on the order of a few hundred bytes, the cost of a single WHIR proof, typically several KB to tens of KB, is orders of magnitude larger.
 
 ---
 
-## 2. 現在の構成の分析
+## 2. Analysis of the Current Design
 
-### 2.1 なぜ補助コミットメントが存在するか
+### 2.1 Why the Auxiliary Commitment Exists
 
-現在の設計では C̃ (制約MLE) と h̃ (置換MLE) をハイパーキューブ上で**事前実体化**している：
+In the current design, C̃ (constraint MLE) and h̃ (permutation MLE) are **materialized in advance** over the hypercube:
 
 ```
 C̃(b) = Σ_j α^j · c_j(wires(b), consts(b))   ∀b ∈ {0,1}^n
 h̃(b) = Σ_j [1/(β + w_j(b) + γ·id_j(b)) - 1/(β + w_j(b) + γ·σ_j(b))]
 ```
 
-C̃ と h̃ はチャレンジ (α, β, γ) に依存するため、メインコミットメント時には計算できない。このため補助WHIRコミットメントが必要となる。
+Because C̃ and h̃ depend on the challenges `(α, β, γ)`, they cannot be computed at the time of the main commitment. That is why an auxiliary WHIR commitment is currently required.
 
-事前実体化の利点は、Sumcheckの次数が **変数あたり2** に固定されること（2つのマルチリニアの積）。1ラウンドあたり3個の評価点で済む。
+The benefit of pre-materialization is that the sumcheck degree stays fixed at **2 per variable**, since it only needs to handle a product of two multilinear polynomials. That means only 3 evaluation points are needed per round.
 
-### 2.2 コスト構造
+### 2.2 Cost Structure
 
 ```
-現在の検証コスト:
-  Sumcheck検証:  n ラウンド × 3 評価点 = 3n フィールド演算
-  メインWHIR:    ~q₁ · (n/ff) Merkleパス検証
-  補助WHIR:      ~q₂ · (n/ff) Merkleパス検証
-  最終チェック:  数回のフィールド演算
+Current verification cost:
+  Sumcheck verification:  n rounds × 3 evaluation points = 3n field operations
+  Main WHIR:              ~q₁ · (n/ff) Merkle path verifications
+  Auxiliary WHIR:         ~q₂ · (n/ff) Merkle path verifications
+  Final check:            a few field operations
 
-  → WHIRが支配的（全体の80-90%）
+  → WHIR dominates (roughly 80-90% of the total)
 ```
 
-**Solidityにおけるガスコスト概算 (n=16, ff=4, λ=90)**:
-- Sumcheck: ~48 フィールド乗算 ≈ ~5,000 gas
-- WHIR 1件: ~23 クエリ × 4ラウンド × Merkle検証 ≈ ~200,000-400,000 gas
-- **WHIR 2件合計: ~400,000-800,000 gas**
+**Approximate Solidity gas cost (n=16, ff=4, λ=90)**:
+- Sumcheck: about 48 field multiplications ≈ about 5,000 gas
+- One WHIR proof: about 23 queries × 4 rounds × Merkle verification ≈ about 200,000-400,000 gas
+- **Two WHIR proofs total: about 400,000-800,000 gas**
 
 ---
 
-## 3. 改善案
+## 3. Proposed Improvements
 
-### 3.1 【主要提案】On-the-fly制約評価によるC̃コミットメントの除去
+### 3.1 Primary Proposal: Eliminate the C̃ Commitment via On-the-Fly Constraint Evaluation
 
-**核心的洞察**: C̃を事前実体化する代わりに、Sumcheck中にゲート制約を直接評価する。
+**Core insight**: instead of pre-materializing C̃, evaluate the gate constraints directly during sumcheck.
 
 ```
-現在:
-  Sumcheck多項式: g(x) = eq(τ,x) · C̃(x) + μ · h̃(x)
-  C̃はMLEなので次数1/変数 → g は次数2/変数
+Current:
+  Sumcheck polynomial: g(x) = eq(τ,x) · C̃(x) + μ · h̃(x)
+  Since C̃ is multilinear, g has degree 2 per variable
 
-提案:
-  Sumcheck多項式: g(x) = eq(τ,x) · Σ_j α^j c_j(wire(x), const(x)) + μ · h̃(x)
-  制約 c_j の次数は最大 d_gate → g は次数 (1 + d_gate)/変数
+Proposal:
+  Sumcheck polynomial: g(x) = eq(τ,x) · Σ_j α^j c_j(wire(x), const(x)) + μ · h̃(x)
+  If each constraint c_j has maximum degree d_gate, then g has degree (1 + d_gate) per variable
 ```
 
-**最終チェックでの違い**:
+**Difference in the final check**:
 
-- **現在**: 検証者は C̃(r) を補助WHIRから取得
-- **提案**: 検証者は `C_raw(r) = Σ_j α^j c_j(wire_j(r), const_j(r))` をメインWHIRの個別評価値から**自ら計算**
+- **Current**: the verifier obtains `C̃(r)` from the auxiliary WHIR proof.
+- **Proposed**: the verifier computes `C_raw(r) = Σ_j α^j c_j(wire_j(r), const_j(r))` directly from the point evaluations opened by the main WHIR proof.
 
-これが可能な理由: Plonky2のゲート制約 `c_j` は既知の多項式関数（ArithmeticGate: `a·b - c`、PoseidonGate: `x^7 - y` 等）であり、wire(r) と const(r) の値がWHIR-boundであれば、検証者は C_raw(r) を信頼できる形で再構成できる。
+This is possible because Plonky2 gate constraints `c_j` are known polynomial functions, for example `ArithmeticGate: a·b - c` and `PoseidonGate: x^7 - y`. If `wire(r)` and `const(r)` are bound by WHIR, the verifier can reconstruct `C_raw(r)` soundly.
 
-**重要な注意**: C̃(r)（ハイパーキューブ上の制約評価テーブルのMLE）と C_raw(r)（制約関数のMLE引数での直接評価）は一般に**異なる値**である。しかしSumcheckの対象多項式を変更することで、最終チェックで必要な値も変わり、C_raw(r) で十分になる。
+**Important note**: `C̃(r)`, meaning the MLE evaluation of the constraint table over the hypercube, and `C_raw(r)`, meaning the direct evaluation of the constraint function on the MLE inputs, are generally **not the same value**. However, if the sumcheck target polynomial is changed accordingly, then the final check also changes, and `C_raw(r)` is sufficient.
 
-#### 次数への影響
+#### Degree impact
 
-| ゲートタイプ | 制約次数 d_gate | Sumcheck次数/変数 | 評価点/ラウンド |
+| Gate type | Constraint degree `d_gate` | Sumcheck degree per variable | Evaluation points per round |
 |-------------|----------------|-------------------|----------------|
 | Arithmetic  | 2              | 3                 | 4              |
 | Poseidon    | 7              | 8                 | 9              |
 | BaseSumGate | 3              | 4                 | 5              |
 
-Poseidonを含む回路では1ラウンドあたり9評価点（現在の3から増加）。ただし:
-- 追加コスト: n ラウンド × 6追加フィールド要素 = 6n × 8 bytes
-- n=16 の場合: 768 bytes の追加プルーフサイズ
-- **WHIRプルーフ1件の削減による節約: 数KB〜数十KB**
+For circuits containing Poseidon, this increases to 9 evaluation points per round, up from 3. Even so:
+- Extra cost: `n` rounds × 6 additional field elements = `6n × 8 bytes`
+- For `n=16`, that is 768 extra bytes of proof data
+- **Savings from removing one WHIR proof: several KB to tens of KB**
 
-#### Prover側の変更
+#### Prover-side changes
 
-現在のProver (`prover.rs:242-253`) は C̃ を事前計算している：
+The current prover (`prover.rs:242-253`) precomputes C̃:
+
 ```rust
 let combined_ext = compute_combined_constraints(...);
 let padded_constraints = flatten_extension_constraints(...);
 ```
 
-提案では、Sumcheckの各ラウンドで制約を直接評価する。Plonky2の `eval_unfiltered(vars: EvaluationVars)` インターフェースは任意のフィールド点で動作するため（論文 §7.2）、インフラは既に存在する。
+Under the proposal, each sumcheck round evaluates constraints directly. Plonky2's `eval_unfiltered(vars: EvaluationVars)` interface already works at arbitrary field points, as noted in paper section 7.2, so the necessary infrastructure already exists.
 
-Proverの計算量は変わらない（O(2^n · #constraints)）が、メモリ使用量が O(2^n) から O(2^{n-round}) に減少する（事前実体化テーブルが不要）。
+The prover's asymptotic work remains the same, `O(2^n · #constraints)`, but memory usage drops from `O(2^n)` to `O(2^{n-round})` because the pre-materialized tables are no longer needed.
 
-### 3.2 【主要提案】GKRベースの置換チェックによるh̃コミットメントの除去
+### 3.2 Primary Proposal: Eliminate the h̃ Commitment via a GKR-Based Permutation Check
 
-h̃ の除去はより困難だが、**GKR (Goldwasser-Kalai-Rothblum) プロトコル**を用いることで可能。
+Removing h̃ is more difficult, but it becomes possible with the **GKR (Goldwasser-Kalai-Rothblum) protocol**.
 
-#### 現在のLogUp置換チェック
+#### Current LogUp permutation check
 
 ```
 Σ_b h(b) = 0
 h(b) = Σ_j [1/(β + w_j(b) + γ·id_j(b)) - 1/(β + w_j(b) + γ·σ_j(b))]
 ```
 
-h̃ は分数式のテーブルのMLEであり、wire(r) と sigma(r) から h̃(r) を再構成できない。
+h̃ is the MLE of a rational-function table, so `h̃(r)` cannot be reconstructed from `wire(r)` and `sigma(r)` alone.
 
-#### GKRベースの代替
+#### GKR-based alternative
 
-マルチセット等価性チェック: `{w_j(b) + γ·id_j(b)} = {w_j(b) + γ·σ_j(b)}` をGKR形式で証明する。
+Prove multiset equality in GKR form:
 
-具体的には、grand product の対数版：
+`{w_j(b) + γ·id_j(b)} = {w_j(b) + γ·σ_j(b)}`
+
+More concretely, use the logarithmic form of the grand product:
 
 ```
 Π_{b,j} (β + w_j(b) + γ·id_j(b)) / (β + w_j(b) + γ·σ_j(b)) = 1
 ```
 
-これを sumcheck-over-hyperplane に分解：
+Then decompose this into a sumcheck-over-hyperplane argument:
 
-1. **レイヤー0**: 各 (b,j) に対して `f(b,j) = (β + w_j(b) + γ·id_j(b))` と `g(b,j) = (β + w_j(b) + γ·σ_j(b))` を定義
-2. **GKR帰納**: 積の等価性を sumcheck の連鎖で wire(r), sigma(r), id(r) の評価に帰着
-3. **最終チェック**: メインWHIRにバインドされた wire(r), sigma(r) の値で検証
+1. **Layer 0**: for each `(b,j)`, define `f(b,j) = (β + w_j(b) + γ·id_j(b))` and `g(b,j) = (β + w_j(b) + γ·σ_j(b))`.
+2. **GKR induction**: reduce equality of products through a chain of sumchecks down to evaluations of `wire(r)`, `sigma(r)`, and `id(r)`.
+3. **Final check**: verify using the `wire(r)` and `sigma(r)` values already bound by the main WHIR proof.
 
-これにより **h̃ のコミットメントが完全に不要**になる。
+This completely removes the need for an h̃ commitment.
 
-#### GKRの追加コスト
+#### Additional GKR cost
 
-- 追加 sumcheck ラウンド: O(log(W_R)) ラウンド（W_R = routed wires 数）
-- 各ラウンド: degree-2 per variable
-- 典型的な W_R = 80 の場合: ~7 追加ラウンド × n 変数 = 7n フィールド演算
+- Additional sumcheck rounds: `O(log(W_R))`, where `W_R` is the number of routed wires
+- Each round remains degree 2 per variable
+- For a typical `W_R = 80`, this is about 7 additional rounds × `n` variables = `7n` field operations
 
-**WHIRプルーフ1件（~200,000-400,000 gas）に対して、GKR追加コストは ~10,000 gas 程度**。
+**Compared with a single WHIR proof at about 200,000-400,000 gas, the added GKR cost is only around 10,000 gas**.
 
-### 3.3 【統合案】単一WHIRプルーフ構成
+### 3.3 Integrated Proposal: A Single-WHIR-Proof Architecture
 
-提案3.1と3.2を組み合わせると：
+Combining proposals 3.1 and 3.2 yields:
 
 ```
-改善後の構成:
-  1. メインWHIR: preprocessed + witness をコミット（唯一のWHIRプルーフ）
-  2. チャレンジ導出: α, β, γ, τ
-  3. On-the-fly制約 Sumcheck: 次数 (1+d_gate)/変数
-  4. GKRベース置換チェック: 追加 sumcheck ラウンド
-  5. メインWHIR: 点 r でオープン
-  6. 最終チェック: 検証者がメインWHIR評価値から全てを再構成
+Improved architecture:
+  1. Main WHIR: commit preprocessed + witness polynomials (the only WHIR proof)
+  2. Derive challenges: α, β, γ, τ
+  3. On-the-fly constraint sumcheck: degree (1 + d_gate) per variable
+  4. GKR-based permutation check: additional sumcheck rounds
+  5. Main WHIR: open at point r
+  6. Final check: the verifier reconstructs everything from the main WHIR evaluations
 
-  WHIRプルーフ: 1個（現在の2個から削減）
+  WHIR proofs: 1 instead of the current 2
 ```
 
-#### コスト比較
+#### Cost comparison
 
-| 項目 | 現在 | 提案 | 差分 |
+| Item | Current | Proposed | Difference |
 |------|------|------|------|
-| WHIRプルーフ数 | 2 | 1 | **-50%** |
-| Sumcheck次数/変数 | 2 | 8 (Poseidon) | +6 |
-| Sumcheck評価点/ラウンド | 3 | 9 | +6 |
-| 追加Sumcheckラウンド | 0 | ~7n (GKR) | +7n |
-| プルーフサイズ (n=16) | ~2 WHIR + 48 elements | ~1 WHIR + ~200 elements | **-30〜40%** |
-| Solidity検証ガス概算 | ~500K-900K | ~300K-500K | **-35〜45%** |
-| Proverメモリ | O(2^n) for C̃, h̃ | O(2^n) for wire MLEs | **-40%** |
+| Number of WHIR proofs | 2 | 1 | **-50%** |
+| Sumcheck degree per variable | 2 | 8 (Poseidon) | +6 |
+| Sumcheck evaluation points per round | 3 | 9 | +6 |
+| Additional sumcheck rounds | 0 | about `7n` (GKR) | +`7n` |
+| Proof size (`n=16`) | about 2 WHIR + 48 elements | about 1 WHIR + about 200 elements | **-30% to -40%** |
+| Solidity verification gas estimate | about 500K-900K | about 300K-500K | **-35% to -45%** |
+| Prover memory | `O(2^n)` for C̃ and h̃ | `O(2^n)` for wire MLEs | **-40%** |
 
 ---
 
-## 4. WHIRパラメータの最適化
+## 4. Optimizing WHIR Parameters
 
-現在のパラメータ (`WhirPCS::for_num_vars`):
+Current parameters (`WhirPCS::for_num_vars`):
 ```
 folding_factor = min(num_vars, 4)
 starting_log_inv_rate = 4  (rate = 1/16)
@@ -193,104 +196,104 @@ security_level = min(90, num_vars * 5 + 10)
 pow_bits = 0
 ```
 
-### 4.1 On-chain最適化のためのrate調整
+### 4.1 Tuning the rate for on-chain verification
 
-Ethereumでのハッシュコスト:
-- Keccak256: ~30 gas (base) + 6 gas/32-byte word
-- SHA256 precompile: 60 gas (base) + 12 gas/32-byte word
+Ethereum hash costs:
+- Keccak256: about 30 gas base + 6 gas per 32-byte word
+- SHA256 precompile: 60 gas base + 12 gas per 32-byte word
 
-クエリ数 q = λ / log₂(1/ρ) なので:
-- rate 1/16 (k=4): q = 90/4 ≈ 23 クエリ
-- rate 1/64 (k=6): q = 90/6 = 15 クエリ  ← **35%削減**
-- rate 1/256 (k=8): q = 90/8 ≈ 12 クエリ ← **48%削減**
+Since `q = λ / log₂(1/ρ)`:
+- rate `1/16` (`k=4`): `q = 90/4 ≈ 23` queries
+- rate `1/64` (`k=6`): `q = 90/6 = 15` queries  ← **35% reduction**
+- rate `1/256` (`k=8`): `q = 90/8 ≈ 12` queries ← **48% reduction**
 
-トレードオフ: rate を下げると初期コミットメントサイズ（Merkle木の葉数）が増加するが、calldataコスト(16 gas/byte) はハッシュコストより安い。
+Tradeoff: lowering the rate increases the initial commitment size, meaning more leaves in the Merkle tree, but calldata cost at 16 gas per byte is cheaper than hash verification cost.
 
-**推奨**: on-chain検証には `starting_log_inv_rate = 6` (rate 1/64) が最適バランス。
+**Recommendation**: for on-chain verification, `starting_log_inv_rate = 6` (rate `1/64`) is the best balance.
 
-### 4.2 Folding factorの調整
+### 4.2 Tuning the folding factor
 
-現在 ff=4。WHIRの各ラウンドで 2^ff = 16 要素のコセットを読み取る。
+The current value is `ff = 4`. Each WHIR round reads a coset of `2^ff = 16` elements.
 
-- ff=3: 5-6 ラウンド、コセット8要素 → ラウンド数増加だがラウンドあたりコスト減
-- ff=4: 4 ラウンド、コセット16要素 → 現在のバランス
-- ff=5: 3 ラウンド、コセット32要素 → ラウンド数減だがラウンドあたりコスト増
+- `ff = 3`: 5-6 rounds, 8-element cosets; more rounds but cheaper per round
+- `ff = 4`: 4 rounds, 16-element cosets; current balance
+- `ff = 5`: 3 rounds, 32-element cosets; fewer rounds but costlier per round
 
-Solidityでは Merkle パス検証のループオーバーヘッドが大きいため、**ラウンド数を減らす方向（ff=5）**が有利な場合がある。実測でのチューニングを推奨。
-
----
-
-## 5. 追加の改善案
-
-### 5.1 Sumcheck-WHIR融合
-
-WHIRの内部構造もSumcheckベース（フォールディング = Sumcheckの一種）。外部Sumcheck（zero-check）とWHIRの内部Sumcheck（proximity test）を**融合**できる可能性がある。
-
-具体的には: Sumcheckの最終ラウンドでの評価点 r をWHIRのフォールディングの開始点として使用し、WHIRの「オープン」フェーズの一部をSumcheckの延長として実行する。これにより数ラウンドのフォールディングを省略できる可能性がある。
-
-これは研究課題レベルだが、実現すれば追加で ~15-20% の検証コスト削減が見込める。
-
-### 5.2 Preprocessedバッチの検証キーへの埋め込み
-
-現在、preprocessed多項式はメインWHIRのsplit-commitに含まれている。Preprocessedは回路固定（verifier keyに含まれる）なので、WHIRプルーフから除外してVKにMerkleルートのみ保持し、メインWHIRをwitness専用にすることで、WHIRプルーフサイズをさらに削減できる。
-
-ただしこれは現在の `verify_split` が2ベクトルを同時証明する構造に依存しているため、WHIRの内部APIの変更が必要。
-
-### 5.3 Extension field embedding の最適化
-
-現在、Goldilocks (64-bit) を `Basefield<Field64_3>` (192-bit cubic extension) にembedしている。WHIRのセキュリティはチャレンジ空間のサイズに依存するが、Goldilocksの64-bitフィールドは sumcheck のセキュリティには十分（soundness error ≈ n·d/2^64）。
-
-Extension fieldの使用がWHIR内部のフォールディング精度に必要なのか、あるいはbase fieldで十分なのかの精査を推奨。Base fieldで動作可能であれば、フィールド演算コストが ~3倍削減される。
+In Solidity, Merkle-path verification has significant loop overhead, so **reducing the number of rounds, for example with `ff = 5`,** can be beneficial. This should be tuned by measurement.
 
 ---
 
-## 6. 実装優先度の提案
+## 5. Additional Improvement Ideas
 
-| 優先度 | 改善案 | 期待効果 | 実装難度 |
+### 5.1 Sumcheck-WHIR fusion
+
+WHIR itself is also sumcheck-based internally, since folding is a form of sumcheck. That suggests a possible **fusion** between the outer sumcheck, used for the zero-check, and WHIR's inner sumcheck, used for the proximity test.
+
+Concretely, the evaluation point `r` from the final sumcheck round could be used as the starting point for WHIR folding, and part of WHIR's opening phase could be executed as an extension of sumcheck. That may eliminate several rounds of folding.
+
+This is still at the research stage, but if it works, it could reduce verification cost by another 15-20%.
+
+### 5.2 Move preprocessed batches into the verification key
+
+Currently, preprocessed polynomials are included in the main WHIR split-commit. Since preprocessed data is circuit-fixed and belongs in the verifier key, it may be possible to remove it from the WHIR proof and store only the Merkle root in the VK, leaving the main WHIR proof witness-only. That would reduce WHIR proof size even further.
+
+However, the current `verify_split` API proves two vectors simultaneously, so this would require changes to WHIR internals.
+
+### 5.3 Optimize extension-field embedding
+
+Currently, Goldilocks (64-bit) is embedded into `Basefield<Field64_3>`, a 192-bit cubic extension. WHIR security depends on the challenge-space size, but the 64-bit Goldilocks field is already sufficient for sumcheck security, with soundness error about `n·d/2^64`.
+
+It is worth checking whether the extension field is truly needed for WHIR folding accuracy, or whether the base field would suffice. If the base field is enough, field arithmetic cost could drop by about 3x.
+
+---
+
+## 6. Suggested Implementation Priorities
+
+| Priority | Improvement | Expected effect | Implementation difficulty |
 |--------|--------|----------|----------|
-| **P0** | On-the-fly制約評価 (§3.1) | WHIR 2→1.5 (C̃除去) | 中 |
-| **P0** | Rate parameter tuning (§4.1) | 検証ガス ~35%削減 | 低 |
-| **P1** | GKRベース置換 (§3.2) | WHIR 2→1 (h̃除去) | 高 |
-| **P1** | Folding factor tuning (§4.2) | 検証ガス ~10-15%削減 | 低 |
-| **P2** | Sumcheck-WHIR融合 (§5.1) | 追加 ~15-20%削減 | 非常に高 |
-| **P2** | Preprocessed分離 (§5.2) | プルーフサイズ削減 | 中 |
-| **P3** | Extension field精査 (§5.3) | フィールド演算 ~3倍削減 | 中 |
+| **P0** | On-the-fly constraint evaluation (§3.1) | WHIR 2→1.5 by removing C̃ | Medium |
+| **P0** | Rate parameter tuning (§4.1) | About 35% lower verification gas | Low |
+| **P1** | GKR-based permutation check (§3.2) | WHIR 2→1 by removing h̃ | High |
+| **P1** | Folding factor tuning (§4.2) | About 10-15% lower verification gas | Low |
+| **P2** | Sumcheck-WHIR fusion (§5.1) | Additional 15-20% reduction | Very high |
+| **P2** | Preprocessed separation (§5.2) | Smaller proof size | Medium |
+| **P3** | Extension-field review (§5.3) | About 3x cheaper field arithmetic | Medium |
 
-**P0を実装するだけでも、on-chain検証コスト30-40%の削減が見込める。**
-
----
-
-## 7. セキュリティに関する注意
-
-### 7.1 On-the-fly制約評価のサウンドネス
-
-On-the-fly方式では、Sumcheckの対象多項式が変わる：
-
-```
-現在:  g(x) = eq(τ,x) · C̃_MLE(x)        (C̃_MLEはマルチリニア)
-提案:  g(x) = eq(τ,x) · C_raw(x)         (C_rawは次数d_gate)
-```
-
-`C̃_MLE(x)` と `C_raw(x)` は {0,1}^n 上では一致する（どちらも C(b) = Σ α^j c_j(wires(b),...)）が、非ブール点では異なる。Sumcheckのサウンドネスは Schwartz-Zippel に依存し、次数 d の多項式に対して soundness error ≤ n·d/|F|。d が増加しても |F| = 2^64 なので十分。
-
-### 7.2 GKRベース置換のサウンドネス
-
-GKRプロトコルのサウンドネスは標準的だが、以下に注意：
-- 各GKRレイヤーの sumcheck チャレンジは Fiat-Shamir で正しくバインドされること
-- Grand productの分子・分母が正しくドメイン分離されること
-- β, γ チャレンジがすべてのwireコミットメント確定後に導出されること
+**Even implementing only P0 is likely to reduce on-chain verification cost by 30-40%.**
 
 ---
 
-## 8. 結論
+## 7. Security Notes
 
-現在の構成は「C̃とh̃の事前実体化 → 補助WHIRコミット → 低次数Sumcheck」という設計思想に基づいている。これはSumcheckの次数を最小化する点では最適だが、**WHIRのクエリコストが支配的な状況では最適ではない**。
+### 7.1 Soundness of on-the-fly constraint evaluation
 
-WHIRプルーフ1件のコストはSumcheckラウンド多項式の次数増加コストを大幅に上回るため、**Sumcheck次数を犠牲にしてでもWHIRプルーフ数を削減する方が全体最適となる**。
+In the on-the-fly design, the target sumcheck polynomial changes:
 
-最も効果的な改善は:
-1. On-the-fly制約評価によるC̃除去（WHIRプルーフサイズ削減 + Proverメモリ削減）
-2. GKRベース置換チェックによるh̃除去（補助WHIRプルーフの完全除去）
-3. WHIR rateパラメータのon-chain最適化
+```
+Current:   g(x) = eq(τ,x) · C̃_MLE(x)        (C̃_MLE is multilinear)
+Proposed:  g(x) = eq(τ,x) · C_raw(x)         (C_raw has degree d_gate)
+```
 
-これらにより、検証コストを現在の **35-50%** に削減できると見込まれる。
+`C̃_MLE(x)` and `C_raw(x)` agree on `{0,1}^n`, since both represent `C(b) = Σ α^j c_j(wires(b),...)`, but they differ off the Boolean hypercube. Sumcheck soundness relies on Schwartz-Zippel, giving soundness error at most `n·d/|F|` for a degree-`d` polynomial. Even if the degree increases, `|F| = 2^64` is still sufficient.
+
+### 7.2 Soundness of the GKR-based permutation check
+
+The GKR protocol is standard, but the following points matter:
+- The sumcheck challenges for each GKR layer must be derived correctly via Fiat-Shamir.
+- The numerator and denominator of the grand product must be domain-separated correctly.
+- The `β` and `γ` challenges must be derived only after all wire commitments are fixed.
+
+---
+
+## 8. Conclusion
+
+The current design follows the philosophy of "pre-materialize C̃ and h̃, commit them in an auxiliary WHIR proof, and keep sumcheck low-degree." That is optimal if the only goal is minimizing sumcheck degree, but it is **not optimal when WHIR query cost is the dominant factor**.
+
+Because one WHIR proof costs far more than the degree increase in sumcheck round polynomials, the globally optimal tradeoff is to **sacrifice sumcheck degree in exchange for fewer WHIR proofs**.
+
+The most effective improvements are:
+1. Remove C̃ via on-the-fly constraint evaluation, reducing WHIR proof size and prover memory.
+2. Remove h̃ via a GKR-based permutation check, eliminating the auxiliary WHIR proof entirely.
+3. Tune WHIR rate parameters specifically for on-chain verification.
+
+Together, these changes are expected to reduce verification cost to roughly **35-50%** of the current design.
