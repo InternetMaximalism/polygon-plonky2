@@ -129,4 +129,4 @@ workspace = true
 
 # For WASM Merkle tree test case
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
