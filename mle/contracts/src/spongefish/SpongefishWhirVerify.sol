@@ -104,7 +104,7 @@ library SpongefishWhirVerify {
         bytes memory hints,
         GoldilocksExt3.Ext3[] memory evaluations,
         WhirParams memory params
-    ) internal pure returns (bool) {
+    ) external pure returns (bool) {
         SpongefishWhir.TranscriptState memory ts = SpongefishWhir.initTranscript(protocolId, sessionId, instance);
 
         VerifyState memory vs;

@@ -107,7 +107,7 @@ library Plonky2GateEvaluator {
         uint256 numSelectors,
         uint256 numConstants,
         uint256 numGateConstraints
-    ) internal pure returns (uint256 flat) {
+    ) external pure returns (uint256 flat) {
         // The inner gate helpers were written against memory arrays. We copy
         // wire / preprocessed arrays once (amortizing across all gate dispatches)
         // but iterate `gates` directly in calldata — the dispatcher only needs
