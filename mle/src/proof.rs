@@ -185,6 +185,18 @@ pub struct MleProof<F: Field> {
     pub witness_eval_value_at_r_inv: F,
     /// Preprocessed batch eval (Goldilocks) at r_inv, for batch consistency.
     pub preprocessed_eval_value_at_r_inv: F,
+    /// Inverse-helpers batch eval (Goldilocks) at r_inv, for batch consistency.
+    ///
+    /// SOUNDNESS (Issue R2-#2 follow-up / audit finding D3): without binding
+    /// the individual `inverse_helpers_evals_at_r_inv` to a WHIR-committed
+    /// value the way witness/preprocessed evals are, `a_j`/`b_j` are free and
+    /// the Φ_inv terminal check is satisfiable by dishonest inverses. This
+    /// batched value ties `Σ inv_batch_r^i · eval_i` to the inverse-helper WHIR
+    /// commitment (`inverse_helpers_whir_eval_at_r_inv_ext3`), mirroring
+    /// `witness_eval_value_at_r_inv`.
+    pub inverse_helpers_eval_value_at_r_inv: F,
+    /// Inverse-helpers batch eval (Goldilocks) at r_h, for batch consistency.
+    pub inverse_helpers_eval_value_at_r_h: F,
     /// Auxiliary batched WHIR evaluation at r_inv (Ext3). Not used by the
     /// terminal check but produced by the multi-point WHIR proof.
     pub aux_whir_eval_at_r_inv_ext3: Field64_3,

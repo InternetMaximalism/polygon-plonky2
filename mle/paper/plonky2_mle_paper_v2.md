@@ -303,9 +303,34 @@ variable. The terminal check at round `n` is
 ```
 
 where `a_j(r_inv), b_j(r_inv), w_j(r_inv), s_j(r_inv)` are PCS-bound MLE
-evaluations and `g_sub(r_inv) := MLE(b ↦ ω^b)(r_inv) = Σ_i (r_inv)_i ·
-ω^{2^i}` is the verifier-computed subgroup MLE evaluation, requiring
-preprocessed `subgroup_gen_powers[i] := ω^{2^i}` (in the verifying key).
+evaluations and
+
+```
+   g_sub(r_inv) := MLE(b ↦ ω^b)(r_inv)
+                 = Π_i ( (1 - (r_inv)_i) + (r_inv)_i · ω^{2^i} )
+```
+
+is the verifier-computed subgroup MLE evaluation, requiring preprocessed
+`subgroup_gen_powers[i] := ω^{2^i}` (in the verifying key). (The multilinear
+extension of the tensor-structured table `b ↦ ω^b = Π_i (ω^{2^i})^{b_i}`
+factors as a product of the per-coordinate affine interpolants
+`(1 - (r_inv)_i) + (r_inv)_i · ω^{2^i}`; an earlier draft's sum form
+`Σ_i (r_inv)_i · ω^{2^i}` was incorrect off the hypercube. The reference
+implementation uses the product form.)
+
+**Binding of the inverse-helper openings (critical).** The values
+`a_j(r_inv), b_j(r_inv)` (and `a_j(r_h), b_j(r_h)` in §4.2.3) are "PCS-bound"
+*only if* the verifier explicitly checks batch consistency of the opened
+individual inverse-helper evaluations against the WHIR-committed inverse
+polynomial — exactly as it does for the witness and preprocessed vectors
+(§4.3). Concretely, the verifier MUST check
+`Σ_j r_inv_batch^j · (opened a_j / b_j) = P_inv(r_inv)` where `P_inv` is the
+inverse-helper batched polynomial bound by WHIR. Omitting this check leaves
+`a_j, b_j` unconstrained beyond the single terminal identity above, so a
+prover can supply *dishonest* inverses that still satisfy the terminal check,
+breaking the permutation argument. This binding is not optional book-keeping;
+it is the sole mechanism that ties the terminal-check inputs to the committed
+`A_j, B_j`.
 
 #### 4.2.3 Linear Sumcheck on H = A − B
 
@@ -496,6 +521,14 @@ Fixed at circuit-compile time:
                 From these, reconstruct evaluations at each of r_inv, r_h, r_gate
                 via the inverse of the multi-point batching reduction (linear
                 interpolation of the eq-coefficients along the batching point).
+7b.[Batch consistency — REQUIRED] For EACH opened vector, check that the
+                claimed individual evaluations fold to the WHIR-bound batched
+                value:  Σ_i batch_r_vec^i · eval_i(r_pt) == P_vec(r_pt).
+                This MUST be performed for the witness, preprocessed AND the
+                **inverse-helper** vectors at r_inv and r_h. The inverse-helper
+                check is the sole binding of a_j(r), b_j(r) to the committed
+                A_j, B_j; skipping it makes step 8's terminal check vacuous
+                (a prover may supply dishonest inverses — see §4.2.2).
 8. [Inverse terminal] Recompute pred_inv per §4.2.2; check pred_inv == S_n_inv.
 9. [Linear H terminal] Recompute pred_h per §4.2.3; check pred_h == S_n_h.
 10. [Gate terminal]    Recompute pred_gate per §4.1; check pred_gate == S_n_gate.

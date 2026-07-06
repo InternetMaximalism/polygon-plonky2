@@ -84,6 +84,12 @@ contract MleVerifier {
         // Batched Goldilocks evals at r_inv (for batch consistency vs WHIR)
         uint256 witnessEvalValueAtRInv;
         uint256 preprocessedEvalValueAtRInv;
+        // Inverse-helpers batched Goldilocks evals (audit finding D3): bind the
+        // individual a_j/b_j evals (inverseHelpersEvalsAtRInv / AtRH) to the
+        // inverse-helper WHIR commitment, mirroring witness/preprocessed. Without
+        // this, a_j/b_j are unconstrained and dishonest inverses pass Φ_inv.
+        uint256 inverseHelpersEvalValueAtRInv;
+        uint256 inverseHelpersEvalValueAtRH;
         // Per-point Ext3 WHIR evals: 4 vectors × 3 points = 12 entries
         // Layout [point][vector]: point 0 = r_gate, 1 = r_inv, 2 = r_h
         // Vectors: 0 = preprocessed, 1 = witness, 2 = aux, 3 = inverse_helpers
@@ -246,6 +252,22 @@ contract MleVerifier {
             _computeBatchedEval(proof.witnessIndividualEvalsAtRInv, proof.witnessBatchR)
                 == proof.witnessEvalValueAtRInv,
             "wit batch r_inv"
+        );
+
+        // ── audit finding D3: inverse-helper batch consistency at r_inv and r_h.
+        // Binds the individual a_j/b_j evals (fed into the Φ_inv / Φ_h terminal
+        // checks below) to the inverse-helper WHIR commitment, exactly as
+        // witness/preprocessed are bound. Without these, a_j/b_j are free and a
+        // dishonest inverse satisfies Φ_inv, breaking the permutation argument.
+        require(
+            _computeBatchedEval(proof.inverseHelpersEvalsAtRInv, proof.inverseHelpersBatchR)
+                == proof.inverseHelpersEvalValueAtRInv,
+            "inv batch r_inv"
+        );
+        require(
+            _computeBatchedEval(proof.inverseHelpersEvalsAtRH, proof.inverseHelpersBatchR)
+                == proof.inverseHelpersEvalValueAtRH,
+            "inv batch r_h"
         );
 
         // ── v2 logUp: terminal checks for Φ_inv and Φ_h

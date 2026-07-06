@@ -1269,6 +1269,8 @@
   },
   "witnessEvalValueAtRInv": "12274052086941578456",
   "preprocessedEvalValueAtRInv": "9670782117219102569",
+  "inverseHelpersEvalValueAtRInv": "8034408643493262887",
+  "inverseHelpersEvalValueAtRH": "6057584982280454408",
   "auxWhirEvalAtRInv": {
     "c0": "15198471812011436146",
     "c1": "0",
