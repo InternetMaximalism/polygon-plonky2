@@ -659,9 +659,7 @@ pub fn proof_to_fixture<F: RichField + Extendable<D> + PrimeField64, const D: us
         inverse_helpers_eval_value_at_r_inv: field_to_string(
             proof.inverse_helpers_eval_value_at_r_inv,
         ),
-        inverse_helpers_eval_value_at_r_h: field_to_string(
-            proof.inverse_helpers_eval_value_at_r_h,
-        ),
+        inverse_helpers_eval_value_at_r_h: field_to_string(proof.inverse_helpers_eval_value_at_r_h),
         aux_whir_eval_at_r_inv: ext3_to_fixture(&proof.aux_whir_eval_at_r_inv_ext3),
         aux_whir_eval_at_r_h: ext3_to_fixture(&proof.aux_whir_eval_at_r_h_ext3),
         witness_whir_eval_at_r_h: ext3_to_fixture(&proof.witness_whir_eval_at_r_h_ext3),
