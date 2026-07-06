@@ -301,6 +301,10 @@ contract MleE2ETestShim is Test {
         proof.gSubEvalAtRInv = vm.parseUint(vm.parseJsonString(json, ".gSubEvalAtRInv"));
         proof.witnessEvalValueAtRInv = vm.parseUint(vm.parseJsonString(json, ".witnessEvalValueAtRInv"));
         proof.preprocessedEvalValueAtRInv = vm.parseUint(vm.parseJsonString(json, ".preprocessedEvalValueAtRInv"));
+        proof.inverseHelpersEvalValueAtRInv =
+            vm.parseUint(vm.parseJsonString(json, ".inverseHelpersEvalValueAtRInv"));
+        proof.inverseHelpersEvalValueAtRH =
+            vm.parseUint(vm.parseJsonString(json, ".inverseHelpersEvalValueAtRH"));
         proof.inverseHelpersWhirEvalAtRGate = _parseExt3(json, ".inverseHelpersWhirEvalAtRGate");
         proof.preprocessedWhirEvalAtRInv = _parseExt3(json, ".preprocessedWhirEvalAtRInv");
         proof.witnessWhirEvalAtRInv = _parseExt3(json, ".witnessWhirEvalAtRInv");

@@ -396,7 +396,18 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         "preprocessed_individual_evals_at_r_inv has wrong length"
     );
 
-    // 5g: Inverse helpers batch consistency at r_inv
+    // 5g: Inverse helpers batch consistency at r_inv.
+    //
+    // SOUNDNESS (audit finding D3): the folded value MUST be checked against
+    // the WHIR-bound `inverse_helpers_eval_value_at_r_inv`. Previously this
+    // fold was computed and discarded, leaving `a_j`/`b_j` unconstrained by
+    // any commitment — a malicious prover could then supply dishonest inverses
+    // that still satisfy the Φ_inv terminal check (see terminal at Step 7),
+    // breaking the permutation argument. This `ensure!` closes the binding
+    // chain: individual evals → batched value → inverse-helper WHIR commitment,
+    // mirroring witness (5e) and preprocessed (5f). By Schwartz-Zippel over
+    // `inverse_helpers_batch_r`, the individual a_j/b_j are then uniquely
+    // determined by the committed P_inv polynomial.
     ensure!(
         proof.inverse_helpers_evals_at_r_inv.len() == 2 * proof.num_routed_wires,
         "inverse_helpers_evals_at_r_inv has wrong length"
@@ -407,22 +418,26 @@ pub fn mle_verify<F: RichField + Extendable<D>, const D: usize>(
         expected_inv_at_r_inv += r_pow * eval;
         r_pow *= proof.inverse_helpers_batch_r;
     }
-    // The Goldilocks batch consistency together with the WHIR ext3 binding +
-    // Schwartz-Zippel on inverse_helpers_batch_r ensures the individual evals
-    // are uniquely determined by the committed P_inv polynomial.
+    ensure!(
+        expected_inv_at_r_inv == proof.inverse_helpers_eval_value_at_r_inv,
+        "Inverse helpers batch mismatch at r_inv"
+    );
 
-    // 5h: Inverse helpers batch consistency at r_h
+    // 5h: Inverse helpers batch consistency at r_h (same binding as 5g).
     ensure!(
         proof.inverse_helpers_evals_at_r_h.len() == 2 * proof.num_routed_wires,
         "inverse_helpers_evals_at_r_h has wrong length"
     );
-    let mut _expected_inv_at_r_h = F::ZERO;
+    let mut expected_inv_at_r_h = F::ZERO;
     let mut r_pow = F::ONE;
     for &eval in &proof.inverse_helpers_evals_at_r_h {
-        _expected_inv_at_r_h += r_pow * eval;
+        expected_inv_at_r_h += r_pow * eval;
         r_pow *= proof.inverse_helpers_batch_r;
     }
-    let _ = expected_inv_at_r_inv; // silence unused-binding warnings (used via WHIR)
+    ensure!(
+        expected_inv_at_r_h == proof.inverse_helpers_eval_value_at_r_h,
+        "Inverse helpers batch mismatch at r_h"
+    );
 
     // 5j: Batch consistency — witness at r_gate_v2 (Issue R2-#1).
     ensure!(
@@ -830,6 +845,62 @@ mod tests {
             assert!(
                 result.is_err(),
                 "Tampered const eval at r_gate_v2 must be rejected"
+            );
+        }
+    }
+
+    /// Audit finding D3: tampering with an inverse-helper individual eval at
+    /// `r_inv` (without a matching change to the WHIR-bound batched value) must
+    /// be rejected by the new 5g batch-consistency check. Before the fix, this
+    /// fold was discarded, so a dishonest `a_j`/`b_j` still satisfying the
+    /// Φ_inv terminal relation would be accepted — a permutation-argument
+    /// soundness break.
+    #[test]
+    fn test_tampered_inverse_helpers_evals_at_r_inv_rejected() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(x, F::from_canonical_u64(6)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(7)).unwrap();
+
+        let mut timing = TimingTree::default();
+        let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+
+        // Sanity: untampered proof verifies.
+        assert!(mle_verify::<F, D>(&common_data, &vk, &proof).is_ok());
+
+        if !proof.inverse_helpers_evals_at_r_inv.is_empty() {
+            proof.inverse_helpers_evals_at_r_inv[0] += F::ONE;
+            let result = mle_verify::<F, D>(&common_data, &vk, &proof);
+            assert!(
+                result.is_err(),
+                "Tampered inverse-helper eval at r_inv must be rejected (D3)"
+            );
+        }
+    }
+
+    /// Audit finding D3: same guard at `r_h` (Φ_h terminal inputs).
+    #[test]
+    fn test_tampered_inverse_helpers_evals_at_r_h_rejected() {
+        let (prover_data, common_data, x, y) = build_mul_circuit();
+        let vk = mle_setup::<F, C, D>(&prover_data, &common_data);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(x, F::from_canonical_u64(8)).unwrap();
+        pw.set_target(y, F::from_canonical_u64(9)).unwrap();
+
+        let mut timing = TimingTree::default();
+        let mut proof = mle_prove::<F, C, D>(&prover_data, &common_data, pw, &mut timing).unwrap();
+
+        assert!(mle_verify::<F, D>(&common_data, &vk, &proof).is_ok());
+
+        if !proof.inverse_helpers_evals_at_r_h.is_empty() {
+            proof.inverse_helpers_evals_at_r_h[0] += F::ONE;
+            let result = mle_verify::<F, D>(&common_data, &vk, &proof);
+            assert!(
+                result.is_err(),
+                "Tampered inverse-helper eval at r_h must be rejected (D3)"
             );
         }
     }

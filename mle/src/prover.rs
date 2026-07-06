@@ -710,6 +710,21 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         preprocessed_eval_value_at_r_inv += r_pow * eval;
         r_pow *= batch_r_pre;
     }
+    // Inverse-helpers batched Goldilocks evals (audit finding D3): bind the
+    // individual a_j/b_j evals to the inverse-helper WHIR commitment via the
+    // same batch-consistency mechanism used for witness/preprocessed.
+    let mut inverse_helpers_eval_value_at_r_inv = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &inverse_helpers_evals_at_r_inv {
+        inverse_helpers_eval_value_at_r_inv += r_pow * eval;
+        r_pow *= inv_helpers_batch_r;
+    }
+    let mut inverse_helpers_eval_value_at_r_h = F::ZERO;
+    let mut r_pow = F::ONE;
+    for &eval in &inverse_helpers_evals_at_r_h {
+        inverse_helpers_eval_value_at_r_h += r_pow * eval;
+        r_pow *= inv_helpers_batch_r;
+    }
 
     // ═══════════════════════════════════════════════════════════════════
     // Phase 7: Multi-point WHIR prove — open all 4 vectors at 3 points.
@@ -847,6 +862,8 @@ pub fn mle_prove_from_tables<F: RichField + Extendable<D>, const D: usize>(
         preprocessed_whir_eval_at_r_inv_ext3,
         witness_eval_value_at_r_inv,
         preprocessed_eval_value_at_r_inv,
+        inverse_helpers_eval_value_at_r_inv,
+        inverse_helpers_eval_value_at_r_h,
         aux_whir_eval_at_r_inv_ext3,
         aux_whir_eval_at_r_h_ext3,
         witness_whir_eval_at_r_h_ext3,
